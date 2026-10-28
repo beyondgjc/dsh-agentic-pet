@@ -1,0 +1,4 @@
+---
+description: "The dsh desktop pet: an agentic pet plugin that serves the pet renderer over the web composition, drives it from in-process dsh events, and answers approvals and questions from the desktop."
+kind: "package-bundle"
+---

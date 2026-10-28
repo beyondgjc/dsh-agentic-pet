@@ -1,0 +1,41 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/main.ts",
+    "src/host-child.ts",
+    "src/preload.ts"
+  ],
+  "references": [
+    {
+      "path": "../../vendor/cordis"
+    },
+    {
+      "path": "../../apps/cli"
+    },
+    {
+      "path": "../../packages/boot/app-boot"
+    },
+    {
+      "path": "../../packages/client/connection/tsconfig.host.json"
+    },
+    {
+      "path": "../../packages/host/webserver"
+    },
+    {
+      "path": "../../packages/typert/registry"
+    },
+    {
+      "path": "../../packages/util/home-paths"
+    },
+    {
+      "path": "../../packages/util/official-bundles"
+    }
+  ]
+}

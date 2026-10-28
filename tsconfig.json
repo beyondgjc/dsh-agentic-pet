@@ -1,0 +1,14 @@
+{
+  "//": [
+    "Archival mirror only — the real build (tsc -b, producing lib/types) runs in",
+    "the dsh monorepo workspace where the tsconfig.base and the package references",
+    "(vendor/cordis, client/connection, host/webserver, core/tools) live.",
+    "scripts/sync-from-monorepo.cmd carries sources and build outputs here and",
+    "deliberately skips this file."
+  ],
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [ "src" ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "@deepseek-ai/dsh-pet",
+  "description": "Pet window carrier spawned by the dsh-pet-app bundle inside its host runtime (attach-only; Electron provided by the host binary)",
+  "version": "0.2.1-rc.3",
+  "private": true,
+  "type": "module",
+  "main": "lib/main.js"
+}

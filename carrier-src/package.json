@@ -1,0 +1,36 @@
+{
+  "name": "@deepseek-ai/dsh-pet",
+  "description": "Electron desktop pet carrier: a transparent always-on-top client surface for the dsh pet profile",
+  "version": "0.2.1-rc.3",
+  "private": true,
+  "license": "MIT",
+  "author": {
+    "name": "Hangzhou DeepSeek Artificial Intelligence Co., Ltd."
+  },
+  "type": "module",
+  "main": "lib/main.js",
+  "scripts": {
+    "build": "tsc -b && tsc -p tsconfig.renderer.json && vite build",
+    "dev": "tsx scripts/dev.ts",
+    "start": "tsx scripts/dev.ts --skip-build"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "workspace:~",
+    "@deepseek-ai/dsh": "workspace:*",
+    "@deepseek-ai/dsh-api-gateway": "workspace:*",
+    "@deepseek-ai/dsh-app-boot": "workspace:*",
+    "@deepseek-ai/dsh-client-connection": "workspace:*",
+    "@deepseek-ai/dsh-home-paths": "workspace:*",
+    "@deepseek-ai/dsh-official-bundles": "workspace:*",
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*",
+    "@deepseek-ai/dsh-typert-registry": "workspace:*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "workspace:~",
+    "@deepseek-ai/dsh-api-session-controller": "workspace:*",
+    "@types/node": "^22.20.1",
+    "electron": "^44.7.0",
+    "typescript": "^6.0.3",
+    "vite": "8.2.2"
+  }
+}

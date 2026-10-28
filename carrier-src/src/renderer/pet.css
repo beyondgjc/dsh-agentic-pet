@@ -1,0 +1,153 @@
+/* dsh-pet renderer: a transparent window whose only opaque pixels are the pet
+   sprite and its interaction bubbles. The window background stays fully
+   transparent; the pet body is the drag region. */
+
+:root {
+  color-scheme: light;
+  /* The pet page is served raw (no web boot injections), but if the platform
+     ever adds index transforms again they must not repaint this window. */
+  background: transparent !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  overflow: hidden;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  user-select: none;
+}
+
+#root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── pet body ─────────────────────────────────────────────────────────── */
+
+#pet {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: 340px;
+  height: 200px;
+  /* The pet body drags the window via pointer gestures (main-process
+     setPosition); app-region proved inert under transparent+ignore toggling. */
+  cursor: grab;
+}
+
+#pet video {
+  /* Hidden frame source: the stage canvas renders the keyed frames. */
+  display: none;
+}
+
+#pet canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* ── bubble ───────────────────────────────────────────────────────────── */
+
+#bubble {
+  position: absolute;
+  left: 50%;
+  bottom: 224px;
+  transform: translateX(-50%);
+  width: 400px;
+  max-height: 300px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  /* Above the pet sprite regardless of DOM order: an interaction bubble the
+     body paints over is unreadable and its buttons die under the canvas. */
+  z-index: 10;
+  background: #ffffff;
+  border: 1px solid #d8e0ea;
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(30, 40, 60, 0.18);
+  padding: 12px 14px;
+  color: #1c2733;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+#bubble[hidden] {
+  display: none;
+}
+
+.bubble-title {
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.bubble-detail {
+  color: #5a6b7d;
+  margin: 0 0 8px;
+  word-break: break-all;
+}
+
+.bubble-question {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.bubble-question .bubble-detail {
+  font-weight: 400;
+  margin: 2px 0 6px;
+}
+
+.bubble-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.bubble-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.bubble-button {
+  border: 1px solid #c9d4e0;
+  border-radius: 8px;
+  background: #f4f7fa;
+  color: #1c2733;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.bubble-button:hover {
+  background: #e8eff6;
+}
+
+.bubble-button.primary {
+  background: #2f6fed;
+  border-color: #2f6fed;
+  color: #ffffff;
+}
+
+.bubble-button.primary:hover {
+  background: #255fd2;
+}
+
+.bubble-button.danger:hover {
+  background: #fbe9e9;
+}
+
+/* Queued-behind-this-one counter: interactions that arrived while this
+   bubble was up and will show the moment it settles or is withdrawn. */
+.bubble-queue {
+  color: #8a97a5;
+  font-size: 12px;
+  margin: 8px 0 0;
+}

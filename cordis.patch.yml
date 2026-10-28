@@ -1,0 +1,11 @@
+# The dsh-pet-app bundle patch: the pet surface over the web composition layer.
+# Applied after dsh-web-app; the webserver, Connection authentication, and the
+# API gateway rows all exist by the time this layer composes. The pet-surface
+# row owns the `/pet` prefix route serving the desktop pet's renderer dist.
+#
+# A patch replaces the targeted row's whole `config`, so each row below
+# restates every key it owns.
+
+- insert:
+    - id: pet-surface
+      name: 'dsh-agentic-pet'
