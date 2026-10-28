@@ -16,7 +16,7 @@ import { app, BrowserWindow, ipcMain, Menu, protocol, screen, session } from 'el
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
@@ -29,6 +29,52 @@ const ASSET_SCHEME = 'pet-asset';
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 /** The dsh home this carrier shares with the driver (manifest, settings). */
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh');
+/**
+ * The character the pet page displays. Keep in sync with
+ * src/renderer/main.ts (no shared module: the renderer is a separate vite
+ * build; the catalog scan and the /action validation must cover the SAME
+ * character the renderer can actually play).
+ */
+const CHARACTER = 'shenshen';
+/**
+ * Derive the action catalog from the media tree: categories are the
+ * directories under characters/<id>/videos, clips are the .webm files inside
+ * them (one nested level is flattened — events/balance). Scanning disk (not
+ * a checked-in index) keeps an asset-package update from requiring a code
+ * change. Failure degrades to an empty catalog — the pet then advertises
+ * only the universal `celebrate` alias, i.e. yesterday's behavior.
+ */
+async function scanActionCatalog() {
+    const videosRoot = join(resolveAssetsRoot(), CHARACTER, 'videos');
+    const entries = [];
+    const seen = new Set();
+    const collect = async (dir, relativeDir) => {
+        const items = await readdir(dir, { withFileTypes: true }).catch(() => null);
+        if (items === null)
+            return;
+        for (const item of items) {
+            if (item.isDirectory()) {
+                await collect(join(dir, item.name), relativeDir === '' ? item.name : `${relativeDir}/${item.name}`);
+                continue;
+            }
+            if (!item.name.toLowerCase().endsWith('.webm'))
+                continue;
+            const id = item.name.slice(0, -5);
+            if (id === '' || seen.has(id))
+                continue; // first wins; clip ids are unique in practice
+            seen.add(id);
+            entries.push({ id, dir: relativeDir, file: id });
+        }
+    };
+    const categories = await readdir(videosRoot, { withFileTypes: true }).catch(() => null);
+    if (categories === null)
+        return entries; // no media: celebrate-only catalog
+    for (const category of categories) {
+        if (category.isDirectory())
+            await collect(join(videosRoot, category.name), category.name);
+    }
+    return entries;
+}
 /**
  * The window's one canonical size: creation and every drag setBounds pin it.
  * A position-only setPosition re-sends whatever size DWM last re-measured the
@@ -323,7 +369,11 @@ async function main() {
     // token URL re-mints everything the page needs, so persistence is worthless.
     await session.defaultSession.clearStorageData({ storages: ['cookies'] });
     registerAssetProtocol();
-    console.log(`[pet] assets root: ${resolveAssetsRoot()}`);
+    const actionCatalog = await scanActionCatalog();
+    // The advertised menu: the universal celebrate alias first, then every
+    // clip id the media tree holds.
+    const actionIds = ['celebrate', ...actionCatalog.map(entry => entry.id)];
+    console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)}`);
     let handle;
     const attachUrl = process.env.DSH_PET_URL ?? await readLocatorUrl();
     let authenticated;
@@ -388,6 +438,10 @@ async function main() {
     await window.loadURL(petSurfaceUrl(authenticated)).catch((error) => {
         console.error('[pet] the pet surface failed to load:', String(error));
     });
+    // Hand the renderer the action catalog (its /action name resolution and
+    // idle theater both consume it). The page has finished loading here, so
+    // its listener is registered and nothing is lost.
+    window.webContents.send('pet:catalog', { character: CHARACTER, actions: actionCatalog });
     // Click-through is decided by the MAIN process: setIgnoreMouseEvents(forward)
     // does not deliver forwarded moves on this Electron/Windows combination, so
     // the renderer never sees the cursor. The main process knows the window
@@ -597,7 +651,9 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/capabilities') {
             send(200, {
                 states: ['idle', 'thinking', 'working', 'error'],
-                actions: ['celebrate'],
+                // The pet's own action menu, scanned from the media tree at boot —
+                // celebrate first (the universal alias), then every playable clip.
+                actions: actionIds,
                 interactions: ['approval', 'question'],
                 events: ['touch'],
                 endpoints: ['capabilities', 'status', 'state', 'action', 'say', 'interaction', 'events'],
@@ -656,13 +712,21 @@ async function main() {
                 return;
             }
             if (url.pathname === '/action') {
+                // Validate at the boundary: the driver pre-validates against
+                // /capabilities, but a raw consumer gets this pet's own menu here.
+                // A rejected request is NOT recorded as an action (no requestId, no
+                // forwarding) so the wait machinery never waits on nothing.
+                const requested = typeof body.action === 'string' ? body.action : 'unknown';
+                if (requested !== 'celebrate' && !actionCatalog.some(entry => entry.id === requested)) {
+                    send(422, { ok: false, error: `unknown action "${requested}"`, available: actionIds });
+                    return;
+                }
                 // Record the request observably: one-shot playback is fire-and-forget
                 // and the renderer's override is not a reliable witness (it may
                 // set/clear within one tick) — consumers poll lastAction/lastActionAt
                 // instead of guessing from override. The requestId threads through
                 // the renderer's completion report, so lastActionDone names the
                 // REQUESTED action and pet_do(wait) can match precisely.
-                const requested = typeof body.action === 'string' ? body.action : 'unknown';
                 const requestId = randomUUID();
                 lastAction = requested;
                 lastActionAt = Date.now();

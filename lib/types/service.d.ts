@@ -12,6 +12,7 @@
  * @module dsh-agentic-pet/service
  */
 import { Context, Service } from '@deepseek-ai/cordis';
+import { type PetCapabilities } from './actions.ts';
 import { type PetEntry } from './registry.ts';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -81,6 +82,14 @@ export declare abstract class PetService extends Service {
     abstract snapshot(entry: PetEntry): Promise<PetSnapshot>;
     /** One JSON call to a pet endpoint, with a single fresh-discovery retry. */
     abstract call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>;
+    /**
+     * The pet's advertised capabilities (`/capabilities`, e.g. its action
+     * catalog) with a short TTL cache — the catalog changes only when a pet
+     * restarts, and the TTL bounds how long a swapped pet's old menu shadows
+     * the new one. Never throws: an unreachable pet reads as "publishes
+     * nothing" (`actions: null`), which callers must treat as celebrate-only.
+     */
+    capabilities(_entry: PetEntry): Promise<PetCapabilities | null>;
 }
 /** Defensive field extraction: implementations may omit or mistype anything. */
 export declare function normalizeStatus(id: string, raw: Record<string, unknown>, online: boolean): PetSnapshot;
@@ -92,10 +101,13 @@ export declare function normalizeStatus(id: string, raw: Record<string, unknown>
  */
 export declare class PetHttpService extends PetService {
     readonly home: string;
+    private readonly capsCache;
+    private static readonly CAPS_TTL_MS;
     constructor(ctx: Context, home?: string);
     list(): Promise<PetEntry[]>;
     route(boundPetId?: string): Promise<PetEntry | undefined>;
     snapshot(entry: PetEntry): Promise<PetSnapshot>;
+    capabilities(entry: PetEntry): Promise<PetCapabilities>;
     call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>;
 }
 /**

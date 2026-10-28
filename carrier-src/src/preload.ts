@@ -33,6 +33,11 @@ contextBridge.exposeInMainWorld('petDesktop', {
   onAction(listener: (action: unknown) => void): void {
     ipcRenderer.on('pet:action', (_event, action) => { listener(action) })
   },
+  /** The action catalog scanned by the main process at boot (what /action
+   * names resolve against, and the idle theater's pool). */
+  onCatalog(listener: (catalog: unknown) => void): void {
+    ipcRenderer.on('pet:catalog', (_event, catalog) => { listener(catalog) })
+  },
   onInteraction(listener: (request: unknown) => void): void {
     ipcRenderer.on('pet:interaction', (_event, request) => { listener(request) })
   },

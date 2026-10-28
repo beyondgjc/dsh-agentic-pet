@@ -15,6 +15,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
+import { normalizeCapabilities, type PetCapabilities } from './actions.ts'
 import { readAllPets, routePet, type PetEntry } from './registry.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -91,6 +92,17 @@ export abstract class PetService extends Service {
 
   /** One JSON call to a pet endpoint, with a single fresh-discovery retry. */
   abstract call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>
+
+  /**
+   * The pet's advertised capabilities (`/capabilities`, e.g. its action
+   * catalog) with a short TTL cache — the catalog changes only when a pet
+   * restarts, and the TTL bounds how long a swapped pet's old menu shadows
+   * the new one. Never throws: an unreachable pet reads as "publishes
+   * nothing" (`actions: null`), which callers must treat as celebrate-only.
+   */
+  async capabilities(_entry: PetEntry): Promise<PetCapabilities | null> {
+    return null
+  }
 }
 
 /** Defensive field extraction: implementations may omit or mistype anything. */
@@ -160,6 +172,13 @@ export function normalizeStatus(id: string, raw: Record<string, unknown>, online
  * class does not change for it.
  */
 export class PetHttpService extends PetService {
+  // Capabilities TTL cache: the catalog is boot-derived per pet process, so
+  // 30s bounds how long a restarted pet's old menu lingers. Failures cache
+  // as "publishes nothing" — a transient offline moment degrades to
+  // celebrate-only for at most one TTL, never to a thrown tool error.
+  private readonly capsCache = new Map<string, { at: number; caps: PetCapabilities }>()
+  private static readonly CAPS_TTL_MS = 30_000
+
   constructor(ctx: Context, readonly home: string = petHome()) {
     super(ctx)
   }
@@ -185,6 +204,23 @@ export class PetHttpService extends PetService {
     }
   }
 
+  override async capabilities(entry: PetEntry): Promise<PetCapabilities> {
+    const hit = this.capsCache.get(entry.id)
+    if (hit !== undefined && Date.now() - hit.at < PetHttpService.CAPS_TTL_MS) return hit.caps
+    let caps: PetCapabilities
+    try {
+      const response = await fetch(`http://127.0.0.1:${String(entry.port)}/capabilities`, {
+        signal: AbortSignal.timeout(1500),
+      })
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+      caps = normalizeCapabilities(await response.json())
+    } catch {
+      caps = { actions: null }
+    }
+    this.capsCache.set(entry.id, { at: Date.now(), caps })
+    return caps
+  }
+
   async call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const current = attempt === 0
@@ -196,7 +232,11 @@ export class PetHttpService extends PetService {
       try {
         const response = await fetch(`http://127.0.0.1:${String(current.port)}${path}`, init)
         if (!response.ok) {
-          throw new Error(`pet control ${path} answered HTTP ${String(response.status)}`)
+          // The pet's own error body (e.g. the unknown-action menu from
+          // /action) is the useful half of the message — surface it instead
+          // of the bare status line.
+          const detail = await response.text().catch(() => '')
+          throw new Error(`pet control ${path} answered HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 300)}` : ''}`)
         }
         return await response.json()
       } catch (error: unknown) {

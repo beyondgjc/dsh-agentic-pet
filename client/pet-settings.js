@@ -164,7 +164,17 @@ window.__ModuleLoader__.load({
               if (Number.isFinite(v)) update({ proactivity: { idleThresholdMinutes: v } })
             } }),
             '分钟后允许问候'),
-          h(Hint, null, '自主表达功能开发中：开关与参数会保存，功能上线后生效。')),
+          h('div', { style: row }, '空闲小剧场（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {
+            update({ proactivity: { idleAnimation: !(pro.idleAnimation !== false) } })
+          } })),
+          h('div', { style: row },
+            '两次小剧场至少间隔',
+            h('input', { style: inputStyle, value: String(pro.idleAnimationGapMinutes ?? 10), onChange: function (e) {
+              var v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v)) update({ proactivity: { idleAnimationGapMinutes: v } })
+            } }),
+            '分钟'),
+          h(Hint, null, '自主表达（说话）功能开发中：开关与参数会保存，功能上线后生效。空闲小剧场已生效：宠物空闲时随机播放小动画，改动即时推送。')),
 
         // ── 调试 ──
         h(Section, { title: '调试' },

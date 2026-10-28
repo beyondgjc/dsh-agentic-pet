@@ -19,11 +19,16 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PetService } from './service.ts'
 
-/** The proactivity switches the upcoming v1 scheduler will consume. */
+/** The proactivity switches. `enabled`/`cooldownMinutes`/
+ * `idleThresholdMinutes` are the upcoming v1 speech scheduler's; the
+ * `idleAnimation` pair is consumed TODAY by the renderer's idle theater
+ * (riding to the pet on /state pushes). */
 interface ProactivitySettings {
   enabled?: boolean
   cooldownMinutes?: number
   idleThresholdMinutes?: number
+  idleAnimation?: boolean
+  idleAnimationGapMinutes?: number
 }
 
 /** Debug switches read by the carrier at startup (CDP needs a restart). */
@@ -37,7 +42,13 @@ interface PetSettings {
 }
 
 const DEFAULT_SETTINGS: PetSettings = {
-  proactivity: { enabled: false, cooldownMinutes: 10, idleThresholdMinutes: 5 },
+  proactivity: {
+    enabled: false,
+    cooldownMinutes: 10,
+    idleThresholdMinutes: 5,
+    idleAnimation: true,
+    idleAnimationGapMinutes: 10,
+  },
   debug: { cdp: false },
 }
 
@@ -106,6 +117,9 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     if (cooldown !== undefined) proactivity.cooldownMinutes = cooldown
     const idle = clampNumber(p.idleThresholdMinutes, 1, 240)
     if (idle !== undefined) proactivity.idleThresholdMinutes = idle
+    if (typeof p.idleAnimation === 'boolean') proactivity.idleAnimation = p.idleAnimation
+    const gap = clampNumber(p.idleAnimationGapMinutes, 1, 120)
+    if (gap !== undefined) proactivity.idleAnimationGapMinutes = gap
   }
   const patchDebug = patch.debug
   if (typeof patchDebug === 'object' && patchDebug !== null) {
@@ -232,6 +246,10 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     const current = await readSettings()
     const next = mergeSettings(current, patch as Record<string, unknown>)
     await writeFile(settingsPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+    // The driver re-pushes the autonomy payload to the pets on this event —
+    // a changed switch reaches the renderer without waiting for the next
+    // session state transition.
+    ctx.emit('pet-settings/changed')
     writeJson(res, 200, { ok: true, settings: next })
   })
 

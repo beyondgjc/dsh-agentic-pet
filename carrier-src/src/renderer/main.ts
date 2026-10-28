@@ -21,6 +21,7 @@ interface PetGlobals {
     dragEnd(): void
     onState(listener: (state: unknown) => void): void
     onAction(listener: (action: unknown) => void): void
+    onCatalog(listener: (catalog: unknown) => void): void
     onInteraction(listener: (request: unknown) => void): void
     onInteractionCancel(listener: (notice: { id: string }) => void): void
     answerInteraction(id: string, answer: unknown): void
@@ -46,6 +47,7 @@ const ANIMATION: Record<string, AnimationName[]> = {
   working: [
     { dir: 'random', file: '工作状态-忙碌点按' },
     { dir: 'random', file: '写代码' },
+    { dir: 'random', file: '原地敲击桌面互动' },
   ],
   waiting: [{ dir: 'turn', file: '东张西望' }],
   error: [{ dir: 'random', file: '被吓一跳' }],
@@ -61,6 +63,10 @@ const ANIMATION: Record<string, AnimationName[]> = {
   ],
 }
 
+// The random-pool clips that double as STATE animations — excluded from the
+// idle theater so a working/thinking clip never pops up while resting.
+const THEATER_EXCLUDED = new Set(['深度思考碎碎念', '工作状态-忙碌点按', '写代码', '原地敲击桌面互动', '被吓一跳'])
+
 function requireElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector)
   if (element === null) throw new Error(`pet renderer: missing element ${selector}`)
@@ -74,10 +80,12 @@ video.addEventListener('error', () => {
 const stage = requireElement<HTMLCanvasElement>('#stage')
 const bubble = requireElement<HTMLDivElement>('#bubble')
 
-function animationSource(key: string, index = 0): string {
+function animationSource(key: string): string {
   const names = ANIMATION[key]
   if (names === undefined) throw new Error(`pet renderer: unknown animation ${key}`)
-  const name = names[index % names.length]
+  // A random draw per (re)render: state re-entries and post-one-shot returns
+  // rotate through the pool instead of always showing its first member.
+  const name = names[Math.floor(Math.random() * names.length)] ?? names[0]
   return `pet-asset:///${CHARACTER}/videos/${name.dir}/${encodeURIComponent(name.file)}.webm`
 }
 
@@ -167,11 +175,10 @@ function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
 
 let baseState: BaseState = 'idle'
 let override: 'waiting_approval' | 'waiting_question' | null = null
-let workingIndex = 0
 let errorUntil = 0
 
-function play(key: string, index = 0): void {
-  const source = animationSource(key, index)
+function play(key: string): void {
+  const source = animationSource(key)
   if (video.src !== source) {
     video.src = source
     // State animations loop (a state persists until an event changes it);
@@ -187,10 +194,11 @@ function render(): void {
   } else if (override !== null) {
     play('waiting')
   } else if (baseState === 'working') {
-    play('working', workingIndex)
+    play('working')
   } else {
     play(baseState)
   }
+  scheduleTheater()
   reportStatus()
 }
 
@@ -199,7 +207,12 @@ function setBase(state: BaseState): void {
   if (baseState === state) return
   const finishedWork = baseState === 'working' && state === 'idle'
   baseState = state
-  if (state === 'working') workingIndex += 1
+  if (state !== 'idle' && theaterTimer !== undefined) {
+    // Leaving idle cancels the pending theater clip; re-entering idle
+    // re-arms through render().
+    clearTimeout(theaterTimer)
+    theaterTimer = undefined
+  }
   if (finishedWork) {
     // One celebration hop when a turn lands back at idle.
     playOneShot('celebrate')
@@ -222,9 +235,11 @@ function playOneShot(key: string, requestId?: string): void {
 function playOneShotAt(name: AnimationName, requestId?: string): void {
   const source = `pet-asset:///${CHARACTER}/videos/${name.dir}/${encodeURIComponent(name.file)}.webm`
   if (video.src === source) return
+  oneShotActive = true
   const handBack = (): void => {
     video.onended = null
     video.onerror = null
+    oneShotActive = false
     // Report completion with the clip's own duration — the one observable
     // trace that a one-shot actually FINISHED (override/animation are not).
     globals.petDesktop?.reportActionDone({
@@ -245,6 +260,72 @@ function flashError(): void {
   errorUntil = Date.now() + 6_000
   render()
   setTimeout(render, 6_100)
+}
+
+// ── action catalog + idle theater ───────────────────────────────────────────
+
+/** The pet's playable clips, scanned by the main process at boot and pushed
+ * over IPC: what /action names resolve against and where the idle theater
+ * draws from. Populated by the `pet:catalog` push (main sends it once the
+ * page has loaded). */
+const actionCatalog = new Map<string, AnimationName>()
+
+globals.petDesktop?.onCatalog?.((catalog) => {
+  const entries = (catalog as { actions?: unknown }).actions
+  if (!Array.isArray(entries)) return
+  actionCatalog.clear()
+  for (const entry of entries) {
+    const record = entry as { id?: unknown; dir?: unknown; file?: unknown }
+    if (typeof record.id !== 'string' || typeof record.dir !== 'string' || typeof record.file !== 'string') continue
+    actionCatalog.set(record.id, { dir: record.dir, file: record.file })
+  }
+  scheduleTheater()
+})
+
+/**
+ * The idle theater (the animation half of the settings page's 自主表达):
+ * while idle — no override bubble, no error flash, no one-shot in flight —
+ * the pet occasionally plays a clip drawn from its own catalog's random
+ * pool. Config arrives on /state pushes (`autonomy`, read by the driver
+ * from pet-settings.json); a pet that never receives a push keeps the
+ * theater off, so behavior is unchanged until the driver speaks.
+ */
+interface TheaterConfig {
+  enabled: boolean
+  gapMinutes: number
+}
+
+let theater: TheaterConfig = { enabled: false, gapMinutes: 10 }
+let theaterTimer: ReturnType<typeof setTimeout> | undefined
+let theaterLastFile: string | undefined
+// A one-shot in flight (touch reaction, /action, a theater clip itself): the
+// pending timer must not hijack the stage mid-clip.
+let oneShotActive = false
+
+function theaterPool(): AnimationName[] {
+  return [...actionCatalog.values()].filter(entry =>
+    entry.dir === 'random'
+    && !THEATER_EXCLUDED.has(entry.file)
+    && entry.file !== theaterLastFile)
+}
+
+function scheduleTheater(): void {
+  if (theaterTimer !== undefined) return
+  if (!theater.enabled || baseState !== 'idle' || override !== null || Date.now() < errorUntil) return
+  if (theaterPool().length === 0) return
+  theaterTimer = setTimeout(() => {
+    theaterTimer = undefined
+    if (!theater.enabled || baseState !== 'idle' || override !== null || oneShotActive || Date.now() < errorUntil) {
+      scheduleTheater() // conditions changed while pending: re-arm from now
+      return
+    }
+    const pool = theaterPool()
+    const pick = pool[Math.floor(Math.random() * pool.length)]
+    if (pick !== undefined) {
+      theaterLastFile = pick.file
+      playOneShotAt(pick)
+    }
+  }, Math.max(1, theater.gapMinutes) * 60_000)
 }
 
 // ── bubbles ─────────────────────────────────────────────────────────────────
@@ -498,7 +579,27 @@ const reportStatus = (): void => {
 }
 
 globals.petDesktop?.onState((message) => {
-  const state = (message as { state?: unknown }).state
+  const payload = message as { state?: unknown; autonomy?: unknown }
+  // The autonomy half rides on every push: the driver reads the settings
+  // page's idle-theater switches fresh each time. A change re-arms the
+  // timer (or disarms it when switched off).
+  const autonomy = payload.autonomy
+  if (typeof autonomy === 'object' && autonomy !== null) {
+    const record = autonomy as { idleAnimation?: unknown; gapMinutes?: unknown }
+    const enabled = typeof record.idleAnimation === 'boolean' ? record.idleAnimation : theater.enabled
+    const gapMinutes = typeof record.gapMinutes === 'number' && Number.isFinite(record.gapMinutes)
+      ? Math.min(120, Math.max(1, Math.round(record.gapMinutes)))
+      : theater.gapMinutes
+    if (enabled !== theater.enabled || gapMinutes !== theater.gapMinutes) {
+      theater = { enabled, gapMinutes }
+      if (theaterTimer !== undefined) {
+        clearTimeout(theaterTimer)
+        theaterTimer = undefined
+      }
+      scheduleTheater()
+    }
+  }
+  const state = payload.state
   if (state === 'idle' || state === 'thinking' || state === 'working') setBase(state)
   else if (state === 'error') flashError()
 })
@@ -508,6 +609,13 @@ globals.petDesktop?.onAction((message) => {
   const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined
   if (action === 'celebrate') playOneShot('celebrate', requestId)
   else if (action === 'error') flashError()
+  else if (typeof action === 'string') {
+    // Named clip playback: the main process validated the name against its
+    // catalog before forwarding, so an unresolvable id here can only come
+    // from a stale catalog — ignoring it keeps the state machine intact.
+    const hit = actionCatalog.get(action)
+    if (hit !== undefined) playOneShotAt(hit, requestId)
+  }
 })
 /** Keep the queue badge (`.bubble-queue`, appended inside the bubble) in
  * step with the queue: create/update/remove in one place. */

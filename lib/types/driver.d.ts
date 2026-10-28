@@ -14,6 +14,7 @@ declare module '@deepseek-ai/cordis' {
         'api-session/activity'(sessionId: string, updatedAt: number): void;
         'api-session/error'(sessionId: string, message: string): void;
         'api-session/removed'(sessionId: string): void;
+        'pet-settings/changed'(): void;
         'approval/request'(request: {
             toolName?: string;
             reason?: string;
