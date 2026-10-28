@@ -1,4 +1,5 @@
 node_modules/
 *.tgz
+pnpm-lock.yaml
 carrier/assets/
 tsconfig.tsbuildinfo
