@@ -259,6 +259,12 @@ export class PetHttpService extends PetService {
 export function createUnregisteredPetHttp(home: string = petHome()): PetService {
   const instance = Object.create(PetHttpService.prototype) as PetHttpService
   ;(instance as { home: string }).home = home
+  // Object.create skips the constructor, so CLASS FIELDS never initialize:
+  // `capsCache` is one, and `capabilities()` dereferenced it as undefined
+  // (Cannot read properties of undefined (reading 'get')) — only the
+  // capability callers (pet_do, pet_state {actions:true}) blew up. Every new
+  // instance field on PetHttpService must be initialized HERE too.
+  ;(instance as unknown as { capsCache: Map<string, { at: number; caps: PetCapabilities }> }).capsCache = new Map()
   return instance
 }
 
