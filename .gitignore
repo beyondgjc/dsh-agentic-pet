@@ -3,3 +3,4 @@ node_modules/
 pnpm-lock.yaml
 carrier/assets/
 tsconfig.tsbuildinfo
+.idea/
