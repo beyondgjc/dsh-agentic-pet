@@ -249,6 +249,20 @@ export class PetHttpService extends PetService {
 }
 
 /**
+ * A PetService-shaped instance WITHOUT the Service registration side effect.
+ * The preset realm rejects any non-isolated service publication from its rows
+ * ("Preset services require isolate realms") — and a same-named registration
+ * would also overwrite the host row's store slot. The pet tools only consume
+ * the four methods, which are stateless over the on-disk registry, so a
+ * prototype instance with `home` set behaves identically to the registered one.
+ */
+export function createUnregisteredPetHttp(home: string = petHome()): PetService {
+  const instance = Object.create(PetHttpService.prototype) as PetHttpService
+  ;(instance as { home: string }).home = home
+  return instance
+}
+
+/**
  * Construct and register the HTTP provider, returning the INSTANCE for
  * in-bundle consumers. The Service constructor registers synchronously
  * ("registered immediately" — vendor/cordis), but `ctx.petService` GETTER

@@ -111,6 +111,15 @@ export declare class PetHttpService extends PetService {
     call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>;
 }
 /**
+ * A PetService-shaped instance WITHOUT the Service registration side effect.
+ * The preset realm rejects any non-isolated service publication from its rows
+ * ("Preset services require isolate realms") — and a same-named registration
+ * would also overwrite the host row's store slot. The pet tools only consume
+ * the four methods, which are stateless over the on-disk registry, so a
+ * prototype instance with `home` set behaves identically to the registered one.
+ */
+export declare function createUnregisteredPetHttp(home?: string): PetService;
+/**
  * Construct and register the HTTP provider, returning the INSTANCE for
  * in-bundle consumers. The Service constructor registers synchronously
  * ("registered immediately" — vendor/cordis), but `ctx.petService` GETTER

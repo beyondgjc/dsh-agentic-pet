@@ -15,7 +15,7 @@
 import { appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { PetHttpService, petHome } from './service.ts'
+import { createUnregisteredPetHttp, petHome } from './service.ts'
 import { registerPetTools } from './driver.ts'
 
 /** Diagnostic trace into the driver log: the desktop host swallows stdout, so
@@ -27,18 +27,18 @@ const trace = (line: string): void => {
 /**
  * Register the five pet tools for sessions mounted with the pet preset.
  *
- * The service instance is constructed HERE, not read from the main entry: a
+ * The service instance is assembled HERE, not read from the main entry (a
  * Cordis service registered on the main row's fiber context is invisible to
- * the preset subtree (sibling branches do not see each other's stores —
- * verified: `ctx.get('petService')` resolved ABSENT from inside the mount).
- * PetHttpService is stateless over the on-disk registry, so a second instance
- * scoped to this row behaves identically.
+ * the preset subtree — sibling branches do not see each other's stores) and
+ * NOT registered on this row either (a same-named non-isolated service would
+ * overwrite the host row's store slot and fail the preset realm's leak check).
+ * createUnregisteredPetHttp returns the interface without any registration.
  */
 export default class PetTools {
   static inject = ['tools']
 
   constructor(ctx: Context) {
-    registerPetTools(ctx, petHome(), new PetHttpService(ctx, petHome()))
+    registerPetTools(ctx, petHome(), createUnregisteredPetHttp(petHome()))
     trace('registerPetTools returned')
   }
 }
