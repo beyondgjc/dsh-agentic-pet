@@ -16,20 +16,26 @@
     "./client": "./client/pet-settings.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./src/*": "./src/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./tools": "./lib/tools.js",
+    "./presets/*.patch.yml": "./presets/*.patch.yml"
   },
   "files": [
-    "lib/index.js",
+    "lib/*.js",
     "cordis.patch.yml",
     "client/**/*",
     "lib/types/**/*.d.ts",
     "carrier/**/*",
-    "!carrier/assets/**"
+    "!carrier/assets/**",
+    "presets/**/*"
   ],
   "license": "MIT",
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/pet.patch.yml"
+      ]
     },
     "client": {
       "platform": "web",

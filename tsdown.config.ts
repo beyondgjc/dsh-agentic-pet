@@ -18,7 +18,7 @@ import { decoratorPlugin } from './vendor/typert-plugin/tsdown-plugin.js'
  * different plugin locations on purpose.
  */
 export default defineConfig({
-  entry: ['lib/types/index.js'],
+  entry: ['lib/types/index.js', 'lib/types/tools.js'],
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

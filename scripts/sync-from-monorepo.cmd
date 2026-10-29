@@ -25,7 +25,10 @@ node -e "const fs=require('fs');const f=process.cwd()+'/package.json';const j=JS
 ')"
 
 rem ── plugin build outputs ──────────────────────────────────────────────────
-copy /y "%MONO%\packages\bundle\pet-app\lib\index.js" "%HERE%\lib\index.js" >nul
+rem whole lib/ tree /MIR: dual tsdown entries emit index.js + tools.js + a
+rem hashed shared chunk; presets/ carries the pet preset declaration.
+robocopy "%MONO%\packages\bundle\pet-app\lib" "%HERE%\lib" /MIR /NFL /NDL /NJH /NJS
+robocopy "%MONO%\packages\bundle\pet-app\presets" "%HERE%\presets" /MIR /NFL /NDL /NJH /NJS
 robocopy "%MONO%\packages\bundle\pet-app\lib\types" "%HERE%\lib\types" /MIR /NFL /NDL /NJH /NJS
 
 rem ── carrier build outputs (release artifacts) ────────────────────────────

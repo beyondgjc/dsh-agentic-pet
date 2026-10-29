@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { installPetDriver, registerPetTools } from './driver.ts'
+import { installPetDriver } from './driver.ts'
 import { installSettingsPage } from './settings-page.ts'
 import { installPetService } from './service.ts'
 
@@ -357,9 +357,9 @@ export function apply(ctx: Context): void {
 
   installPetDriver(ctx, dirname(petLocatorPath()), pet)
 
-  // The model-expression layer over the same control interface.
-  registerPetTools(ctx, dirname(petLocatorPath()), pet)
-
+  // The model-expression tools moved behind the pet preset (presets/pet.patch.yml
+  // composes the ./tools entry) — sessions mounting other presets keep a clean
+  // tool catalog. The host-side glue above stays unconditional.
   // The desktop sidebar settings page's host half (client half: ./client/).
   installSettingsPage(ctx, dirname(petLocatorPath()), pet)
   // Withdraw on dispose while still our own entry, so a shut-down runtime does

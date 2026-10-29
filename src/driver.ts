@@ -723,7 +723,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         // footgun).
         const actionsById = new Map<string, readonly string[] | null>()
         if (args.actions === true) {
-          await Promise.all(pets.map(async entry => {
+          await Promise.all(pets.map(async (entry) => {
             const caps = await pet.capabilities(entry)
             actionsById.set(entry.id, caps?.actions ?? null)
           }))
@@ -735,7 +735,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const mood = ledger.affection >= 80 ? 'happy' : ledger.affection >= 40 ? 'content' : 'neutral'
           ledgers[id] = { ...ledger, mood }
         }
-        const petsOut = states.map(state => {
+        const petsOut = states.map((state) => {
           const actions = actionsById.get(state.id)
           return actions === undefined ? state : { ...state, actions }
         })

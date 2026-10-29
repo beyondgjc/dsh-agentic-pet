@@ -21,21 +21,23 @@ describe('dsh-pet-app bundle', () => {
       readFileSync(resolve(root, 'package.json'), 'utf8'),
     ) as {
       dependencies?: Record<string, string>
-      dsh?: { bundle?: { patch?: string } }
+      dsh?: { bundle?: { patch?: string | string[] } }
     }
-    expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
+    // The patch manifest is an array: the main glue layer plus the pet preset
+    // declaration (presets/pet.patch.yml), mirroring the web-app presets split.
+    const patchList = manifest.dsh?.bundle?.patch
+    const patches = typeof patchList === 'string' ? [patchList] : patchList
+    expect(patches).toEqual(['./cordis.patch.yml', './presets/pet.patch.yml'])
     // entryListSchema is a js-yaml schema: load with it so `!!js` expressions
     // in the patch parse exactly the way the Loader parses them.
-    const parsed = yaml.load(
-      readFileSync(resolve(root, manifest.dsh!.bundle!.patch!), 'utf8'),
-      { schema: entryListSchema },
-    ) as unknown
-    expect(Array.isArray(parsed)).toBe(true)
-    const rows = (parsed as { insert?: { id?: string; name?: string }[] }[]).flatMap(
-      patch => patch.insert ?? [],
-    )
-    expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ id: 'pet-surface', name: 'dsh-agentic-pet' })
+    const rows = patches!.flatMap(file =>
+      (yaml.load(readFileSync(resolve(root, file), 'utf8'), { schema: entryListSchema }) as unknown) as {
+        insert?: { id?: string; name?: string }[]
+      }[],
+    ).flatMap(patch => patch.insert ?? [])
+    expect(rows.map(row => row.id)).toEqual(['pet-surface', 'preset-pet'])
+    expect(rows[0]).toMatchObject({ name: 'dsh-agentic-pet' })
+    expect(rows[1]).toMatchObject({ name: '@deepseek-ai/dsh-agent-preset' })
   })
 })
 
