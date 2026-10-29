@@ -7,9 +7,17 @@
  * @module dsh-agentic-pet/tools
  */
 
+import { appendFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { petHome, type PetService } from './service.ts'
 import { registerPetTools } from './driver.ts'
+
+/** Diagnostic trace into the driver log: the desktop host swallows stdout, so
+ * the preset-row activation path is otherwise invisible. */
+const trace = (line: string): void => {
+  void appendFile(join(petHome(), 'pet-driver.log'), `${new Date().toISOString()} pet-tools ${line}\n`, 'utf8').catch(() => {})
+}
 
 /**
  * Register the five pet tools for sessions mounted with the pet preset. The
@@ -25,10 +33,12 @@ export default class PetTools {
 
   apply(): void {
     const pet = this.ctx.get('petService') as PetService | undefined
+    trace(`activated petService=${pet === undefined ? 'ABSENT' : 'present'}`)
     if (pet === undefined) {
       console.error('pet-surface tools: petService absent (compose the dsh-agentic-pet main entry); registering nothing')
       return
     }
     registerPetTools(this.ctx, petHome(), pet)
+    trace('registerPetTools returned')
   }
 }
