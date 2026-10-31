@@ -6,10 +6,13 @@
  * catalog drift between pet implementations must die.
  * @module dsh-agentic-pet/actions
  */
-/** A pet's advertised capabilities. `actions: null` = the pet publishes no
- * catalog (a legacy implementation): only the universal `celebrate` alias is
- * then available. An advertised-but-empty array is folded into null. */
+/** A pet's advertised capabilities. `contractVersion: null` = a legacy
+ * implementation that predates the version field (v1 semantics: seven
+ * endpoints, no /world). `actions: null` = the pet publishes no catalog (a
+ * legacy implementation): only the universal `celebrate` alias is then
+ * available. An advertised-but-empty array is folded into null. */
 export interface PetCapabilities {
+    readonly contractVersion: number | null;
     readonly actions: readonly string[] | null;
 }
 /** Defensive extraction from a raw /capabilities payload: implementations

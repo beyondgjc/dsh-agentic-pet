@@ -23,21 +23,29 @@ describe('dsh-pet-app bundle', () => {
       dependencies?: Record<string, string>
       dsh?: { bundle?: { patch?: string | string[] } }
     }
-    // The patch manifest is an array: the main glue layer plus the pet preset
-    // declaration (presets/pet.patch.yml), mirroring the web-app presets split.
+    // The patch manifest is an array: the main glue layer plus the two pet
+    // preset declarations (presets/pet.patch.yml full catalog; presets/
+    // pet-inner-voice.patch.yml the trimmed self-turn catalog), mirroring the
+    // web-app presets split.
     const patchList = manifest.dsh?.bundle?.patch
     const patches = typeof patchList === 'string' ? [patchList] : patchList
-    expect(patches).toEqual(['./cordis.patch.yml', './presets/pet.patch.yml'])
+    expect(patches).toEqual(['./cordis.patch.yml', './presets/pet.patch.yml', './presets/pet-inner-voice.patch.yml'])
     // entryListSchema is a js-yaml schema: load with it so `!!js` expressions
     // in the patch parse exactly the way the Loader parses them.
     const rows = patches!.flatMap(file =>
       (yaml.load(readFileSync(resolve(root, file), 'utf8'), { schema: entryListSchema }) as unknown) as {
-        insert?: { id?: string; name?: string }[]
+        insert?: { id?: string; name?: string; config?: { id?: string; plugins?: { id?: string }[] } }
       }[],
     ).flatMap(patch => patch.insert ?? [])
-    expect(rows.map(row => row.id)).toEqual(['pet-surface', 'preset-pet'])
+    expect(rows.map(row => row.id)).toEqual(['pet-surface', 'preset-pet', 'preset-pet-inner-voice'])
     expect(rows[0]).toMatchObject({ name: 'dsh-agentic-pet' })
     expect(rows[1]).toMatchObject({ name: '@deepseek-ai/dsh-agent-preset' })
+    // The inner-voice preset is expression-only by design: persona + the pet
+    // tools + time context + compaction, never the work-tool rows.
+    expect(rows[2]).toMatchObject({ name: '@deepseek-ai/dsh-agent-preset' })
+    const voiceRow = (rows[2] as { config?: { id?: string; plugins?: { id?: string }[] } }).config
+    expect(voiceRow?.id).toBe('pet-inner-voice')
+    expect(voiceRow?.plugins?.map(plugin => plugin.id)).toEqual(['persona', 'pet-tools', 'time-context', 'compaction'])
   })
 })
 

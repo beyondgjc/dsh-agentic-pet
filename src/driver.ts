@@ -8,12 +8,26 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import { existsSync } from 'node:fs'
 import { appendFile, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { formatAvailableActions, resolveActionRequest } from './actions.ts'
+import {
+  buildChatPrompt,
+  buildGreetPrompt,
+  buildTouchPrompt,
+  buildWakePrompt,
+  loadInnerVoiceStore,
+  mintVoiceSessionId,
+  moodOf,
+  readInnerVoiceConfig,
+  saveInnerVoiceStore,
+  touchPartWording,
+  type InnerVoiceStore,
+} from './inner-voice.ts'
 import { notifyPets, routePet, type PetEntry } from './registry.ts'
 import type { PetService } from './service.ts'
 
@@ -102,13 +116,295 @@ function ledgerFileFor(home: string, petId: string): string {
   return join(home, 'pet-affection.d', `${petId}.json`)
 }
 
+/** Local-time log stamp: the driver log is the user's primary debugging
+ * tool, so timestamps show the USER's wall clock, not UTC (toISOString's Z
+ * form read 8h off and cost a confusion round). Sortable, zero-padded. */
+export const logStamp = (): string => {
+  const d = new Date()
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 const driverLog = (home: string, line: string): void => {
-  void appendFile(join(home, 'pet-driver.log'), `${new Date().toISOString()} ${line}
+  void appendFile(join(home, 'pet-driver.log'), `${logStamp()} ${line}
 `, 'utf8').catch(() => {})
+}
+
+/** The one /events read both consumers share (§6 v4): the ledger loop
+ * holds (`hold` seconds — the server clamps to ≤30s), the digest reads
+ * immediately. Wire shapes normalize here; the digest's independent
+ * cursor and the ledger loop's cursor stay per-consumer by design. */
+async function readEvents(pet: PetService, entry: PetEntry, since: number, holdSeconds: number): Promise<{
+  events: Array<{ seq: number; type: string; part?: string | undefined; text?: string | undefined; at: number }>
+  latest: number
+}> {
+  const hold = holdSeconds > 0 ? `&hold=${String(holdSeconds)}` : ''
+  const payload = await pet.call(entry, `/events?since=${String(since)}${hold}`) as {
+    events?: Array<{ seq?: unknown; type?: unknown; part?: unknown; text?: unknown; at?: unknown }>
+    latest?: unknown
+  }
+  const events = (Array.isArray(payload.events) ? payload.events : []).map(event => ({
+    seq: typeof event.seq === 'number' ? event.seq : 0,
+    // §6: a missing type reads as touch (the migration-window shorthand).
+    type: typeof event.type === 'string' ? event.type : 'touch',
+    ...(typeof event.part === 'string' ? { part: event.part } : {}),
+    ...(typeof event.text === 'string' ? { text: event.text } : {}),
+    at: typeof event.at === 'number' ? event.at : Date.now(),
+  }))
+  return { events, latest: typeof payload.latest === 'number' ? payload.latest : since }
+}
+
+/**
+ * Structural face of the host's session-controller service the inner voice
+ * needs (`ctx.get('sessionController')`; @Remote('create'/'prompt'/'rename')).
+ * Declared locally for the same compilation-face-isolation reason as the
+ * api-session events below — this bundle must not pull the controller's
+ * transitive source graph into its types.
+ */
+interface SessionControllerFace {
+  create(request: { sessionId?: string; agentPreset?: string }): Promise<{ sessionId: string }>
+  prompt(
+    request: {
+      requestId: string
+      sessionId: string
+      mode: 'queue' | 'steer'
+      content: ReadonlyArray<{ type: 'text'; text: string }>
+    },
+    signal: AbortSignal,
+  ): Promise<unknown>
+  rename(request: { sessionId: string; title: string }): Promise<unknown>
+}
+
+/**
+ * Structural face of the host's workspace-controller service (the archive
+ * authority on CURRENT monorepo builds): `follow()` streams a baseline plus
+ * ordered increments whose `archived`/`replace`/`baseline` frames carry the
+ * complete archived Session set. WARNING: the INSTALLED desktop host
+ * (0.2.1-rc.3) predates that contract — its follow produces no archive
+ * frames, so on today's runtime this subscription is inert and the
+ * host archive sweep is the only
+ * working dead-session channel. The subscription stays: a host upgrade
+ * lights it up with zero changes here. Declared locally for the same
+ * face-isolation reason as SessionControllerFace.
+ */
+interface WorkspaceControllerFace {
+  follow(signal: AbortSignal): AsyncIterable<unknown>
+}
+
+/**
+ * Structural face of the host's workspace REGISTRY — the storage-level
+ * service BEHIND the workspace controller, present in the INSTALLED host
+ * (same bridge shape the qqbot bundle uses, duck-typed fail-soft). This is
+ * the antidote to the "new session black hole": a session that belongs to NO
+ * workspace is invisible in the user's sidebar AND gets swept into the
+ * archive by the host — attachSession is what makes her visible and
+ * permanent.
+ */
+interface WorkspaceRegistryFace {
+  create(cwd: string): Promise<{ attachSession?(sessionId: string): Promise<void> } | undefined>
+}
+
+/** The archived Session id set carried by one follow frame; undefined for
+ * frames that say nothing about archives (upsert/remove/order/pinned). */
+function archivedIdsOf(frame: unknown): readonly string[] | undefined {
+  if (typeof frame !== 'object' || frame === null) return undefined
+  const record = frame as { type?: unknown; value?: unknown; archivedSessionIds?: unknown }
+  const ids = record.type === 'baseline' || record.type === 'replace'
+    ? (typeof record.value === 'object' && record.value !== null
+      ? (record.value as { archivedSessionIds?: unknown }).archivedSessionIds
+      : undefined)
+    : record.type === 'archived' ? record.archivedSessionIds : undefined
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : undefined
+}
+
+/**
+ * Inner-voice runtime state (docs/inner-voice.md). Module-level because TWO
+ * registration seams share it: installPetDriver fills and drives it, while
+ * registerPetTools (the pet preset's own row, a different fiber) reads the
+ * owner map in resolveTarget and reports pet_say arrivals. installPetDriver
+ * resets everything on entry, so a re-install re-initializes cleanly.
+ */
+const voiceOwners = new Map<string, string>() // sessionId → petId
+const voicePendingUntil = new Map<string, number>() // petId → epoch ms
+const voiceLastSpokeAt = new Map<string, number>() // petId → epoch ms (pet_say arrivals)
+const voiceLastTouchReplyAt = new Map<string, number>() // petId → epoch ms
+const voiceNextWakeAt = new Map<string, number>() // petId → epoch ms
+// Boot-greeting latch: one hello per dsh start, cleared on driver install.
+const voiceGreetedOnce = new Set<string>()
+// Dead-session detection (§ archive black hole): counts relative to the last
+// pet_say, NOT per-prompt windows — consecutive admissions renew a per-prompt
+// deadline forever, which is exactly what a user rapidly re-sending into a
+// dead session does. Two admissions unanswered for 90s since the FIRST one
+// retire the session.
+// The most recent UNANSWERED prompt per pet (text + who drove it): a retire
+// must not swallow the user's words — the retire paths re-submit it into
+// the fresh session. Cleared on pet_say (answered) and on manual binding
+// checks that clear the ledger.
+const voiceLastPrompt = new Map<string, { text: string; userDriven: boolean }>()
+// Manually bound sessions (petId → sessionId, from innerVoice.boundSessions):
+// the user's own conversations the inner voice lives in — highest priority,
+// never created/renamed/retired by the driver. A cache refreshed on install
+// and on every settings change, so the synchronous stall path can consult it.
+const voiceBoundSessions = new Map<string, string>()
+const voiceWakeTimer: { timer: ReturnType<typeof setTimeout> | undefined } = { timer: undefined }
+let voiceStore: InnerVoiceStore = { sessions: {}, generations: {} }
+let voiceController: SessionControllerFace | undefined
+// The bound session's most recent activity timestamp, kept for the wake
+// prompt's "the user is busy working" fact. Module-level for the same reason
+// as the maps: triggerWake reads it from outside installPetDriver's closure.
+let voiceUserActivityAt: number | undefined
+
+const isVoiceSession = (sessionId: string): boolean => voiceOwners.has(sessionId)
+
+/** pet_say arrival hook: a spoken bubble is both the pending-lock release and
+ * the truth of "when the pet last spoke" (a prompt being accepted is not).
+ * Returns whether a pending inner-voice turn was actually released (the
+ * caller logs it — the user-session says stay out of the log). */
+function markVoiceSpoke(petId: string): boolean {
+  const hadPending = (voicePendingUntil.get(petId) ?? 0) > Date.now()
+  voicePendingUntil.delete(petId)
+  voiceLastPrompt.delete(petId) // answered: nothing to re-submit
+  voiceLastSpokeAt.set(petId, Date.now())
+  return hadPending
 }
 
 export function installPetDriver(ctx: Context, home: string, pet: PetService): void {
   driverLog(home, 'installPetDriver entered')
+  // Inner-voice (re)initialization: a re-install must not inherit stale
+  // owners from a previous driver generation. The store on disk is the
+  // durable petId→sessionId truth; the maps are rebuilt from it.
+  voiceOwners.clear()
+  voicePendingUntil.clear()
+  voiceLastSpokeAt.clear()
+  voiceLastTouchReplyAt.clear()
+  voiceNextWakeAt.clear()
+  voiceGreetedOnce.clear()
+  voiceLastPrompt.clear()
+  voiceBoundSessions.clear()
+  // generations live in the STORE (persisted): a reboot AND a plugin
+  // reinstall both re-read them from disk, so minted ids never collide with
+  // archived ones across restarts.
+  if (voiceWakeTimer.timer !== undefined) clearTimeout(voiceWakeTimer.timer)
+  voiceWakeTimer.timer = undefined
+  voiceUserActivityAt = undefined
+  voiceController = ctx.get('sessionController') as SessionControllerFace | undefined
+  if (voiceController === undefined) {
+    console.error('pet-surface driver: sessionController absent — the inner voice stays off')
+  }
+  // Archive → fresh start: this platform has NO session delete, archive IS
+  // how a session ends — a user archiving the inner-voice session is asking
+  // for a clean slate (old log kept in the archive list, new session from
+  // zero under the current settings). Subscribe to the workspace archive
+  // authority so the retire happens on the EVENT, not after a behavioral
+  // timeout. CRITICAL TIMING: the feed's baseline frame usually arrives
+  // BEFORE the async store load finishes — a reconcile against an empty
+  // store silently retires nothing, so the latest archived set is CACHED and
+  // the reconcile re-runs when the store lands (otherwise sessions archived
+  // before a restart would sit in the store feeding the black hole until
+  // the 45s behavioral timeout).
+  let latestArchived = new Set<string>()
+  // The session retired by the MOST RECENT archive, per pet: its leaving
+  // the archived set is the platform's "撤销" (undo) — rebind to it as long
+  // as the replacement session has not been created yet (once a fresh
+  // session exists, a late undo only restores the archive-list entry, the
+  // fresh session stays).
+  const lastRetired = new Map<string, { sessionId: string; createdAt: number }>()
+  /** Re-submit the unanswered prompt text of petId (if any) into whatever
+   * session the next ensure mints — a retire must not swallow the user's
+   * words. Fire-and-forget; retried=true so the re-submission never hangs
+   * its own re-submit timer. */
+  const resubmitUnanswered = (petId: string): void => {
+    const last = voiceLastPrompt.get(petId)
+    if (last === undefined) return
+    voiceLastPrompt.delete(petId)
+    driverLog(home, `VOICE re-submitting the unanswered prompt into a fresh session pet=${petId}`)
+    void promptVoice(petId, last.text, { retried: true, userDriven: last.userDriven })
+  }
+  /** One reconciliation pass over the CURRENT store and the CURRENT archive
+   * set: retire sessions the archive authority says are archived (each such
+   * retire re-submits the lost prompt), and rebind a just-retired session
+   * the user un-archived (撤销) before any replacement exists. */
+  const reconcileArchivedVoiceSessions = (): void => {
+    for (const [petId, entry] of Object.entries(voiceStore.sessions)) {
+      if (!latestArchived.has(entry.sessionId)) continue
+      const generation = (voiceStore.generations[petId] ?? 0) + 1
+      voiceStore.generations[petId] = generation
+      delete voiceStore.sessions[petId]
+      const ownerEntry = [...voiceOwners.entries()].find(([, owner]) => owner === petId)
+      if (ownerEntry !== undefined) voiceOwners.delete(ownerEntry[0])
+      voicePendingUntil.delete(petId)
+      lastRetired.set(petId, { sessionId: entry.sessionId, createdAt: entry.createdAt })
+      void saveInnerVoiceStore(home, voiceStore)
+      driverLog(home, `VOICE session retired pet=${petId} (${entry.sessionId} was archived by the user — starting fresh as -g${String(generation)} on the next trigger)`)
+      resubmitUnanswered(petId)
+    }
+    // Undo detection: the just-retired session LEFT the archived set (the
+    // user hit 撤销) and nothing has replaced it yet — rebind to it,
+    // memories intact. The generation counter stays bumped, so a future
+    // retire mints an id no dead generation ever used.
+    for (const [petId, retired] of [...lastRetired]) {
+      if (latestArchived.has(retired.sessionId)) continue
+      lastRetired.delete(petId)
+      if (voiceStore.sessions[petId] !== undefined) continue // replacement already created: the undo is cosmetic only
+      voiceStore.sessions[petId] = { sessionId: retired.sessionId, createdAt: retired.createdAt }
+      voiceOwners.set(retired.sessionId, petId)
+      void saveInnerVoiceStore(home, voiceStore)
+      driverLog(home, `VOICE session restore-by-undo pet=${petId} (${retired.sessionId} left the archive set before any replacement — rebinding, memories intact)`)
+    }
+  }
+  // Attach a freshly created (or hand-bound) voice session to its workspace:
+  // unattached sessions are invisible in the user's sidebar AND get swept
+  // into the archive by the host — the "new session black hole". Duck-typed
+  // on the workspace registry, fail-soft; once per session id.
+  const attachedSessions = new Set<string>()
+  const attachVoiceSession = async (sessionId: string): Promise<void> => {
+    if (attachedSessions.has(sessionId)) return
+    attachedSessions.add(sessionId)
+    try {
+      const registry = (ctx as { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryFace | undefined
+      if (registry === undefined) return
+      // cwd must be an ORDINARY user directory: the host re-resolves ~/.dsh
+      // paths to the active profile and refuses the attach.
+      const workspace = await registry.create(homedir())
+      await workspace?.attachSession?.(sessionId)
+      driverLog(home, `VOICE session attached to workspace (${sessionId})`)
+    } catch (error) {
+      attachedSessions.delete(sessionId) // allow a retry on the next trigger
+      driverLog(home, `VOICE workspace attach skipped (${error instanceof Error ? error.message : String(error)})`)
+    }
+  }
+  const workspaceFace = ctx.get('workspaceController') as WorkspaceControllerFace | undefined
+  if (workspaceFace !== undefined) {
+    const followAbort = new AbortController()
+    void (async () => {
+      try {
+        for await (const frame of workspaceFace.follow(followAbort.signal)) {
+          const ids = archivedIdsOf(frame)
+          if (ids === undefined) continue
+          latestArchived = new Set(ids)
+          reconcileArchivedVoiceSessions()
+        }
+      } catch {
+        driverLog(home, 'VOICE workspace follow ended — behavioral stall detection remains the dead-session backstop')
+      }
+    })()
+    ctx.effect(() => () => followAbort.abort(), 'pet-surface: workspace archive watch')
+  }
+  void loadInnerVoiceStore(home).then(store => {
+    voiceStore = store
+    for (const [petId, entry] of Object.entries(store.sessions)) {
+      voiceOwners.set(entry.sessionId, petId)
+      // Existing sessions were born before the attach bridge — make them
+      // visible (and orphan-proof) too. Idempotent per session id.
+      void attachVoiceSession(entry.sessionId)
+    }
+    driverLog(home, `VOICE store loaded: ${String(Object.keys(store.sessions).length)} session(s)`)
+    // Startup reconciliation: the baseline frame may have arrived before the
+    // store did — retire sessions archived BEFORE this boot right now, so
+    // the first message lands in a fresh session instead of the archive
+    // black hole until the 45s behavioral timeout.
+    reconcileArchivedVoiceSessions()
+  })
   // The pet capability seam (passed in — see index.ts for why not the
   // ctx getter): discovery, liveness, and the /status field matrix live
   // behind it — the driver only decides WHAT to tell the pets, never WHERE
@@ -187,6 +483,9 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     }
   }
   events.on('api-session/status', (sessionId: string, running: boolean) => {
+    // An inner-voice session never competes for the binding and never paints
+    // the pet "working" — its turns are the pet breathing, not the user's job.
+    if (isVoiceSession(sessionId)) return
     driverLog(home, `status ${String(sessionId).slice(0, 12)} running=${String(running)}`)
     // A session that starts running IS what the user is watching: boot-time
     // resumes would otherwise pin the binding to an arbitrary old session.
@@ -201,26 +500,61 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     void pushState(running ? 'working' : 'idle')
   })
   events.on('api-session/activity', (sessionId: string, _updatedAt: number) => {
+    if (isVoiceSession(sessionId)) return
+    voiceUserActivityAt = Date.now()
     if (sessionId !== boundSessionId) boundPetId = undefined
     boundSessionId = sessionId
     // A message mid-turn must not downgrade a working agent back to thinking.
     if (currentState === undefined || currentState === 'idle') void pushState('thinking')
   })
   events.on('api-session/error', (sessionId: string, _message: string) => {
+    if (isVoiceSession(sessionId)) {
+      // A failed inner-voice turn releases its pet's pending lock; the wake
+      // cadence simply tries again later.
+      const petId = voiceOwners.get(sessionId)
+      if (petId !== undefined) voicePendingUntil.delete(petId)
+      return
+    }
     if (sessionId !== boundSessionId) return
     void pushState('error') // the error flash is transient: pushState clears the
     // dedup entry after an 'error' push, so the next status re-establishes.
   })
   events.on('api-session/removed', (sessionId: string) => {
+    if (isVoiceSession(sessionId)) {
+      // The user deleted the inner-voice session: forget it so the next wake
+      // creates a fresh one (the old log is gone by the user's own hand).
+      const petId = voiceOwners.get(sessionId)
+      voiceOwners.delete(sessionId)
+      if (petId !== undefined) {
+        delete voiceStore.sessions[petId]
+        voicePendingUntil.delete(petId)
+        void saveInnerVoiceStore(home, voiceStore)
+        driverLog(home, `VOICE session removed by user; pet=${petId} will re-create on next wake`)
+      }
+      return
+    }
     if (sessionId !== boundSessionId) return
     boundSessionId = undefined
     boundPetId = undefined
     pushState('idle')
   })
+  // Manual bindings cache: re-read from pet-settings.json on install and on
+  // every settings change (the synchronous stall path consults the Map).
+  const refreshBoundSessions = async (): Promise<void> => {
+    const config = await readInnerVoiceConfig(home)
+    voiceBoundSessions.clear()
+    for (const [petId, sessionId] of Object.entries(config.boundSessions)) {
+      voiceBoundSessions.set(petId, sessionId)
+    }
+  }
+  void refreshBoundSessions()
+
   events.on('pet-settings/changed', () => {
     // The autonomy payload rides on /state pushes: a settings change
     // re-pushes the current state immediately (the dedup key includes the
     // payload, so an unchanged semantic state still delivers the new config).
+    // Manual session bindings live in the same file — refresh the cache.
+    void refreshBoundSessions()
     if (currentState !== undefined) void pushState(currentState)
   })
 
@@ -394,6 +728,309 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     )
   }, { prepend: true })
 
+  // ── inner voice (docs/inner-voice.md §4–§7) ─────────────────────────────
+  // The pet's self-initiated expression loop: prompts land in a durable
+  // per-pet session; the model answers through pet_say/pet_do, which resolve
+  // back to the owning pet via voiceOwners (registerPetTools). No state
+  // involvement: the pet breathing is not the user's job status.
+
+  /** The pet's durable inner-voice session id, creating (and titling) it on
+   * first use. A config preset that fails to resolve falls back to the
+   * trimmed default once; a session the user deleted re-creates cleanly.
+   * Serialized per pet: two concurrent callers (a stall-timer resubmission
+   * racing a pre-flight reconcile's own resubmission) both saw an empty
+   * store and minted the SAME id — the field double-create of 2026-10-31.
+   * The second caller now awaits the first and lands on its store entry. */
+  const ensureInFlight = new Map<string, Promise<string | undefined>>()
+  const ensureVoiceSession = (petId: string): Promise<string | undefined> => {
+    const pending = ensureInFlight.get(petId)
+    if (pending !== undefined) return pending
+    const run = ensureVoiceSessionUnlocked(petId).finally(() => {
+      ensureInFlight.delete(petId)
+    })
+    ensureInFlight.set(petId, run)
+    return run
+  }
+  const ensureVoiceSessionUnlocked = async (petId: string): Promise<string | undefined> => {
+    // 1. Manual binding wins outright: the user's own session, used AS-IS —
+    //    no creation, no rename, no store entry, and the stall path never
+    //    retires it (its fate is the user's). voiceOwners is (re)armed here
+    //    so api-session events for this id keep the inner-voice exemptions
+    //    even after a re-install (the store does not know this id).
+    const bound = voiceBoundSessions.get(petId)
+    if (bound !== undefined) {
+      voiceOwners.set(bound, petId)
+      void attachVoiceSession(bound)
+      return bound
+    }
+    const known = voiceStore.sessions[petId]
+    if (known !== undefined) {
+      void attachVoiceSession(known.sessionId) // idempotent retry of a failed attach
+      return known.sessionId
+    }
+    if (voiceController === undefined) return undefined
+    const config = await readInnerVoiceConfig(home)
+    // The pre-named id, suffixed with the generation once a stall rebuild
+    // retired an earlier one — a retired (e.g. user-archived) session keeps
+    // its id forever, so a fresh session must never mint the same one. The
+    // generation counter is memory-only: after a desktop restart it counts
+    // from zero while the archive set still holds g1..gN, so the naive
+    // suffix collides with an ARCHIVED ancestor — born dead (the gate
+    // blocks every turn of an archived session silently). The mint skips
+    // ids the archive authority still holds and persists the advanced
+    // generation so later mints never reuse a skipped slot.
+    const minted = mintVoiceSessionId(petId, voiceStore.generations[petId] ?? 0, id => latestArchived.has(id))
+    voiceStore.generations[petId] = minted.generation
+    // Persist immediately: a failed create must not lose the skip counter.
+    void saveInnerVoiceStore(home, voiceStore)
+    if (minted.hops > 0) {
+      driverLog(home, `VOICE mint skipped ${String(minted.hops)} archived id(s) pet=${petId} → ${minted.sessionId}`)
+    }
+    const sessionId = minted.sessionId
+    try {
+      await voiceController.create({ sessionId, agentPreset: config.preset })
+    } catch (firstError) {
+      driverLog(home, `VOICE preset "${config.preset}" rejected for pet=${petId}: ${firstError instanceof Error ? firstError.message : String(firstError)}; falling back`)
+      try {
+        await voiceController.create({ sessionId, agentPreset: 'pet-inner-voice' })
+      } catch (secondError) {
+        driverLog(home, `VOICE session create failed for pet=${petId}: ${secondError instanceof Error ? secondError.message : String(secondError)}`)
+        return undefined
+      }
+    }
+    try {
+      await voiceController.rename({ sessionId, title: `鲸鱼娘的内心戏` })
+    } catch {
+      // Cosmetic only; the session works untitled.
+    }
+    voiceStore.sessions[petId] = { sessionId, createdAt: Date.now() }
+    await saveInnerVoiceStore(home, voiceStore)
+    voiceOwners.set(sessionId, petId)
+    // Visible-or-orphan: unattached sessions land in the host's archive
+    // sweep (the black hole) — attach her to the workspace immediately.
+    void attachVoiceSession(sessionId)
+    driverLog(home, `VOICE session created pet=${petId} session=${sessionId} preset=${config.preset}`)
+    return sessionId
+  }
+
+  /** Push one trigger text into the pet's session (queue mode: a busy session
+   * enqueues, never interrupts). A prompt that sits unanswered past the
+   * window is assumed dead (archived session): the session is retired and
+   * THIS text is re-submitted into the freshly minted one, once — the user
+   * sends one message and gets their reply without re-sending anything.
+   * `userDriven` marks a USER-initiated prompt (chat上行); it rides along on
+   * re-submissions so the fresh-session path knows who was talking. (The
+   * behavioral dead-session probe that once consumed this flag has been
+   * retired — session replacement is archive-feed driven.) */
+  const promptVoice = async (petId: string, text: string, opts: { retried?: boolean; userDriven?: boolean } = {}): Promise<boolean> => {
+    const { retried = false, userDriven = false } = opts
+    // Archive-set pre-flight: the feed frame carrying a JUST-archived session
+    // may still be in flight when the next prompt goes out — reconcile against
+    // the latest known set so this prompt never touches the black hole (a
+    // still-unanswered predecessor gets re-submitted into the fresh session).
+    if (latestArchived.has(voiceStore.sessions[petId]?.sessionId ?? '')) {
+      reconcileArchivedVoiceSessions()
+    }
+    const sessionId = await ensureVoiceSession(petId)
+    if (sessionId === undefined || voiceController === undefined) return false
+    try {
+      await voiceController.prompt(
+        {
+          requestId: `voice-${randomUUID()}`,
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+        },
+        new AbortController().signal,
+      )
+    } catch (error) {
+      driverLog(home, `VOICE prompt failed pet=${petId}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+    // The prompt is accepted: hold the pet's pending lock until pet_say
+    // arrives (markVoiceSpoke) or the deadline lapses — whichever first. The
+    // dead-session ledger anchors on the FIRST unanswered admission: an
+    // inner-voice turn is "say one line" on a trimmed preset, normally
+    // seconds — 45s of silence is a dead session, not a slow model.
+    // The behavioral dead-session probe (25s without a pet_say) is RETIRED:
+    // a model may legitimately stay silent (the wake prompt invites it),
+    // and every silent turn was being misread as a dead session — the
+    // g0→g1 double-session spiral. Session replacement is driven solely
+    // by the workspace archive feed (user archive = fresh start), whose
+    // reconcile re-submits any unanswered prompt via resubmitUnanswered.
+    // The pending lock (queue-mode turn-in-flight gate): expires on its own
+    voicePendingUntil.set(petId, Date.now() + 25_000)
+
+    if (!retried) voiceLastPrompt.set(petId, { text, userDriven })
+    driverLog(home, `VOICE prompt admitted pet=${petId} :: ${text.slice(0, 80)}`)
+    return true
+  }
+
+  /** Shared gates of both trigger sources: the pet is online and has no turn
+   * already in flight. `requireUserIdle` additionally holds the trigger while
+   * the user's session is mid-turn — the random wake's manners; a touch is
+   * the USER reaching out, so it skips that check (docs/inner-voice.md §6.2).
+   * A touch ALSO skips the pending lock: a self-turn without a pet_say would
+   * otherwise hold the lock for its full 120s and swallow every pat in the
+   * window (2026-10-30 field lesson); the queued prompt mode makes stacking
+   * safe, and the touch probability/cooldown still throttle the chatter.
+   * `label` names the trigger source — gate lines are shared by both, and a
+   * refusal without one reads as "no touch ever happened". EVERY refusal
+   * names itself in the log: silence must be explainable. */
+  const voiceGateOpen = async (petId: string, requireUserIdle: boolean, label: string, skipPending = false): Promise<boolean> => {
+    if (voiceController === undefined) {
+      driverLog(home, `VOICE gate closed (${label}) pet=${petId} (sessionController unavailable)`)
+      return false
+    }
+    if (requireUserIdle && currentState !== undefined && currentState !== 'idle') {
+      driverLog(home, `VOICE gate closed (${label}) pet=${petId} (user session busy: ${currentState})`)
+      return false
+    }
+    if (!skipPending && (voicePendingUntil.get(petId) ?? 0) > Date.now()) {
+      driverLog(home, `VOICE gate closed (${label}) pet=${petId} (a self-turn is still in flight)`)
+      return false
+    }
+    const pets = await pet.list()
+    if (!pets.some(entry => entry.id === petId)) {
+      driverLog(home, `VOICE gate closed (${label}) pet=${petId} (pet offline)`)
+      return false
+    }
+    return true
+  }
+
+  /** Boot greeting (user request): once per dsh start, the first time the pet
+   * is seen online. No probability gate and no user-busy check — it is a
+   * hello, not an interruption; the pending lock still applies. A refused
+   * greeting (pet offline) releases the flag for the next sweep to retry. */
+  const triggerGreeting = async (petId: string): Promise<void> => {
+    if (!(await voiceGateOpen(petId, false, 'greeting'))) return
+    const ledger = await readLedger(ledgerFileFor(home, petId))
+    const spoke = await promptVoice(petId, buildGreetPrompt({ affection: ledger.affection }))
+    if (spoke) {
+      voiceGreetedOnce.add(petId)
+      driverLog(home, `VOICE boot greeting pet=${petId}`)
+    } else {
+      voiceGreetedOnce.delete(petId)
+    }
+  }
+
+  /** Random-wake trigger (docs/inner-voice.md §6.3). The gate decides whether
+   * this wake speaks — never the model. */
+  const triggerWake = async (petId: string): Promise<void> => {
+    const config = await readInnerVoiceConfig(home)
+    if (!config.enabled) return
+    // The effective numbers ride the log: a settings file that fails to reach
+    // the driver must be visible, not just its consequences.
+    driverLog(home, `VOICE wake tick pet=${petId} interval=${String(config.wakeIntervalMinutes)}min speakP=${String(config.speakProbability)}`)
+    if (Math.random() >= config.speakProbability) {
+      driverLog(home, `VOICE wake silent by probability pet=${petId}`)
+      return
+    }
+    if (!(await voiceGateOpen(petId, true, 'wake'))) return
+    const ledger = await readLedger(ledgerFileFor(home, petId))
+    const now = Date.now()
+    const lastSpoke = voiceLastSpokeAt.get(petId)
+    const spoke = await promptVoice(petId, buildWakePrompt({
+      affection: ledger.affection,
+      minutesSinceLastSpoke: lastSpoke === undefined ? undefined : Math.round((now - lastSpoke) / 60_000),
+      minutesSinceUserActivity: voiceUserActivityAt === undefined ? undefined : Math.round((now - voiceUserActivityAt) / 60_000),
+      userActive: voiceUserActivityAt !== undefined && now - voiceUserActivityAt < 30 * 60_000,
+    }))
+    if (spoke) voiceLastSpokeAt.set(petId, now)
+  }
+
+  /** Touch-reply trigger (docs/inner-voice.md §6.1). Low probability + a
+   * per-pet cooldown keep a pat from turning into chatter; the user-busy gate
+   * does NOT apply — a touch is the user initiating, not the pet interrupting.
+   * Every silent branch logs: a pat with no reply must be explainable. */
+  const triggerTouchReply = async (petId: string, part: string): Promise<void> => {
+    if (touchPartWording(part) === undefined) {
+      driverLog(home, `VOICE touch ignored pet=${petId} part=${part} (not a touchable part)`)
+      return
+    }
+    const config = await readInnerVoiceConfig(home)
+    if (!config.enabled) return
+    if (Math.random() >= config.touchReplyProbability) {
+      driverLog(home, `VOICE touch silent by probability pet=${petId}`)
+      return
+    }
+    const last = voiceLastTouchReplyAt.get(petId)
+    const cooldownLeft = last !== undefined
+      ? Math.ceil((last + config.touchReplyCooldownSeconds * 1000 - Date.now()) / 1000)
+      : 0
+    if (cooldownLeft > 0) {
+      driverLog(home, `VOICE touch in cooldown pet=${petId} (~${String(cooldownLeft)}s left)`)
+      return
+    }
+    if (!(await voiceGateOpen(petId, false, 'touch', true))) return
+    const ledger = await readLedger(ledgerFileFor(home, petId))
+    const spoke = await promptVoice(petId, buildTouchPrompt({
+      part,
+      touchesToday: ledger.recent.filter(entry => entry.part === part).length + 1,
+      affection: ledger.affection,
+    }))
+    if (spoke) {
+      const now = Date.now()
+      voiceLastTouchReplyAt.set(petId, now)
+      voiceLastSpokeAt.set(petId, now)
+    }
+  }
+
+  /** Chat上行 trigger (§6 2026-10-31 revision): the user typed at the pet's
+   * surface. Routing is DIRECT to the pet's own inner-voice session and
+   * skips every touch-path gate — probability, cooldown, the user-busy
+   * check, the pending lock (queue mode stacks safely) — a user reaching
+   * out to talk is never throttled, and a pet replying is the contract, not
+   * a coin flip. Only the pet's presence is checked. */
+  const triggerChat = async (petId: string, text: string): Promise<void> => {
+    if (!(await voiceGateOpen(petId, false, 'chat', true))) return
+    const spoke = await promptVoice(petId, buildChatPrompt(text), { userDriven: true })
+    if (spoke) voiceLastSpokeAt.set(petId, Date.now())
+  }
+
+  /** The wake sweep: a 60s tick checks each online pet's next-wake stamp.
+   * Cadence comes from settings fresh each sweep, with ±25% jitter so two
+   * pets never wake in lockstep; an interval change re-arms naturally. */
+  /** The wake sweep: a 60s tick checks each online pet's next-wake stamp.
+   * Cadence comes from settings fresh each sweep, with ±25% jitter so two
+   * pets never wake in lockstep; an interval change re-arms naturally. */
+  const wakeSweep = async (): Promise<void> => {
+    const config = await readInnerVoiceConfig(home)
+    if (!config.enabled) return
+    const now = Date.now()
+    const intervalMs = config.wakeIntervalMinutes * 60_000
+    for (const target of await pet.list()) {
+      const next = voiceNextWakeAt.get(target.id)
+      if (next === undefined) {
+        // First sighting of this pet: arm the random-wake cadence, and
+        // fire the boot greeting ONCE (per dsh start) — she says hi before
+        // the cadence takes over. An offline pet releases the flag so the
+        // next sweep retries.
+        voiceNextWakeAt.set(target.id, now + intervalMs * (0.5 + Math.random() * 0.5))
+        if (!voiceGreetedOnce.has(target.id)) void triggerGreeting(target.id)
+        continue
+      }
+      if (now < next) continue
+      voiceNextWakeAt.set(target.id, now + intervalMs * (0.75 + Math.random() * 0.5))
+      await triggerWake(target.id)
+    }
+  }
+  // Adaptive cadence: right after boot the carrier takes a few seconds to
+  // come online, so the first 2 minutes probe at 3s — the boot greeting
+  // fires the moment she appears — then the sweep settles into 60s.
+  const SWEEP_SLOW_MS = 60_000
+  const SWEEP_FAST_MS = 3_000
+  const SWEEP_FAST_DEADLINE = 120_000
+  const bootAt = Date.now()
+  const scheduleSweep = (): void => {
+    const fast = Date.now() - bootAt < SWEEP_FAST_DEADLINE && voiceNextWakeAt.size === 0
+    voiceWakeTimer.timer = setTimeout(() => { void wakeSweep().finally(scheduleSweep) }, fast ? SWEEP_FAST_MS : SWEEP_SLOW_MS)
+  }
+  scheduleSweep()
+  // First sweep immediately: without it the first greeting/wake waits a
+  // full minute after boot (the "启动好一会没反应" feel).
+  void wakeSweep()
+
   // Touch events: pull EVERY live pet's queue on a cadence and fold each
   // touch into that pet's own affection ledger (per-pet books — "她们").
   // Nothing here ever enters conversation context — the model senses the
@@ -428,36 +1065,76 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
         }).catch(() => { /* the pet may be gone; the ledger still holds */ })
       }
     }
+    // A pat MAY earn a model reply (docs/inner-voice.md §6.1): the trigger's
+    // own probability/cooldown gates decide; never awaited — the poll loop
+    // must not wait on a session admission.
+    void triggerTouchReply(petId, part)
   }
-  const pollEvents = async (): Promise<void> => {
-    for (const target of await pet.list()) {
-      const lastEventSeq = lastEventSeqs.get(target.id) ?? 0
-      try {
-        const response = await fetch(`http://127.0.0.1:${String(target.port)}/events?since=${String(lastEventSeq)}`)
-        if (!response.ok) continue
-        const payload = JSON.parse(await response.text()) as {
-          events?: Array<{ seq?: unknown; part?: unknown; at?: unknown }>
-          latest?: unknown
-        }
-        if (typeof payload.latest === 'number' && payload.latest < lastEventSeq) {
-          // The pet restarted and its queue restarted with it.
-          lastEventSeqs.set(target.id, 0)
-          continue
-        }
-        for (const event of payload.events ?? []) {
-          if (typeof event.seq === 'number' && typeof event.part === 'string') {
-            await recordTouch(target.id, event.part, typeof event.at === 'number' ? event.at : Date.now())
-          }
-          lastEventSeqs.set(target.id, Math.max(lastEventSeqs.get(target.id) ?? 0, typeof event.seq === 'number' ? event.seq : 0))
-        }
-      } catch {
-        // pet gone; the next tick re-resolves through the registry
+
+  /** Event dispatch for ONE pet event. touch → the affection ledger;
+   * chat → STRAIGHT to the pet's inner-voice session, bypassing the touch
+   * path's probability/cooldown/user-busy gates entirely (a user reaching
+   * out to talk is never throttled — §6 routing constraint); unknown types
+   * are ignored while the cursor still advances. */
+  const handlePetEvent = async (petId: string, event: { seq: number; type: string; part?: string | undefined; text?: string | undefined; at: number }): Promise<void> => {
+    if (event.type === 'touch') {
+      if (event.part !== undefined) {
+        await recordTouch(petId, event.part, event.at)
       }
+      return
+    }
+    if (event.type === 'chat' && event.text !== undefined && event.text !== '') {
+      void triggerChat(petId, event.text)
     }
   }
-  const pollTimer = setInterval(() => { void pollEvents() }, 5_000)
-  void pollEvents()
-  ctx.effect(() => () => { clearInterval(pollTimer) }, 'pet-surface: touch poll')
+
+  /** Per-pet long-poll loops (§6 v4): each live pet parks ONE /events
+   * hold=30 request; the answer — an event batch or the 30s empty one —
+   * re-arms immediately, so a touch lands in the ledger with at most
+   * server-side latency instead of the old 2s busy poll. Reconnection after
+   * any failure goes through the registry (pet.list() re-discovers and
+   * re-probes), NEVER by retrying a stale port. The loop's pet.list() pass
+   * between holds is also the explicit liveness probe the busy polling used
+   * to provide for free (~30s cadence). */
+  const eventLoop = async (initial: PetEntry, handle: { stopped: boolean }): Promise<void> => {
+    let entry = initial
+    while (!handle.stopped) {
+      const since = lastEventSeqs.get(entry.id) ?? 0
+      try {
+        const payload = await readEvents(pet, entry, since, 30)
+        if (payload.latest < since) {
+          // The pet restarted and its queue restarted with it.
+          lastEventSeqs.set(entry.id, 0)
+          continue
+        }
+        for (const event of payload.events) {
+          lastEventSeqs.set(entry.id, Math.max(lastEventSeqs.get(entry.id) ?? 0, event.seq))
+          await handlePetEvent(entry.id, event)
+        }
+        lastEventSeqs.set(entry.id, Math.max(lastEventSeqs.get(entry.id) ?? 0, payload.latest))
+      } catch {
+        // pet gone, port stale, or the call budget lapsed: re-discover below
+      }
+      const fresh = (await pet.list()).find(candidate => candidate.id === entry.id)
+      if (fresh === undefined) return // offline: the supervisor re-arms later
+      entry = fresh
+    }
+  }
+  const eventLoops = new Map<string, { stopped: boolean }>()
+  const eventSupervisor = async (): Promise<void> => {
+    for (const target of await pet.list()) {
+      if (eventLoops.has(target.id)) continue
+      const handle = { stopped: false }
+      eventLoops.set(target.id, handle)
+      void eventLoop(target, handle).finally(() => { eventLoops.delete(target.id) })
+    }
+  }
+  const supervisorTimer = setInterval(() => { void eventSupervisor() }, 5_000)
+  void eventSupervisor()
+  ctx.effect(() => () => {
+    clearInterval(supervisorTimer)
+    for (const handle of eventLoops.values()) handle.stopped = true
+  }, 'pet-surface: event long-poll')
   // Boot catch-up: a session that was already running when the driver loads
   // re-fires no status event, and a pet that boots later would sit without
   // any /state (autonomy config included) until the next session event.
@@ -494,7 +1171,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         return undefined
       }
     }
-    const resolveTarget = async (targetPet?: unknown): Promise<PetEntry> => {
+    const resolveTarget = async (targetPet?: unknown, ownerSessionId?: unknown): Promise<PetEntry> => {
       const pets = await pet.list()
       if (typeof targetPet === 'string' && targetPet !== '') {
         const named = pets.find(entry => entry.id === targetPet)
@@ -503,15 +1180,21 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         }
         return named
       }
+      // The inner voice's own session resolves to the pet that OWNS it
+      // (docs/inner-voice.md §5.2): the model rarely names itself, and the
+      // bound-pet route may point at a different pet mid-turn.
+      if (typeof ownerSessionId === 'string') {
+        const owned = voiceOwners.get(ownerSessionId)
+        if (owned !== undefined) {
+          const own = pets.find(entry => entry.id === owned)
+          if (own !== undefined) return own
+        }
+      }
       const focus = await readFocus()
       const focused = focus !== undefined ? pets.find(entry => entry.id === focus) : undefined
       const target = focused ?? routePet(pets, undefined)
       if (target === undefined) throw new Error('no pet is running')
       return target
-    }
-    const control = async (path: string, init?: RequestInit, targetPet?: unknown): Promise<unknown> => {
-      const entry = await resolveTarget(targetPet)
-      return pet.call(entry, path, init)
     }
     // Classified failures: the model must KNOW why nothing happened
     // (offline vs timeout vs remote rejection) — silent loss was an
@@ -544,15 +1227,22 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }],
       },
-      async execute(args) {
+      async execute(args, exec) {
         const text = String(args.text).slice(0, 200)
         console.log(`pet-surface driver: pet_say ${JSON.stringify(text).slice(0, 60)}`)
         try {
-          await control('/say', {
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          await pet.call(entry, '/say', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ text }),
-          }, args.pet)
+          })
+          // A spoken bubble is the inner voice's pending-lock release and its
+          // "last spoke" truth (docs/inner-voice.md §7); a user-session say
+          // merely refreshes the same map, which is harmless.
+          if (markVoiceSpoke(entry.id)) {
+            driverLog(home, `VOICE pending released by say pet=${entry.id} (inner-voice turn complete)`)
+          }
         } catch (error: unknown) {
           throw classify(error)
         }
@@ -573,9 +1263,9 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }],
       },
-      async execute(args) {
+      async execute(args, exec) {
         try {
-          const entry = await resolveTarget(args.pet)
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
           // The menu belongs to the pet, not the driver: validate against the
           // pet's advertised catalog. An unknown id is an ERROR that names the
           // available ones, so the model can self-correct in one step.
@@ -586,6 +1276,9 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             throw new Error(`unknown action "${requested}" for pet "${entry.id}". Available: ${formatAvailableActions(resolution.available)}`)
           }
           const action = resolution.action
+          // Observability of the model's own expressiveness: whether pet_do is
+          // used at all, how often, and what "random" actually drew.
+          driverLog(home, `PET_DO pet=${entry.id} action=${action}${action === requested ? '' : ` (requested: ${requested})`}`)
           const response = await pet.call(entry, '/action', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -609,8 +1302,12 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             if (snap.online === false) {
               return JSON.stringify({ performed: true, action, waitLost: 'pet went offline before finishing' })
             }
-            const done = snap.lastActionDone
-            if (done != null && done.requestId === requestId) {
+            // The v3 single witness object: `id` matches THIS /action's
+            // requestId, `endedAt`/`durationMs` backfill in place on
+            // completion — matching on the id alone never misreads a newer
+            // action's record.
+            const done = snap.lastAction
+            if (done != null && done.id === requestId) {
               return JSON.stringify({ performed: true, action, durationMs: done.durationMs })
             }
           }
@@ -630,37 +1327,33 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }],
       },
-      async execute(args) {
+      async execute(args, exec) {
         try {
-          const entry = await resolveTarget(args.pet)
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
           const cursor = digestCursors.get(entry.id) ?? 0
-          let payload = await pet.call(entry, `/events?since=${String(cursor)}`) as {
-            events?: Array<{ seq?: unknown; part?: unknown; at?: unknown }>
-            latest?: unknown
-          }
-          const latest = typeof payload.latest === 'number' ? payload.latest : cursor
-          let events = Array.isArray(payload.events) ? payload.events : []
-          if (latest < cursor) {
+          let payload = await readEvents(pet, entry, cursor, 0)
+          if (payload.latest < cursor) {
             // The pet restarted and its queue restarted with it: re-read
             // everything retained.
-            payload = await pet.call(entry, '/events?since=0') as typeof payload
-            events = Array.isArray(payload.events) ? payload.events : []
+            payload = await readEvents(pet, entry, 0, 0)
           }
           const counts: Record<string, number> = {}
           let total = 0
           let lastTouchAt: number | null = null
           let newest = cursor
-          for (const event of events) {
-            if (typeof event.part !== 'string') continue
+          for (const event of payload.events) {
+            // The cursor advances for EVERY event; only touches aggregate —
+            // chat上行 and unknown types pass through uncounted (§6).
+            if (event.seq > newest) newest = event.seq
+            if (event.type !== 'touch' || event.part === undefined) continue
             const part = event.part === 'unknown' ? 'miss' : event.part
             counts[part] = (counts[part] ?? 0) + 1
             total += 1
-            if (typeof event.at === 'number') lastTouchAt = Math.max(lastTouchAt ?? 0, event.at)
-            if (typeof event.seq === 'number') newest = Math.max(newest, event.seq)
+            if (event.at > (lastTouchAt ?? 0)) lastTouchAt = event.at
           }
           digestCursors.set(entry.id, newest)
           const ledger = await readLedger(ledgerFileFor(home, entry.id))
-          const mood = ledger.affection >= 80 ? 'happy' : ledger.affection >= 40 ? 'content' : 'neutral'
+          const mood = moodOf(ledger.affection)
           return JSON.stringify({
             pet: entry.id,
             touches: counts,
@@ -701,7 +1394,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_state',
-      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, its window position and visibility, plus each pet\'s affection book. Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet.',
+      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book. Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet.',
       parameters: {
         actions: { type: 'boolean', description: 'Also include each pet\'s action catalog — the ids pet_do accepts on it. Omit for the cheaper summary (an unknown pet_do action self-reports its menu).' },
       },
@@ -732,7 +1425,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         const ledgers: Record<string, unknown> = {}
         for (const id of knownIds) {
           const ledger = await readLedger(ledgerFileFor(home, id))
-          const mood = ledger.affection >= 80 ? 'happy' : ledger.affection >= 40 ? 'content' : 'neutral'
+          const mood = moodOf(ledger.affection)
           ledgers[id] = { ...ledger, mood }
         }
         const petsOut = states.map((state) => {

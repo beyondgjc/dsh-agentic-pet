@@ -9,7 +9,7 @@
 
 import './pet.css'
 
-const CHARACTER = 'shenshen'
+const CHARACTER = 'whale'
 
 type BaseState = 'idle' | 'thinking' | 'working'
 
@@ -29,12 +29,13 @@ interface PetGlobals {
     reportStatus(snapshot: Record<string, unknown>): void
     reportTouch(touch: { part: string }): void
     reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void
+    sendChat(text: string): Promise<{ ok: boolean; reason?: string }>
   }
 }
 
 const globals = globalThis as unknown as Partial<PetGlobals>
 
-// ── animation mapping (shenshen media, via the pet-asset:// protocol) ───────
+// ── animation mapping (whale media, via the pet-asset:// protocol) ──────────
 
 interface AnimationName {
   dir: string
@@ -513,13 +514,23 @@ function touchPartOf(clientX: number, clientY: number): string {
 const CLICK_MAX_DISTANCE = 5
 const CLICK_MAX_MS = 500
 
+// The touch REPORT is deferred by the dblclick window (~260ms): a
+// double-click (open the chat card) must not also register as two pats —
+// the instant reaction animation still plays, only the ledger report
+// waits for the click pattern to settle. Rapid petting then counts as
+// one touch per 260ms burst, which matches the gesture.
+let touchReportTimer: ReturnType<typeof setTimeout> | undefined
 function handleTouch(clientX: number, clientY: number): void {
   const part = touchPartOf(clientX, clientY)
   const reactions = ANIMATION.touch
   if (reactions !== undefined && reactions.length > 0 && override === null && Date.now() >= errorUntil) {
     playOneShotAt(reactions[Math.floor(Math.random() * reactions.length)])
   }
-  globals.petDesktop?.reportTouch({ part })
+  if (touchReportTimer !== undefined) clearTimeout(touchReportTimer)
+  touchReportTimer = setTimeout(() => {
+    touchReportTimer = undefined
+    globals.petDesktop?.reportTouch({ part })
+  }, 260)
 }
 
 petBody.addEventListener('pointerdown', (event) => {
@@ -545,6 +556,73 @@ petBody.addEventListener('pointerdown', (event) => {
   petBody.addEventListener('pointermove', onMove)
   petBody.addEventListener('pointerup', onUp)
   petBody.addEventListener('pointercancel', onUp)
+})
+
+// ── chat input card (§6 chat上行) ───────────────────────────────────────────
+// Double-click the pet body to talk to it: the text rides a /events `chat`
+// event to the driver's inner-voice session, and the reply comes back as a
+// normal /say bubble. One message in flight per pet (the contract's input
+// modal): a busy send is refused with an inline hint, not silently dropped.
+
+function openChatCard(): void {
+  // One bubble at a time: an interaction card outranks the chat input, and
+  // the chat card itself parks inside THE bubble (hidden by hideBubble()).
+  if (override !== null || Date.now() < errorUntil) return
+  bubble.replaceChildren()
+  const row = document.createElement('div')
+  row.className = 'bubble-chat'
+  const input = document.createElement('input')
+  input.className = 'bubble-chat-input'
+  input.maxLength = 2000
+  input.placeholder = '和鲸鱼娘说点什么…'
+  const send = document.createElement('button')
+  send.className = 'bubble-button primary'
+  send.textContent = '发送'
+  const cancel = document.createElement('button')
+  cancel.className = 'bubble-button'
+  cancel.textContent = '取消'
+  cancel.addEventListener('click', () => { hideBubble() })
+  const submit = async (): Promise<void> => {
+    const text = input.value.trim()
+    if (text === '' || send.disabled) return
+    send.disabled = true
+    input.disabled = true
+    const result = await globals.petDesktop?.sendChat(text)
+    if (result?.ok === true) {
+      hideBubble() // the reply arrives later as a plain /say bubble
+      return
+    }
+    send.disabled = false
+    input.disabled = false
+    input.placeholder = result?.reason === 'busy' ? '上一条还没送达，稍等一下…' : '没发出去，再试一次'
+    input.focus()
+  }
+  send.addEventListener('click', () => { void submit() })
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      void submit()
+    } else if (event.key === 'Escape') {
+      hideBubble()
+    }
+  })
+  row.append(input, send, cancel)
+  bubble.append(row)
+  bubble.hidden = false
+  globals.petDesktop?.setBubbleVisible(true)
+  render()
+  input.focus()
+}
+
+petBody.addEventListener('dblclick', (event) => {
+  event.stopPropagation()
+  // A double-click is INTENT TO TALK, not two pats: cancel the deferred
+  // touch reports from both clicks of the gesture.
+  if (touchReportTimer !== undefined) {
+    clearTimeout(touchReportTimer)
+    touchReportTimer = undefined
+  }
+  openChatCard()
 })
 
 // ── control interface (driver path) ─────────────────────────────────────────

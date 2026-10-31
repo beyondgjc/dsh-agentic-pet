@@ -7,21 +7,25 @@
  * @module dsh-agentic-pet/actions
  */
 
-/** A pet's advertised capabilities. `actions: null` = the pet publishes no
- * catalog (a legacy implementation): only the universal `celebrate` alias is
- * then available. An advertised-but-empty array is folded into null. */
+/** A pet's advertised capabilities. `contractVersion: null` = a legacy
+ * implementation that predates the version field (v1 semantics: seven
+ * endpoints, no /world). `actions: null` = the pet publishes no catalog (a
+ * legacy implementation): only the universal `celebrate` alias is then
+ * available. An advertised-but-empty array is folded into null. */
 export interface PetCapabilities {
+  readonly contractVersion: number | null
   readonly actions: readonly string[] | null
 }
 
 /** Defensive extraction from a raw /capabilities payload: implementations
  * may omit or mistype anything. */
 export function normalizeCapabilities(raw: unknown): PetCapabilities {
-  const actions = typeof raw === 'object' && raw !== null
-    && Array.isArray((raw as Record<string, unknown>).actions)
-    ? (raw as { actions: unknown[] }).actions.filter((entry): entry is string => typeof entry === 'string')
+  const record = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
+  const actions = Array.isArray(record.actions)
+    ? record.actions.filter((entry): entry is string => typeof entry === 'string')
     : []
-  return { actions: actions.length > 0 ? actions : null }
+  const contractVersion = typeof record.contractVersion === 'number' ? record.contractVersion : null
+  return { contractVersion, actions: actions.length > 0 ? actions : null }
 }
 
 export type ActionResolution =

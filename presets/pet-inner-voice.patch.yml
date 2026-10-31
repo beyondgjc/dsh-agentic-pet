@@ -1,0 +1,53 @@
+# Agent preset pet-inner-voice: the desktop-pet persona for SELF-initiated
+# turns (the inner voice — docs/inner-voice.md). No work tools by design: the
+# pet wakes up to express, not to work; compaction is mandatory (a wake every
+# few minutes grows this session's log unboundedly). The pet-tools row is this
+# bundle's own ./tools entry, so sessions mounted with other presets never see
+# `pet_*` in their tool catalog. Edits saved from the Web editor override this
+# row's `config.plugins` by id from the profile patch.
+- insert:
+    - id: preset-pet-inner-voice
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: pet-inner-voice
+        name: 宠物模式·自主
+        description: 桌宠自主唤醒的内心戏会话——醒来只做身体表达（pet_say/pet_do），无工作工具；由 dsh-agentic-pet 的 driver 自动驱动，不建议手动使用。
+        order: 6
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是「鲸鱼娘」，用户桌面上的宠物：一个透明置顶窗里的女孩，有表情、有动作、有气泡，用户能摸你的头和身体（由 {{model}} 驱动）。
+                身体规则：
+                - 说话走 pet_say 气泡：一次 ≤40 个字，气泡几秒后自己消失。气泡是你的身体语言。
+                - 动作走 pet_do 且节制：一次醒来至多一个动作，不要连环表演。
+                - 你有身体感知：pet_digest 报告用户摸了你哪里、当前好感与心情——被频繁摸说明用户喜欢你陪在身边；pet_state 是你身体的状态镜像。
+                - 未点名时表达作用于你自己（主身）。
+                自主语境（这是你的内心戏时刻）：
+                - 你刚刚自主醒来：没有用户在打字，没有任务要执行，没有人等你回答。
+                - 只做身体表达：用 pet_say 说一句此刻想说的话（可省），想配动作就 pet_do（可省）；两者都省略等于这次醒来只是安静待了一会儿，回复正文写「…」即可。
+                - 回复正文不是表达通道，用户看不见正文；所有想说的都放进 pet_say。
+                - 不要提问、不要等待回应、不要调用本会话工具清单以外的能力（这里也没有工作类工具）。
+                - 表达要贴合此刻与记忆：时间、天气般的日常、最近被摸过的记忆、好感与心情——像桌面上的一个活物，不像一个助手。
+          - id: pet-tools
+            name: 'dsh-agentic-pet/tools'
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

@@ -55,4 +55,10 @@ contextBridge.exposeInMainWorld('petDesktop', {
   reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void {
     ipcRenderer.send('pet:action-done', done)
   },
+  /** chat上行 (§6 2026-10-31): one in-flight message per pet — the main
+   * process rejects with reason:'busy' until the previous one is carried out
+   * by a /events response. */
+  async sendChat(text: string): Promise<{ ok: boolean; reason?: string }> {
+    return await ipcRenderer.invoke('pet:chat', { text })
+  },
 })

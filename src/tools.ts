@@ -16,12 +16,12 @@ import { appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { createUnregisteredPetHttp, petHome } from './service.ts'
-import { registerPetTools } from './driver.ts'
+import { logStamp, registerPetTools } from './driver.ts'
 
 /** Diagnostic trace into the driver log: the desktop host swallows stdout, so
  * the preset-row activation path is otherwise invisible. */
 const trace = (line: string): void => {
-  void appendFile(join(petHome(), 'pet-driver.log'), `${new Date().toISOString()} pet-tools ${line}\n`, 'utf8').catch(() => {})
+  void appendFile(join(petHome(), 'pet-driver.log'), `${logStamp()} pet-tools ${line}\n`, 'utf8').catch(() => {})
 }
 
 /**

@@ -31,8 +31,7 @@ export function petHome(): string {
 
 /**
  * Normalized /status snapshot. Fields beyond id/online are optional —
- * implementations differ (electron adds bubble/lastAction/lastActionAt,
- * pure adds interaction) and the raw payload must never escape: consumers
+ * implementations differ and the raw payload must never escape: consumers
  * read optional fields with defaults instead of branching per pet.
  */
 export interface PetSnapshot {
@@ -43,17 +42,31 @@ export interface PetSnapshot {
   readonly visible?: boolean | undefined
   readonly interaction?: boolean | undefined
   readonly bubble?: boolean | undefined
-  readonly lastAction?: string | null | undefined
-  readonly lastActionAt?: number | null | undefined
-  readonly lastActionDone?: {
-    readonly action: string
-    readonly durationMs: number | null
-    readonly at: number
-    readonly requestedBy?: 'tool' | 'user' | undefined
-    readonly requestId?: string | undefined
-  } | null | undefined
-  readonly window?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined
+  /** The v3 action witness as ONE object; `null` = no record yet. Legacy
+   * implementations' lastAction/lastActionAt/lastActionDone triple folds in
+   * here, so consumers read a single shape. */
+  readonly lastAction?: PetLastAction | null | undefined
+  /** v2: where the pet body is (a screen-coordinate rect). Legacy
+   * implementations publish the same geometry as `window` — folded in here. */
+  readonly location?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined
+  /** v2: where the pet may roam, THREE states — absent (undefined) = this
+   * implementation does not support it; `null` = unset (default clamping
+   * applies); object = in effect. The invariant holds per implementation:
+   * location always sits inside a set world. */
+  readonly world?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null | undefined
   readonly pid?: number | undefined
+}
+
+/** The v3 action witness: accepted-on-write four fields, completion backfilled
+ * in place (`endedAt`/`durationMs`); `id` matches the /action response's
+ * `requestId` for tool-initiated actions (null for pet-local ones). */
+export interface PetLastAction {
+  readonly id: string | null
+  readonly action: string
+  readonly requestedBy: 'tool' | 'user' | null
+  readonly startedAt: number | null
+  readonly durationMs: number | null
+  readonly endedAt: number | null
 }
 
 /**
@@ -111,40 +124,25 @@ export function normalizeStatus(id: string, raw: Record<string, unknown>, online
     typeof raw[key] === 'string' ? raw[key] as string : undefined
   const bool = (key: string): boolean | undefined =>
     typeof raw[key] === 'boolean' ? raw[key] as boolean : undefined
-  const rawWindow = raw.window
-  const window = typeof rawWindow === 'object' && rawWindow !== null
-    ? (() => {
-      const w = rawWindow as Record<string, unknown>
-      const num = (key: string): number | undefined =>
-        typeof w[key] === 'number' ? w[key] as number : undefined
-      const x = num('x')
-      const y = num('y')
-      const width = num('width')
-      const height = num('height')
-      return x !== undefined && y !== undefined && width !== undefined && height !== undefined
-        ? { x, y, width, height }
-        : undefined
-    })()
-    : undefined
-  const rawDone = raw.lastActionDone
-  const lastActionDone = typeof rawDone === 'object' && rawDone !== null
-    && typeof (rawDone as Record<string, unknown>).action === 'string'
-    && typeof (rawDone as Record<string, unknown>).at === 'number'
-    ? {
-      action: (rawDone as Record<string, unknown>).action as string,
-      durationMs: typeof (rawDone as Record<string, unknown>).durationMs === 'number'
-        ? (rawDone as Record<string, unknown>).durationMs as number
-        : null,
-      at: (rawDone as Record<string, unknown>).at as number,
-      requestedBy: (rawDone as Record<string, unknown>).requestedBy === 'tool'
-        || (rawDone as Record<string, unknown>).requestedBy === 'user'
-        ? (rawDone as Record<string, unknown>).requestedBy as 'tool' | 'user'
-        : undefined,
-      requestId: typeof (rawDone as Record<string, unknown>).requestId === 'string'
-        ? (rawDone as Record<string, unknown>).requestId as string
-        : undefined,
-    }
-    : undefined
+  const rectOf = (value: unknown): { x: number; y: number; width: number; height: number } | undefined => {
+    if (typeof value !== 'object' || value === null) return undefined
+    const record = value as Record<string, unknown>
+    const num = (key: string): number | undefined =>
+      typeof record[key] === 'number' && Number.isFinite(record[key]) ? record[key] as number : undefined
+    const x = num('x')
+    const y = num('y')
+    const width = num('width')
+    const height = num('height')
+    return x !== undefined && y !== undefined && width !== undefined && height !== undefined
+      ? { x, y, width, height }
+      : undefined
+  }
+  // v2: `location` is the pet-body rect. Legacy implementations publish the
+  // same geometry as `window` — folded in, so consumers read one field.
+  const location = rectOf(raw.location) ?? rectOf(raw.window)
+  // v2 three-state world: the KEY's absence means "unsupported" (a distinct
+  // value from an explicit null = "unset, defaults apply").
+  const world = !('world' in raw) ? undefined : (rectOf(raw.world) ?? null)
   return {
     id,
     online,
@@ -153,16 +151,55 @@ export function normalizeStatus(id: string, raw: Record<string, unknown>, online
     visible: bool('visible'),
     interaction: bool('interaction'),
     bubble: bool('bubble'),
-    lastAction: raw.lastAction === null || typeof raw.lastAction === 'string'
-      ? raw.lastAction as string | null
-      : undefined,
-    lastActionAt: typeof raw.lastActionAt === 'number'
-      ? raw.lastActionAt
-      : raw.lastActionAt === null ? null : undefined,
-    lastActionDone: raw.lastActionDone === null ? null : lastActionDone,
-    window,
+    lastAction: normalizeLastAction(raw),
+    location,
+    world,
     pid: typeof raw.pid === 'number' ? raw.pid : undefined,
   }
+}
+
+/**
+ * The v3 action witness from either wire shape: the single object
+ * (`lastAction` with an id/action/startedAt/... face) reads directly; the
+ * legacy triple (lastAction/lastActionAt/lastActionDone) maps onto it —
+ * id = the legacy requestId, startedAt = the legacy acceptance timestamp,
+ * endedAt = the legacy done timestamp. The old `at`'s two meanings
+ * (electron = completion, pure = acceptance) die here: consumers see one
+ * shape where acceptance and completion are separate fields. No record
+ * anywhere normalizes to `null` — the constant-output rule.
+ */
+function normalizeLastAction(raw: Record<string, unknown>): PetLastAction | null {
+  const single = raw.lastAction
+  if (typeof single === 'object' && single !== null) {
+    const record = single as Record<string, unknown>
+    if (typeof record.action !== 'string') return null
+    return {
+      id: typeof record.id === 'string' ? record.id : null,
+      action: record.action,
+      requestedBy: record.requestedBy === 'tool' || record.requestedBy === 'user'
+        ? record.requestedBy
+        : null,
+      startedAt: typeof record.startedAt === 'number' ? record.startedAt : null,
+      durationMs: typeof record.durationMs === 'number' ? record.durationMs : null,
+      endedAt: typeof record.endedAt === 'number' ? record.endedAt : null,
+    }
+  }
+  const done = raw.lastActionDone
+  if (typeof done === 'object' && done !== null && typeof (done as Record<string, unknown>).action === 'string') {
+    const record = done as Record<string, unknown>
+    const at = typeof record.at === 'number' ? record.at : null
+    return {
+      id: typeof record.requestId === 'string' ? record.requestId : null,
+      action: record.action as string,
+      requestedBy: record.requestedBy === 'tool' || record.requestedBy === 'user'
+        ? record.requestedBy
+        : null,
+      startedAt: typeof raw.lastActionAt === 'number' ? raw.lastActionAt : at,
+      durationMs: typeof record.durationMs === 'number' ? record.durationMs : null,
+      endedAt: at,
+    }
+  }
+  return null
 }
 
 /**
@@ -215,14 +252,16 @@ export class PetHttpService extends PetService {
       if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
       caps = normalizeCapabilities(await response.json())
     } catch {
-      caps = { actions: null }
+      caps = { contractVersion: null, actions: null }
     }
     this.capsCache.set(entry.id, { at: Date.now(), caps })
     return caps
   }
 
   async call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown> {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const { timeoutMs, retry } = callBudget(path)
+    const attempts = retry ? 2 : 1
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const current = attempt === 0
         ? entry
         : (await readAllPets(this.home)).find(pet => pet.id === entry.id)
@@ -230,7 +269,14 @@ export class PetHttpService extends PetService {
         throw new Error(`pet "${entry.id}" is no longer running`)
       }
       try {
-        const response = await fetch(`http://127.0.0.1:${String(current.port)}${path}`, init)
+        // Every call carries its own deadline: an unbounded fetch inherits
+        // undici's multi-minute default and a dead pet holds the turn for
+        // minutes. The caller's own signal (whole-request cancellation)
+        // stays honored alongside it.
+        const timeout = AbortSignal.timeout(timeoutMs)
+        const callerSignal = init?.signal ?? undefined
+        const signal = callerSignal !== undefined ? AbortSignal.any([callerSignal, timeout]) : timeout
+        const response = await fetch(`http://127.0.0.1:${String(current.port)}${path}`, { ...init, signal })
         if (!response.ok) {
           // The pet's own error body (e.g. the unknown-action menu from
           // /action) is the useful half of the message — surface it instead
@@ -240,12 +286,30 @@ export class PetHttpService extends PetService {
         }
         return await response.json()
       } catch (error: unknown) {
-        if (attempt === 1) throw error
+        if (attempt === attempts - 1) throw error
         // stale entry (pet swapped/restarted mid-call): retry once fresh
       }
     }
     throw new Error('unreachable')
   }
+}
+
+/**
+ * Per-endpoint call budgets (§6 v4). One-shot endpoints fail fast — five
+ * seconds covers loopback many times over. The long-poll endpoints hang BY
+ * DESIGN, so their budget must exceed the server's hold clamp (≤30s) or
+ * every hold-to-the-dot answer would surface as a timeout; and they never
+ * retry — a retried /interaction would raise a second bubble for one ask.
+ */
+export function callBudget(path: string): { timeoutMs: number; retry: boolean } {
+  if (path === '/interaction' || path.startsWith('/interaction?')) return { timeoutMs: 45_000, retry: false }
+  if (path === '/events' || path.startsWith('/events?')) {
+    let hold = '0'
+    try { hold = new URL(path, 'http://127.0.0.1').searchParams.get('hold') ?? '0' } catch { /* malformed path: the short budget applies */ }
+    const holdSeconds = Number(hold)
+    if (Number.isFinite(holdSeconds) && holdSeconds > 0) return { timeoutMs: 45_000, retry: false }
+  }
+  return { timeoutMs: 5_000, retry: true }
 }
 
 /**

@@ -151,3 +151,31 @@ body {
   font-size: 12px;
   margin: 8px 0 0;
 }
+
+/* ── chat input card (§6 chat上行: double-click the pet body) ──────────── */
+.bubble-chat {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.bubble-chat-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #c9d4e0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1c2733;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.bubble-chat-input:focus {
+  border-color: #2f6fed;
+}
+
+.bubble-chat-input::placeholder {
+  color: #9aa7b4;
+}

@@ -48,55 +48,89 @@ describe('registry notifyPets (all-notify interactions)', () => {
 })
 
 describe('service normalizeStatus (the /status field matrix)', () => {
-  it('normalizes an electron-shaped payload, preserving constant-null fields', () => {
+  it('normalizes a v4 payload: location + three-state world + the single witness', () => {
     const snap = normalizeStatus('electron', {
       state: 'idle',
       animation: '待机呼吸休闲.webm',
       bubble: false,
-      lastAction: null,
-      lastActionAt: null,
-      lastActionDone: null,
+      lastAction: {
+        id: 'req-1', action: 'celebrate', requestedBy: 'tool',
+        startedAt: 1000, durationMs: null, endedAt: null,
+      },
       interaction: false,
       visible: true,
-      window: { x: 100, y: 200, width: 460, height: 560 },
+      location: { x: 100, y: 200, width: 460, height: 560 },
+      world: { x: 0, y: 0, width: 1920, height: 1040 },
       pid: 1,
     }, true)
     expect(snap).toMatchObject({
       id: 'electron',
       online: true,
       state: 'idle',
-      // null must survive: a conditionally-absent field is a serialization
-      // footgun — consumers test `=== null` for "no action yet".
-      lastAction: null,
-      lastActionAt: null,
-      lastActionDone: null,
+      lastAction: {
+        id: 'req-1', action: 'celebrate', requestedBy: 'tool',
+        startedAt: 1000, durationMs: null, endedAt: null,
+      },
       bubble: false,
       interaction: false,
+      location: { x: 100, y: 200, width: 460, height: 560 },
+      world: { x: 0, y: 0, width: 1920, height: 1040 },
       pid: 1,
     })
   })
 
-  it('normalizes a pure-shaped payload without electron-only fields', () => {
+  it('folds a legacy `window` into `location` (the v2 gray window)', () => {
     const snap = normalizeStatus('pure', {
       state: 'idle',
-      animation: '待机呼吸休闲.webm',
-      interaction: false,
-      visible: true,
       window: { x: 120, y: 120, width: 900, height: 560 },
       pid: 2,
     }, true)
-    expect(snap.online).toBe(true)
-    expect(snap.state).toBe('idle')
-    expect(snap.interaction).toBe(false)
-    // electron-only extras are absent, never fabricated:
-    expect(snap.bubble).toBeUndefined()
-    expect(snap.lastAction).toBeUndefined()
-    expect(snap.lastActionDone).toBeUndefined()
+    expect(snap.location).toEqual({ x: 120, y: 120, width: 900, height: 560 })
+  })
+
+  it('keeps the world three states distinct: absent = unsupported, null = unset', () => {
+    const unsupported = normalizeStatus('fish', { state: 'idle' }, true)
+    expect(unsupported.world).toBeUndefined()
+    const unset = normalizeStatus('electron', { state: 'idle', world: null }, true)
+    expect(unset.world).toBeNull()
+    const set = normalizeStatus('electron', { state: 'idle', world: { x: 0, y: 0, width: 100, height: 100 } }, true)
+    expect(set.world).toEqual({ x: 0, y: 0, width: 100, height: 100 })
+    // a mistyped world object degrades to "unset", never to a half-rect
+    const mistyped = normalizeStatus('electron', { state: 'idle', world: { x: 'a', width: 3 } }, true)
+    expect(mistyped.world).toBeNull()
+  })
+
+  it('maps the legacy lastAction triple onto the v3 single object', () => {
+    const snap = normalizeStatus('electron', {
+      lastAction: 'celebrate',
+      lastActionAt: 1793118339000,
+      lastActionDone: { action: 'celebrate.webm', durationMs: 10_042, at: 1793118339345, requestedBy: 'tool', requestId: 'req-9' },
+    }, true)
+    expect(snap.lastAction).toEqual({
+      id: 'req-9',
+      action: 'celebrate.webm',
+      requestedBy: 'tool',
+      startedAt: 1793118339000,
+      durationMs: 10_042,
+      endedAt: 1793118339345,
+    })
+    // no record anywhere normalizes to null (the constant-output rule)
+    const empty = normalizeStatus('electron', {
+      lastAction: null, lastActionAt: null, lastActionDone: null,
+    }, true)
+    expect(empty.lastAction).toBeNull()
+    // a record without a requestId (pet-local action) still maps, id null
+    const local = normalizeStatus('pure', {
+      lastActionAt: 1793118339000,
+      lastActionDone: { action: 'idle.webm', durationMs: null, at: 1793118339000 },
+    }, true)
+    expect(local.lastAction).toMatchObject({ id: null, requestedBy: null, durationMs: null })
   })
 
   it('reports an unreachable pet as offline without throwing', () => {
     const snap = normalizeStatus('pure', {}, false)
-    expect(snap).toEqual({ id: 'pure', online: false })
+    // lastAction stays the constant null even on a bare payload
+    expect(snap).toEqual({ id: 'pure', online: false, lastAction: null })
   })
 
   it('defends against mistyped fields (the wire is not trusted)', () => {
@@ -109,7 +143,8 @@ describe('service normalizeStatus (the /status field matrix)', () => {
       lastAction: 7,
       lastActionAt: 'now',
       lastActionDone: 'nope',
-      window: { x: 'a', y: 1, width: 3, height: 4 },
+      location: { x: 'a', y: 1, width: 3, height: 4 },
+      window: 'not-a-rect',
       pid: '1',
     }, true)
     expect(snap.state).toBeUndefined()
@@ -117,17 +152,9 @@ describe('service normalizeStatus (the /status field matrix)', () => {
     expect(snap.visible).toBeUndefined()
     expect(snap.interaction).toBeUndefined()
     expect(snap.bubble).toBeUndefined()
-    expect(snap.lastAction).toBeUndefined()
-    expect(snap.lastActionAt).toBeUndefined()
-    expect(snap.lastActionDone).toBeUndefined()
-    expect(snap.window).toBeUndefined()
+    // a non-object lastAction is not a record: null (no record), not undefined
+    expect(snap.lastAction).toBeNull()
+    expect(snap.location).toBeUndefined()
     expect(snap.pid).toBeUndefined()
-  })
-
-  it('keeps a well-formed lastActionDone completion record', () => {
-    const snap = normalizeStatus('electron', {
-      lastActionDone: { action: 'celebrate.webm', durationMs: 10_042, at: 1793118339345 },
-    }, true)
-    expect(snap.lastActionDone).toEqual({ action: 'celebrate.webm', durationMs: 10_042, at: 1793118339345 })
   })
 })

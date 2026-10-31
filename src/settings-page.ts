@@ -31,6 +31,19 @@ interface ProactivitySettings {
   idleAnimationGapMinutes?: number
 }
 
+/** The inner voice (docs/inner-voice.md §9): the self-initiated expression
+ * loop's config. The driver re-reads pet-settings.json fresh on every wake/
+ * touch decision, so a saved patch takes effect without any push. */
+interface InnerVoiceSettings {
+  enabled?: boolean
+  preset?: string
+  wakeIntervalMinutes?: number
+  speakProbability?: number
+  touchReplyProbability?: number
+  touchReplyCooldownSeconds?: number
+  boundSessions?: Record<string, string>
+}
+
 /** Debug switches read by the carrier at startup (CDP needs a restart). */
 interface DebugSettings {
   cdp?: boolean
@@ -38,6 +51,7 @@ interface DebugSettings {
 
 interface PetSettings {
   proactivity?: ProactivitySettings
+  innerVoice?: InnerVoiceSettings
   debug?: DebugSettings
 }
 
@@ -48,6 +62,15 @@ const DEFAULT_SETTINGS: PetSettings = {
     idleThresholdMinutes: 5,
     idleAnimation: true,
     idleAnimationGapMinutes: 10,
+  },
+  innerVoice: {
+    enabled: true,
+    preset: 'pet-inner-voice',
+    wakeIntervalMinutes: 2,
+    speakProbability: 0.5,
+    touchReplyProbability: 0.3,
+    touchReplyCooldownSeconds: 30,
+    boundSessions: {},
   },
   debug: { cdp: false },
 }
@@ -108,6 +131,7 @@ function clampNumber(value: unknown, min: number, max: number): number | undefin
 /** Merge a patch into the settings, accepting only the known keys. */
 function mergeSettings(current: PetSettings, patch: Record<string, unknown>): PetSettings {
   const proactivity = { ...DEFAULT_SETTINGS.proactivity, ...current.proactivity }
+  const innerVoice = { ...DEFAULT_SETTINGS.innerVoice, ...current.innerVoice }
   const debug = { ...DEFAULT_SETTINGS.debug, ...current.debug }
   const patchProactivity = patch.proactivity
   if (typeof patchProactivity === 'object' && patchProactivity !== null) {
@@ -121,12 +145,42 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     const gap = clampNumber(p.idleAnimationGapMinutes, 1, 120)
     if (gap !== undefined) proactivity.idleAnimationGapMinutes = gap
   }
+  const patchInnerVoice = patch.innerVoice
+  if (typeof patchInnerVoice === 'object' && patchInnerVoice !== null) {
+    const v = patchInnerVoice as Record<string, unknown>
+    if (typeof v.enabled === 'boolean') innerVoice.enabled = v.enabled
+    if (typeof v.preset === 'string' && v.preset !== '') innerVoice.preset = v.preset
+    const wake = clampNumber(v.wakeIntervalMinutes, 1, 60)
+    if (wake !== undefined) innerVoice.wakeIntervalMinutes = wake
+    // Probabilities stay fractional: clamp without the round() clampNumber applies.
+    if (typeof v.speakProbability === 'number' && Number.isFinite(v.speakProbability)) {
+      innerVoice.speakProbability = Math.min(1, Math.max(0, v.speakProbability))
+    }
+    if (typeof v.touchReplyProbability === 'number' && Number.isFinite(v.touchReplyProbability)) {
+      innerVoice.touchReplyProbability = Math.min(1, Math.max(0, v.touchReplyProbability))
+    }
+    const replyCooldown = clampNumber(v.touchReplyCooldownSeconds, 0, 600)
+    if (replyCooldown !== undefined) innerVoice.touchReplyCooldownSeconds = replyCooldown
+    // Manual binding: petId → session id, empty strings dropped; an absent
+    // key in the patch leaves the stored map untouched (partial updates).
+    const bound = v.boundSessions
+    if (typeof bound === 'object' && bound !== null) {
+      const record: Record<string, string> = {}
+      for (const [petId, sessionId] of Object.entries(bound as Record<string, unknown>)) {
+        if (petId !== '' && typeof sessionId === 'string' && sessionId !== '') record[petId] = sessionId
+      }
+      innerVoice.boundSessions = record
+    }
+  }
   const patchDebug = patch.debug
   if (typeof patchDebug === 'object' && patchDebug !== null) {
     const d = patchDebug as Record<string, unknown>
     if (typeof d.cdp === 'boolean') debug.cdp = d.cdp
   }
-  return { proactivity, debug }
+  // pet-settings.json is SHARED with the carrier (its tuning/outfit/rev keys
+  // live in the same file): preserve every key this page does not own, or one
+  // save here silently wipes the carrier's half.
+  return { ...current, proactivity, innerVoice, debug }
 }
 
 function openPathInFileManager(path: string): void {

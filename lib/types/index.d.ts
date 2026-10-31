@@ -18,7 +18,15 @@
 import type { Context } from '@deepseek-ai/cordis';
 /** Stable Cordis plugin name. */
 export declare const name = "pet-surface";
-/** Services required before the `/pet` route can register. */
+/**
+ * Services required before the `/pet` route can register. `sessionController`
+ * is a SIBLING plugin row's service (the api-session-controller row in the
+ * same composition): a command-style ctx.get from this row's fiber never sees
+ * it (the petTools/petService precedent), while static inject is resolved by
+ * the Loader ACROSS rows and waits for that row to mount — the webServer
+ * precedent. Every profile mounting this bundle mounts the web-app rows too,
+ * so the dependency is always satisfiable.
+ */
 export declare const inject: string[];
 /** The URL path prefix the pet renderer is served under. No trailing slash. */
 export declare const PET_PATH_PREFIX = "/pet";

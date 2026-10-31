@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
 
       var settings = (data && data.settings) || {}
       var pro = settings.proactivity || {}
+      var iv = settings.innerVoice || {}
       var debug = settings.debug || {}
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
@@ -145,26 +146,69 @@ window.__ModuleLoader__.load({
           } }, '重置账本'),
           h('span', { style: muted }, '每跨 10 点该宠物会自主庆祝一次'))),
 
-        // ── 自主表达 ──
-        h(Section, { title: '自主表达' },
-          h('div', { style: row }, '总开关', h(Toggle, { value: pro.enabled === true, onChange: function () {
-            update({ proactivity: { enabled: !(pro.enabled === true) } })
+        // ── 内心戏（宠物自主说话）──
+        h(Section, { title: h('span', null, '自主表达 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '模型驱动')) },
+          h('div', { style: row }, '宠物自主醒来', h(Toggle, { value: iv.enabled !== false, onChange: function () {
+            update({ innerVoice: { enabled: !(iv.enabled !== false) } })
           } })),
           h('div', { style: row },
-            '两次主动表达至少间隔',
-            h('input', { style: inputStyle, value: String(pro.cooldownMinutes ?? 10), onChange: function (e) {
+            '唤醒间隔',
+            h('input', { style: inputStyle, value: String(iv.wakeIntervalMinutes ?? 2), onChange: function (e) {
               var v = parseInt(e.target.value, 10)
-              if (Number.isFinite(v)) update({ proactivity: { cooldownMinutes: v } })
+              if (Number.isFinite(v)) update({ innerVoice: { wakeIntervalMinutes: v } })
             } }),
             '分钟'),
           h('div', { style: row },
-            '会话空闲超过',
-            h('input', { style: inputStyle, value: String(pro.idleThresholdMinutes ?? 5), onChange: function (e) {
-              var v = parseInt(e.target.value, 10)
-              if (Number.isFinite(v)) update({ proactivity: { idleThresholdMinutes: v } })
+            '请求模型的概率',
+            h('input', { style: inputStyle, value: String(Math.round(((typeof iv.speakProbability === 'number' ? iv.speakProbability : 0.5)) * 100)), onChange: function (e) {
+              var v = parseFloat(e.target.value)
+              if (Number.isFinite(v)) update({ innerVoice: { speakProbability: Math.min(100, Math.max(0, v)) / 100 } })
             } }),
-            '分钟后允许问候'),
-          h('div', { style: row }, '空闲小剧场（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {
+            '%'),
+          h('div', { style: row },
+            '被摸回应概率',
+            h('input', { style: inputStyle, value: String(Math.round(((typeof iv.touchReplyProbability === 'number' ? iv.touchReplyProbability : 0.3)) * 100)), onChange: function (e) {
+              var v = parseFloat(e.target.value)
+              if (Number.isFinite(v)) update({ innerVoice: { touchReplyProbability: Math.min(100, Math.max(0, v)) / 100 } })
+            } }),
+            '%'),
+          h('div', { style: row },
+            '两次被摸回应至少间隔',
+            h('input', { style: inputStyle, value: String(iv.touchReplyCooldownSeconds ?? Math.round((iv.touchReplyCooldownMinutes ?? 5) * 60)), onChange: function (e) {
+              var v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 0) update({ innerVoice: { touchReplyCooldownSeconds: Math.min(600, v) } })
+            } }),
+            '秒（0 = 不限）'),
+          h('div', { style: row }, '会话模式',
+            (function () {
+              var seg = function (active, side) {
+                return { padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+                  border: '1px solid ' + (active ? '#22c55e' : '#c9d4e0'),
+                  background: active ? '#22c55e' : '#f4f7fa',
+                  color: active ? '#ffffff' : '#1c2733',
+                  borderRadius: side === 'left' ? '4px 0 0 4px' : '0 4px 4px 0',
+                  marginLeft: side === 'right' ? -1 : 0 }
+              }
+              return h('div', { style: { display: 'inline-flex' } },
+                h('button', { style: seg(iv.preset !== 'pet', 'left'), onClick: function () {
+                  if (iv.preset !== 'pet-inner-voice') update({ innerVoice: { preset: 'pet-inner-voice' } })
+                } }, '精简（仅表达）'),
+                h('button', { style: seg(iv.preset === 'pet', 'right'), onClick: function () {
+                  if (iv.preset !== 'pet') update({ innerVoice: { preset: 'pet' } })
+                } }, '普通（含工作工具）'))
+            })()),
+          h('div', { style: row }, '指定会话（高级）',
+            h('input', { style: Object.assign({}, inputStyle, { width: 340, flex: '1 1 260px' }), value: String((iv.boundSessions && iv.boundSessions.electron) || ''), placeholder: '会话 id，留空 = 自动管理', onChange: function (e) {
+              var v = e.target.value.trim()
+              var next = Object.assign({}, iv.boundSessions || {})
+              if (v !== '') next.electron = v
+              else delete next.electron
+              update({ innerVoice: { boundSessions: next } })
+            } })),
+          h(Hint, null, '宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。用户忙于会话或宠物表达未完成时不会打扰。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。指定会话立即生效——下一次对话就用新绑定的会话；清空后自动回落到她之前的会话（那条若已被归档，会自动创建新的）。')),
+
+        h(Section, { title: h('span', null, '自由活动 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '逻辑驱动')) },
+          h('div', { style: row }, '自由活动（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {
             update({ proactivity: { idleAnimation: !(pro.idleAnimation !== false) } })
           } })),
           h('div', { style: row },
@@ -174,7 +218,7 @@ window.__ModuleLoader__.load({
               if (Number.isFinite(v)) update({ proactivity: { idleAnimationGapMinutes: v } })
             } }),
             '分钟'),
-          h(Hint, null, '自主表达（说话）功能开发中：开关与参数会保存，功能上线后生效。空闲小剧场已生效：宠物空闲时随机播放小动画，改动即时推送。')),
+          h(Hint, null, '自由活动：宠物空闲时随机播放一段小动画（纯动画，无模型参与），改动即时推送。')),
 
         // ── 调试 ──
         h(Section, { title: '调试' },

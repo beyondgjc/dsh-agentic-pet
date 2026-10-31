@@ -40,6 +40,10 @@ declare module '@deepseek-ai/cordis' {
         }, next: () => Promise<unknown>): Promise<unknown>;
     }
 }
+/** Local-time log stamp: the driver log is the user's primary debugging
+ * tool, so timestamps show the USER's wall clock, not UTC (toISOString's Z
+ * form read 8h off and cost a confusion round). Sortable, zero-padded. */
+export declare const logStamp: () => string;
 export declare function installPetDriver(ctx: Context, home: string, pet: PetService): void;
 /**
  * The model-expression layer: three thin tools over the pet's control

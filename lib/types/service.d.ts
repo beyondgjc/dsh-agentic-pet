@@ -23,8 +23,7 @@ declare module '@deepseek-ai/cordis' {
 export declare function petHome(): string;
 /**
  * Normalized /status snapshot. Fields beyond id/online are optional —
- * implementations differ (electron adds bubble/lastAction/lastActionAt,
- * pure adds interaction) and the raw payload must never escape: consumers
+ * implementations differ and the raw payload must never escape: consumers
  * read optional fields with defaults instead of branching per pet.
  */
 export interface PetSnapshot {
@@ -35,22 +34,40 @@ export interface PetSnapshot {
     readonly visible?: boolean | undefined;
     readonly interaction?: boolean | undefined;
     readonly bubble?: boolean | undefined;
-    readonly lastAction?: string | null | undefined;
-    readonly lastActionAt?: number | null | undefined;
-    readonly lastActionDone?: {
-        readonly action: string;
-        readonly durationMs: number | null;
-        readonly at: number;
-        readonly requestedBy?: 'tool' | 'user' | undefined;
-        readonly requestId?: string | undefined;
-    } | null | undefined;
-    readonly window?: {
+    /** The v3 action witness as ONE object; `null` = no record yet. Legacy
+     * implementations' lastAction/lastActionAt/lastActionDone triple folds in
+     * here, so consumers read a single shape. */
+    readonly lastAction?: PetLastAction | null | undefined;
+    /** v2: where the pet body is (a screen-coordinate rect). Legacy
+     * implementations publish the same geometry as `window` — folded in here. */
+    readonly location?: {
         readonly x: number;
         readonly y: number;
         readonly width: number;
         readonly height: number;
     } | undefined;
+    /** v2: where the pet may roam, THREE states — absent (undefined) = this
+     * implementation does not support it; `null` = unset (default clamping
+     * applies); object = in effect. The invariant holds per implementation:
+     * location always sits inside a set world. */
+    readonly world?: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+    } | null | undefined;
     readonly pid?: number | undefined;
+}
+/** The v3 action witness: accepted-on-write four fields, completion backfilled
+ * in place (`endedAt`/`durationMs`); `id` matches the /action response's
+ * `requestId` for tool-initiated actions (null for pet-local ones). */
+export interface PetLastAction {
+    readonly id: string | null;
+    readonly action: string;
+    readonly requestedBy: 'tool' | 'user' | null;
+    readonly startedAt: number | null;
+    readonly durationMs: number | null;
+    readonly endedAt: number | null;
 }
 /**
  * Abstract pet capability seam. Subclass, implement the abstract methods,
@@ -110,6 +127,17 @@ export declare class PetHttpService extends PetService {
     capabilities(entry: PetEntry): Promise<PetCapabilities>;
     call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>;
 }
+/**
+ * Per-endpoint call budgets (§6 v4). One-shot endpoints fail fast — five
+ * seconds covers loopback many times over. The long-poll endpoints hang BY
+ * DESIGN, so their budget must exceed the server's hold clamp (≤30s) or
+ * every hold-to-the-dot answer would surface as a timeout; and they never
+ * retry — a retried /interaction would raise a second bubble for one ask.
+ */
+export declare function callBudget(path: string): {
+    timeoutMs: number;
+    retry: boolean;
+};
 /**
  * A PetService-shaped instance WITHOUT the Service registration side effect.
  * The preset realm rejects any non-isolated service publication from its rows
