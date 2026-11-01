@@ -181,7 +181,7 @@ export const logStamp = (): string => {
 }
 
 const driverLog = (home: string, line: string): void => {
-  void appendFile(join(home, 'pet-driver.log'), `${logStamp()} ${line}
+  void appendFile(join(home, petdata.WHALE_DIR, 'pet-driver.log'), `${logStamp()} ${line}
 `, 'utf8').catch(() => {})
 }
 
@@ -1425,14 +1425,10 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
-        const callStartedAt = Date.now()
-        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
-        let callDetail: string | undefined
         const text = String(args.text).slice(0, 200)
         console.log(`pet-surface driver: pet_say ${JSON.stringify(text).slice(0, 60)}`)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
-          callPet = entry.id
           await pet.call(entry, '/say', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -1445,10 +1441,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             driverLog(home, `VOICE pending released by say pet=${entry.id} (inner-voice turn complete)`)
           }
         } catch (error: unknown) {
-          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
-        } finally {
-          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_say', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
         // The renderer's show-time formula: the model can pace a say→act
         // sequence without guessing.
@@ -1468,12 +1461,8 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
-        const callStartedAt = Date.now()
-        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
-        let callDetail: string | undefined
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
-          callPet = entry.id
           // The menu belongs to the pet, not the driver: validate against the
           // pet's advertised catalog. An unknown id is an ERROR that names the
           // available ones, so the model can self-correct in one step.
@@ -1521,10 +1510,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           }
           return JSON.stringify({ performed: true, action, waitTimedOut: true })
         } catch (error: unknown) {
-          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
-        } finally {
-          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_do', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
       },
     }))
@@ -1539,12 +1525,8 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
-        const callStartedAt = Date.now()
-        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
-        let callDetail: string | undefined
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
-          callPet = entry.id
           const cursor = digestCursors.get(entry.id) ?? 0
           let payload = await readEvents(pet, entry, cursor, 0)
           if (payload.latest < cursor) {
@@ -1579,10 +1561,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             cursor: newest,
           })
         } catch (error: unknown) {
-          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
-        } finally {
-          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_digest', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
       },
     }))
@@ -1607,7 +1586,6 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         } catch {
           // no interactions recorded yet
         }
-        void petdata.appendJsonl(petdata.toolCallsFile(home, 'all'), { tool: 'pet_interactions', petId: 'all', ok: true, durationMs: 0, at: Date.now() })
         return JSON.stringify({ recent: list.slice(0, limit) })
       },
     }))
@@ -1634,12 +1612,8 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
-        const callStartedAt = Date.now()
-        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
-        let callDetail: string | undefined
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
-          callPet = entry.id
           const ledger = await readLedger(home, entry.id)
           const pendingDecay = settleDecay(ledger, Date.now())
           const effective = Math.max(0, ledger.affection - pendingDecay)
@@ -1657,10 +1631,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             pendingDecay,
           })
         } catch (error: unknown) {
-          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
-        } finally {
-          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_affection_get', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
       },
     }))
@@ -1679,12 +1650,8 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
-        const callStartedAt = Date.now()
-        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
-        let callDetail: string | undefined
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
-          callPet = entry.id
           const ledger = await readLedger(home, entry.id)
           const now = Date.now()
           // Settle pending decay FIRST: system entries ride the same trail.
@@ -1737,10 +1704,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
           })
         } catch (error: unknown) {
-          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
-        } finally {
-          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_affection_adjust', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
       },
     }))
@@ -1788,7 +1752,6 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           // The model addresses pets by id, but should SEE the user's naming.
           return { ...base, name: voiceNames.get(state.id) ?? DEFAULT_PET_NAME[state.id] ?? state.id }
         })
-        void petdata.appendJsonl(petdata.toolCallsFile(home, 'all'), { tool: 'pet_state', petId: 'all', ok: true, durationMs: 0, at: Date.now() })
         return JSON.stringify({ defaultPet: pets[0]?.id ?? null, pets: petsOut, affection: ledgers })
       },
     }))

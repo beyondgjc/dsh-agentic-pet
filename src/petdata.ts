@@ -114,10 +114,6 @@ export function eventsFile(home: string, petId: string): string {
   return join(petDataDir(home, petId), 'events.jsonl')
 }
 
-export function toolCallsFile(home: string, petId: string): string {
-  return join(petDataDir(home, petId), 'toolcalls.jsonl')
-}
-
 /** Append one record; bounded retention trims the file when it outgrows the
  * cap (best-effort — a failed trim never loses the append). */
 export async function appendJsonl(file: string, entry: Record<string, unknown>): Promise<void> {

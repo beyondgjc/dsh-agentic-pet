@@ -285,9 +285,8 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
       if (label !== undefined) names[id] = label
     }
     const composed = { ...settings, names }
-    // 三期 history: per-pet touch totals + recent tool calls, aggregated
-    // from the whale598/<petId>/ JSONL streams.
-    const history: Array<Record<string, unknown>> = []
+    // 三期 touch totals: per-pet touch facts aggregated from the events
+    // stream (tool calls live in the session transcripts, not here).
     const touchTotals: Record<string, { total: number; byPart: Record<string, number> }> = {}
     for (const id of bookIds) {
       const events = await petdata.readJsonl(petdata.eventsFile(home, id), 600)
@@ -299,12 +298,8 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
         totals.byPart[part] = (totals.byPart[part] ?? 0) + 1
       }
       if (totals.total > 0) touchTotals[id] = totals
-      for (const call of await petdata.readJsonl(petdata.toolCallsFile(home, id), 12)) {
-        history.push({ ...call, petId: id })
-      }
     }
-    history.sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0))
-    writeJson(res, 200, { settings: composed, affection, windowPosition, pets: status.pets, history: history.slice(0, 12), touchTotals })
+    writeJson(res, 200, { settings: composed, affection, windowPosition, pets: status.pets, touchTotals })
   })
 
   route('POST', '/api/pet-settings/update', async (req, res) => {

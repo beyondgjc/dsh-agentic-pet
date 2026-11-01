@@ -34,7 +34,6 @@ export declare function readPetName(home: string, petId: string): Promise<string
  * names map so the old layout cannot resurrect a cleared name. */
 export declare function writePetName(home: string, petId: string, name: string | null): Promise<void>;
 export declare function eventsFile(home: string, petId: string): string;
-export declare function toolCallsFile(home: string, petId: string): string;
 /** Append one record; bounded retention trims the file when it outgrows the
  * cap (best-effort — a failed trim never loses the append). */
 export declare function appendJsonl(file: string, entry: Record<string, unknown>): Promise<void>;
