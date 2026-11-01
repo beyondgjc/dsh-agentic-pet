@@ -1,7 +1,7 @@
 {
   "name": "dsh-agentic-pet",
   "description": "The pet-surface bundle: serves the desktop pet renderer over the web composition, turning dsh into a surface the desktop pet attaches to as an authenticated client",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publishConfig": {
     "access": "public"
   },
@@ -57,13 +57,5 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:~"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/beyondgjc/dsh-agentic-pet.git"
-  },
-  "bugs": {
-    "url": "https://github.com/beyondgjc/dsh-agentic-pet/issues"
-  },
-  "homepage": "https://github.com/beyondgjc/dsh-agentic-pet#readme"
+  }
 }
