@@ -130,7 +130,7 @@ process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true'
 // ── boot logger (diagnostic injection, remove after incident) ──────────────
 import { appendFileSync as __afs } from 'node:fs'
 const __bootLog = (line: string): void => {
-  try { __afs('C:/Users/beyondguo/.dsh/carrier-boot.log', `${new Date().toISOString()} ${line}\n`) } catch { /* ignore */ }
+  try { __afs('C:/Users/beyondguo/.dsh/whale598/carrier-boot.log', `${new Date().toISOString()} ${line}\n`) } catch { /* ignore */ }
 }
 __bootLog(`BOOT pid=${process.pid} argv=${JSON.stringify(process.argv.slice(1))} runAsNode=${process.env.ELECTRON_RUN_AS_NODE ?? 'unset'} nodeOptions=${process.env.NODE_OPTIONS ?? 'unset'} dshPetUrl=${process.env.DSH_PET_URL ? 'set' : 'unset'} cwd=${process.cwd()}`)
 process.on('uncaughtException', (e) => { __bootLog(`UNCAUGHT ${e.stack ?? String(e)}`) })
@@ -318,17 +318,21 @@ function spawnHostChild(): HostChildHandle {
  * runs, otherwise the last publisher still alive.
  */
 async function readLocatorUrl(): Promise<string | undefined> {
-  const path = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'pet-surface-url.json')
-  try {
-    const record = JSON.parse(await readFile(path, 'utf8')) as { url?: unknown; pid?: unknown }
-    if (typeof record.url !== 'string' || record.url === '') return undefined
-    if (typeof record.pid === 'number') {
-      try { process.kill(record.pid, 0) } catch { return undefined } // publisher gone
-    }
-    return record.url
-  } catch {
-    return undefined // absent or unreadable: no live publisher
+  // whale598/ first (current publisher), then the legacy root copy — the
+  // locator moved with the whale598 consolidation (publishLocator writes the
+  // new path; old copies answer as fallback).
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  for (const path of [join(home, 'whale598', 'pet-surface-url.json'), join(home, 'pet-surface-url.json')]) {
+    try {
+      const record = JSON.parse(await readFile(path, 'utf8')) as { url?: unknown; pid?: unknown }
+      if (typeof record.url !== 'string' || record.url === '') continue
+      if (typeof record.pid === 'number') {
+        try { process.kill(record.pid, 0) } catch { return undefined } // publisher gone
+      }
+      return record.url
+    } catch { /* try the next location */ }
   }
+  return undefined
 }
 
 /**
@@ -998,8 +1002,7 @@ async function main(): Promise<void> {
     const writeManifest = (): void => {
       void writeFile(join(registryDir, 'electron.json'), manifest, 'utf8')
         .catch((error: unknown) => { console.error('[pet] could not write the registry entry:', String(error)) })
-      void writeFile(join(DSH_HOME, 'pet-http-electron.json'), manifest, 'utf8')
-        .catch(() => { /* legacy mirror: pre-registry readers only */ })
+      // legacy 根镜像（pet-http-electron.json）停写：读侧双目录扫描已覆盖
     }
     writeManifest()
     // Re-assert on a cadence so a stale publisher cannot shadow a live pet.

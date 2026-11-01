@@ -110,7 +110,7 @@ process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 import { appendFileSync as __afs } from 'node:fs';
 const __bootLog = (line) => {
     try {
-        __afs('C:/Users/beyondguo/.dsh/carrier-boot.log', `${new Date().toISOString()} ${line}\n`);
+        __afs('C:/Users/beyondguo/.dsh/whale598/carrier-boot.log', `${new Date().toISOString()} ${line}\n`);
     }
     catch { /* ignore */ }
 };
@@ -291,24 +291,28 @@ function spawnHostChild() {
  * runs, otherwise the last publisher still alive.
  */
 async function readLocatorUrl() {
-    const path = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'pet-surface-url.json');
-    try {
-        const record = JSON.parse(await readFile(path, 'utf8'));
-        if (typeof record.url !== 'string' || record.url === '')
-            return undefined;
-        if (typeof record.pid === 'number') {
-            try {
-                process.kill(record.pid, 0);
+    // whale598/ first (current publisher), then the legacy root copy — the
+    // locator moved with the whale598 consolidation (publishLocator writes the
+    // new path; old copies answer as fallback).
+    const home = process.env.DSH_HOME ?? join(homedir(), '.dsh');
+    for (const path of [join(home, 'whale598', 'pet-surface-url.json'), join(home, 'pet-surface-url.json')]) {
+        try {
+            const record = JSON.parse(await readFile(path, 'utf8'));
+            if (typeof record.url !== 'string' || record.url === '')
+                continue;
+            if (typeof record.pid === 'number') {
+                try {
+                    process.kill(record.pid, 0);
+                }
+                catch {
+                    return undefined;
+                } // publisher gone
             }
-            catch {
-                return undefined;
-            } // publisher gone
+            return record.url;
         }
-        return record.url;
+        catch { /* try the next location */ }
     }
-    catch {
-        return undefined; // absent or unreadable: no live publisher
-    }
+    return undefined;
 }
 /**
  * The pet surface URL for an authenticated web root: path `/whale598/` with the
@@ -993,8 +997,7 @@ async function main() {
         const writeManifest = () => {
             void writeFile(join(registryDir, 'electron.json'), manifest, 'utf8')
                 .catch((error) => { console.error('[pet] could not write the registry entry:', String(error)); });
-            void writeFile(join(DSH_HOME, 'pet-http-electron.json'), manifest, 'utf8')
-                .catch(() => { });
+            // legacy 根镜像（pet-http-electron.json）停写：读侧双目录扫描已覆盖
         };
         writeManifest();
         // Re-assert on a cadence so a stale publisher cannot shadow a live pet.
