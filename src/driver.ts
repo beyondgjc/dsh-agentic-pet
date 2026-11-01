@@ -85,9 +85,10 @@ declare module '@deepseek-ai/cordis' {
 /** The affection ledger. TWO layers with separate writers: the touch
  * FACTS (total/byPart/lastTouchAt/recent) are system-recorded from events;
  * the `affection` VALUE is the model's judgment, maintained through
- * pet_affection_adjust (delta + mandatory reason) — the driver never
- * moves it on a touch. Every judgment change lands in `adjustments`
- * (audit trail, incl. system decay entries marked system:true). */
+ * pet_affection_adjust (delta + mandatory reason) — the driver NEVER moves
+ * it: it records and reports facts (touches, times), the model judges.
+ * Every judgment change lands in `adjustments` (audit trail; `system` only
+ * ever appears on legacy entries from the removed system-decay era). */
 interface TouchLedger {
   affection: number
   total: number
@@ -96,7 +97,6 @@ interface TouchLedger {
   recent: Array<{ part: string; at: number }>
   adjustments?: Array<{ delta: number; reason: string; at: number; system?: boolean }> | undefined
   quota?: { date: string; count: number; sum: number } | undefined
-  lastDecayAt?: number | undefined
   /** B 层 · 羁绊，TWO fields with separate writers — mixing them made
    * both untrustworthy (a pet's considered -1 was cancelled by the next
    * day's automatic +1; the tier was counting app-open days):
@@ -116,10 +116,6 @@ const ADJUST_MAX_DELTA = 3
 const ADJUST_COOLDOWN_MS = 5 * 60_000
 const ADJUST_DAILY_LIMIT = 8
 const ADJUST_DAILY_SUM = 10
-// Decay is SYSTEM-computed (lazy — no timer): silent for 3 days, then -1
-// per further 3 days, floor 0.
-const DECAY_START_DAYS = 3
-const DECAY_STEP_DAYS = 3
 
 async function readLedger(home: string, petId: string): Promise<TouchLedger> {
   try {
@@ -143,7 +139,6 @@ async function readLedger(home: string, petId: string): Promise<TouchLedger> {
       quota: typeof raw.quota === 'object' && raw.quota !== null
         ? raw.quota as TouchLedger['quota']
         : undefined,
-      lastDecayAt: typeof raw.lastDecayAt === 'number' ? raw.lastDecayAt : undefined,
       bond: typeof raw.bond === 'object' && raw.bond !== null
         && typeof (raw.bond as Record<string, unknown>).lastCountedDate === 'string'
         ? {
@@ -1350,6 +1345,11 @@ ${text}`
 export function registerPetTools(ctx: Context, home: string, pet: PetService): void {
   ctx.inject(['tools'], (scope) => {
     console.log('pet-surface driver: pet tools registered')
+    // A FACT, not a mechanism: when this dsh start happened (tool
+    // registration runs once per driver activation). Reported to the model
+    // as lastLoginAt so it can judge time itself — the system reports
+    // facts, it never moves the values.
+    const dshLoginAt = Date.now()
     // Model expression targets a pet by id — the default pet when no target
     // is named (first live entry). Resolution and the one-retry policy live
     // behind the pet capability seam; the model can address any running pet
@@ -1592,18 +1592,9 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     // ── model-maintained affection (判断层)：the ONLY writers of
     // ledger.affection. Touch facts stay system-owned; the model reads them
     // and judges. ──
-    const settleDecay = (ledger: TouchLedger, now: number): number => {
-      // System-side decay, lazy: silent for DECAY_START_DAYS since the last
-      // interaction of ANY kind (touch or model adjustment), then -1 per
-      // DECAY_STEP_DAYS, floor 0. Returns the pending (unrecorded) units.
-      const lastInteraction = Math.max(ledger.lastTouchAt ?? 0, ledger.adjustments?.[0]?.at ?? 0, ledger.lastDecayAt ?? 0)
-      const silentDays = (now - lastInteraction) / 86_400_000
-      if (silentDays <= DECAY_START_DAYS) return 0
-      return Math.min(ledger.affection, Math.floor((silentDays - DECAY_START_DAYS) / DECAY_STEP_DAYS) + 1)
-    }
     scope.tools.register(defineTool({
       name: 'pet_affection_get',
-      description: 'Read the FULL affection context before adjusting it: the current value you maintain (and its mood), the touch FACTS the system records (counts by part — cause, not feeling), your recent adjustments with their reasons, the remaining daily quota, and any pending decay. Call this whenever you are deciding whether and how to adjust.',
+      description: 'Read the FULL affection context before adjusting it: the current value you maintain (and its mood), the touch FACTS the system records (counts by part — cause, not feeling), your recent adjustments with their reasons, the remaining daily quota, and the time facts (now / lastInteractionAt / lastLoginAt, epoch ms — the system only records and reports facts, it never moves affection or bond). Judge honestly: if the silence since lastInteractionAt has made the current value no longer true, adjust it yourself with a concrete reason.',
       parameters: {
         pet: { type: 'string', description: 'Which pet: its id from pet_state. Omit for the default pet.' },
       },
@@ -1615,20 +1606,23 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
           const ledger = await readLedger(home, entry.id)
-          const pendingDecay = settleDecay(ledger, Date.now())
-          const effective = Math.max(0, ledger.affection - pendingDecay)
+          const now = Date.now()
+          // FACTS for the model's judgment: the last time ANY interaction
+          // happened (a touch or one of your own adjustments), and when this
+          // dsh start happened. No decay is applied here — or anywhere.
+          const lastInteractionAt = Math.max(ledger.lastTouchAt ?? 0, ledger.adjustments?.[0]?.at ?? 0)
           const today = new Date().toDateString()
           const quota = ledger.quota?.date === today ? ledger.quota : { date: today, count: 0, sum: 0 }
           return JSON.stringify({
             pet: entry.id,
-            affection: effective,
-            mood: moodOf(effective),
+            affection: ledger.affection,
+            mood: moodOf(ledger.affection),
             touch: { total: ledger.total, byPart: ledger.byPart, lastTouchAt: ledger.lastTouchAt ?? null },
             bond: { value: ledger.bond?.value ?? 0, days: ledger.bond?.days ?? 0, tier: bondTier(ledger.bond?.value ?? 0) },
             recentBondAdjustments: (ledger.bondAdjustments ?? []).slice(0, 3),
             recentAdjustments: (ledger.adjustments ?? []).slice(0, 5),
             quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
-            pendingDecay,
+            facts: { now, lastInteractionAt: lastInteractionAt > 0 ? lastInteractionAt : null, lastLoginAt: dshLoginAt },
           })
         } catch (error: unknown) {
           throw classify(error)
@@ -1654,13 +1648,6 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
           const ledger = await readLedger(home, entry.id)
           const now = Date.now()
-          // Settle pending decay FIRST: system entries ride the same trail.
-          const pendingDecay = settleDecay(ledger, now)
-          if (pendingDecay > 0) {
-            ledger.affection = Math.max(0, ledger.affection - pendingDecay)
-            ledger.adjustments = [{ delta: -pendingDecay, reason: `system: decay（${String(pendingDecay)} 天未互动）`, at: now, system: true }, ...(ledger.adjustments ?? [])]
-            ledger.lastDecayAt = now
-          }
           const delta = typeof args.delta === 'number' && Number.isInteger(args.delta) ? args.delta : Number.NaN
           const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
           if (Number.isNaN(delta) || delta === 0 || Math.abs(delta) > ADJUST_MAX_DELTA) {

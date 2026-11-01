@@ -9,6 +9,7 @@
   },
   "include": [
     "src/main.ts",
+    "src/tts.ts",
     "src/host-child.ts",
     "src/preload.ts"
   ],
