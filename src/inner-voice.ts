@@ -7,8 +7,8 @@
  * @module dsh-agentic-pet/inner-voice
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { WHALE_DIR, readGlobalJson, writeGlobalJson } from './petdata.ts'
 
 /** Durable petId → sessionId mapping for the inner-voice sessions. */
 export interface InnerVoiceStore {
@@ -69,7 +69,7 @@ const finite01 = (value: unknown, fallback: number): number =>
  * folds to its default (defensive parse, `readAutonomy` precedent). */
 export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConfig> {
   try {
-    const raw = JSON.parse(await readFile(join(home, 'pet-settings.json'), 'utf8')) as {
+    const raw = await readGlobalJson(home, 'pet-settings.json') as {
       innerVoice?: unknown
     }
     const v = (typeof raw.innerVoice === 'object' && raw.innerVoice !== null ? raw.innerVoice : {}) as {
@@ -125,7 +125,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
 }
 
 export function innerVoiceStorePath(home: string): string {
-  return join(home, 'pet-inner-voice.json')
+  return join(home, WHALE_DIR, 'pet-inner-voice.json')
 }
 
 /** Defensive extraction of the persisted generation counters (petId → n). */
@@ -140,8 +140,10 @@ function generationsOf(raw: { generations?: unknown }): Record<string, number> {
 }
 
 export async function loadInnerVoiceStore(home: string): Promise<InnerVoiceStore> {
+  // readGlobalJson: whale598/ → legacy root → {} (the lazy-migration
+  // contract — the legacy root copy answers until the first save).
   try {
-    const raw = JSON.parse(await readFile(innerVoiceStorePath(home), 'utf8')) as {
+    const raw = await readGlobalJson(home, 'pet-inner-voice.json') as {
       sessions?: unknown
       generations?: unknown
     }
@@ -165,7 +167,7 @@ export async function loadInnerVoiceStore(home: string): Promise<InnerVoiceStore
 
 export async function saveInnerVoiceStore(home: string, store: InnerVoiceStore): Promise<void> {
   try {
-    await writeFile(innerVoiceStorePath(home), `${JSON.stringify(store)}\n`, 'utf8')
+    await writeGlobalJson(home, 'pet-inner-voice.json', store as unknown as Record<string, unknown>)
   } catch (error: unknown) {
     console.error(`pet-surface inner-voice: could not write the store: ${error instanceof Error ? error.message : String(error)}`)
   }

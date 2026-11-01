@@ -348,6 +348,9 @@ function markVoiceSpoke(petId: string): boolean {
 
 export function installPetDriver(ctx: Context, home: string, pet: PetService): void {
   driverLog(home, 'installPetDriver entered')
+  // Global state files consolidated under whale598/ — rename legacy copies
+  // once (best-effort; the read fallback covers a failed rename).
+  void petdata.migrateGlobals(home)
   // Inner-voice (re)initialization: a re-install must not inherit stale
   // owners from a previous driver generation. The store on disk is the
   // durable petId→sessionId truth; the maps are rebuilt from it.
@@ -524,7 +527,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
    */
   const readAutonomy = async (): Promise<{ idleAnimation: boolean; gapMinutes: number }> => {
     try {
-      const raw = JSON.parse(await readFile(join(home, 'pet-settings.json'), 'utf8')) as {
+      const raw = await petdata.readGlobalJson(home, 'pet-settings.json') as {
         proactivity?: { idleAnimation?: unknown; idleAnimationGapMinutes?: unknown }
       }
       const p = raw.proactivity
@@ -640,7 +643,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     } catch { /* no whale598 dir yet */ }
     // Legacy names in pet-settings.json (readPetName falls back per id too).
     try {
-      const raw = JSON.parse(await readFile(join(home, 'pet-settings.json'), 'utf8')) as { names?: unknown }
+      const raw = await petdata.readGlobalJson(home, 'pet-settings.json') as { names?: unknown }
       if (typeof raw.names === 'object' && raw.names !== null) {
         for (const [petId, label] of Object.entries(raw.names as Record<string, unknown>)) {
           if (petId !== '' && typeof label === 'string' && label.trim() !== '' && !voiceNames.has(petId)) {
@@ -742,7 +745,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   // alike — 40 test rounds of ambiguity. The driver is the one vantage point
   // that knows the difference; entries carry the correlation id the wire
   // lacks. Also the cross-turn memory: the model can recall past decisions.
-  const interactionLedgerFile = join(home, 'pet-interactions.json')
+  const interactionLedgerFile = petdata.globalFilePath(home, 'pet-interactions.json')
   const recordInteraction = (entry: {
     id: string
     kind: string
@@ -1359,7 +1362,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     // focus only decides the unnamed-expression target.
     const readFocus = async (): Promise<string | undefined> => {
       try {
-        const raw = JSON.parse(await readFile(join(home, 'pet-settings.json'), 'utf8')) as { focus?: unknown }
+        const raw = await petdata.readGlobalJson(home, 'pet-settings.json') as { focus?: unknown }
         return typeof raw.focus === 'string' && raw.focus !== '' ? raw.focus : undefined
       } catch {
         return undefined
@@ -1599,7 +1602,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           : 10
         let list: Array<Record<string, unknown>> = []
         try {
-          const raw = JSON.parse(await readFile(join(home, 'pet-interactions.json'), 'utf8')) as unknown
+          const raw = await petdata.readGlobalJson(home, 'pet-interactions.json') as unknown
           if (Array.isArray(raw)) list = raw as Array<Record<string, unknown>>
         } catch {
           // no interactions recorded yet

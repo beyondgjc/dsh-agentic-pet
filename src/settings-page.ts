@@ -13,7 +13,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { readFile, unlink, writeFile } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -206,8 +206,9 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
   // Pet visibility flows through the capability seam: discovery, liveness,
   // and the /status field matrix are the service's job — this page only
   // renders.
-  const settingsPath = join(home, 'pet-settings.json')
-  const windowPath = join(home, 'pet-window.json')
+  // pet-settings.json / pet-window.json moved under whale598/ — reads fall
+  // back to the legacy root copies (petdata), writes go to the new layout.
+  const windowPath = petdata.globalFilePath(home, 'pet-window.json')
 
   /** Summarize EVERY live pet (id, online flag, normalized /status). */
   const petStatus = async (): Promise<{ pets: Array<Record<string, unknown>> }> => {
@@ -218,12 +219,9 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
   }
 
   const readSettings = async (): Promise<PetSettings> => {
-    try {
-      const parsed = JSON.parse(await readFile(settingsPath, 'utf8')) as PetSettings
-      return mergeSettings(parsed, {})
-    } catch {
-      return mergeSettings({}, {})
-    }
+    // readGlobalJson: whale598/ → legacy root → {} (mergeSettings folds defaults)
+    const parsed = await petdata.readGlobalJson(home, 'pet-settings.json') as PetSettings
+    return mergeSettings(parsed, {})
   }
 
   const routeByPath = new Map<string, Map<string, (req: IncomingMessage, res: ServerResponse) => Promise<void>>>()
@@ -265,9 +263,8 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
   route('GET', '/api/pet-settings/read', async (_req, res) => {
     const [settings, windowPosition, status] = await Promise.all([
       readSettings(),
-      readFile(windowPath, 'utf8').then(
-        raw => JSON.parse(raw) as Record<string, unknown>,
-        () => null,
+      petdata.readGlobalJson(home, 'pet-window.json').then(
+        raw => (Object.keys(raw).length > 0 ? raw : null),
       ),
       petStatus(),
     ])
@@ -329,7 +326,7 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     }
     const current = await readSettings()
     const next = mergeSettings(current, patch as Record<string, unknown>)
-    await writeFile(settingsPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+    await petdata.writeGlobalJson(home, 'pet-settings.json', next as Record<string, unknown>)
     // The driver re-pushes the autonomy payload to the pets on this event —
     // a changed switch reaches the renderer without waiting for the next
     // session state transition.
@@ -343,7 +340,7 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
   })
 
   route('POST', '/api/pet-settings/reset-position', async (_req, res) => {
-    if (existsSync(windowPath)) await unlink(windowPath)
+    for (const p of [windowPath, join(home, 'pet-window.json')]) await rm(p, { force: true })
     writeJson(res, 200, { ok: true })
   })
 

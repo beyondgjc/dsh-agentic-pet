@@ -41,4 +41,20 @@ export declare function appendJsonl(file: string, entry: Record<string, unknown>
 /** The last `limit` records (oldest last); malformed lines degrade to
  * `{raw}` instead of dropping the file. */
 export declare function readJsonl(file: string, limit: number): Promise<Array<Record<string, unknown>>>;
+export declare const GLOBAL_STATE_FILES: string[];
+export declare function globalPaths(home: string, name: string): {
+    current: string;
+    legacy: string;
+};
+export declare function globalFilePath(home: string, name: string): string;
+/** Rename legacy → current for every global file that hasn't moved yet.
+ * Best-effort: a failed rename leaves the legacy copy in place and the read
+ * fallback still answers. Called once at driver install. */
+export declare function migrateGlobals(home: string): Promise<void>;
+/** Read a global state file: current → legacy → {} (callers' defensive
+ * field checks treat {} exactly like a missing file). */
+export declare function readGlobalJson(home: string, name: string): Promise<Record<string, unknown>>;
+/** Write a global state file (current location only; pretty-printed — these
+ * files are user-inspectable and hand-editable). */
+export declare function writeGlobalJson(home: string, name: string, obj: Record<string, unknown>): Promise<void>;
 //# sourceMappingURL=petdata.d.ts.map

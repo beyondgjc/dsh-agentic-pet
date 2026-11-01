@@ -108,12 +108,19 @@ describe('readInnerVoiceConfig', () => {
 })
 
 describe('inner-voice store', () => {
-  it('round-trips petId → sessionId entries', async () => {
+  it('round-trips petId → sessionId entries (saved under whale598/)', async () => {
     const home = await tempHome()
     expect(await loadInnerVoiceStore(home)).toEqual({ sessions: {}, generations: {} })
     const store = { sessions: { electron: { sessionId: 'whale598-electron-g0', createdAt: 12 } }, generations: { electron: 3 } }
     await saveInnerVoiceStore(home, store)
-    expect(JSON.parse(await readFile(join(home, 'pet-inner-voice.json'), 'utf8'))).toEqual(store)
+    // New layout: the store lives under whale598/ (the legacy root copy is
+    // only a read fallback until the first save moves it).
+    expect(JSON.parse(await readFile(join(home, 'whale598', 'pet-inner-voice.json'), 'utf8'))).toEqual(store)
+    expect(await loadInnerVoiceStore(home)).toEqual(store)
+    // Legacy root copy (pre-consolidation) still answers when the new
+    // file is absent — the lazy-migration contract.
+    await rm(join(home, 'whale598', 'pet-inner-voice.json'), { force: true })
+    await writeFile(join(home, 'pet-inner-voice.json'), JSON.stringify(store), 'utf8')
     expect(await loadInnerVoiceStore(home)).toEqual(store)
   })
 
