@@ -30,7 +30,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { installPetDriver } from './driver.ts'
 import { installSettingsPage } from './settings-page.ts'
-import { installPetService } from './service.ts'
+import { installPetService, petHome } from './service.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'pet-surface'
@@ -58,7 +58,8 @@ export const PET_PATH_PREFIX = '/whale598'
  * publisher, then falls back to spawning its own profile.
  */
 export function petLocatorPath(): string {
-  return join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'pet-surface-url.json')
+  // whale598/ 命名空间（与注册表/数据仓库一致）；载体 readLocatorUrl 双路读取
+  return join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'whale598', 'pet-surface-url.json')
 }
 
 const HTML_MIME = 'text/html; charset=utf-8'
@@ -386,15 +387,20 @@ export function apply(ctx: Context): void {
   // not wait for queued plugin fibers and threw "not found", failing the
   // whole apply (routes rolled back, locator withdrawn, carrier killed).
   // Future external plugins can still inject: ['petService'].
-  const pet = installPetService(ctx, dirname(petLocatorPath()))
+  // The dsh home (~/.dsh) is the one base every petdata/global helper joins
+  // WHALE_DIR onto. NEVER derive it from the locator file's dirname — that
+  // coupling silently rebased the whole driver when the locator moved under
+  // whale598/ and doubled every path (whale598/whale598/).
+  const home = petHome()
+  const pet = installPetService(ctx, home)
 
-  installPetDriver(ctx, dirname(petLocatorPath()), pet)
+  installPetDriver(ctx, home, pet)
 
   // The model-expression tools moved behind the pet preset (presets/pet.patch.yml
   // composes the ./tools entry) — sessions mounting other presets keep a clean
   // tool catalog. The host-side glue above stays unconditional.
   // The desktop sidebar settings page's host half (client half: ./client/).
-  installSettingsPage(ctx, dirname(petLocatorPath()), pet)
+  installSettingsPage(ctx, home, pet)
   // Withdraw on dispose while still our own entry, so a shut-down runtime does
   // not shadow a live publisher's file.
   ctx.effect(() => () => {
