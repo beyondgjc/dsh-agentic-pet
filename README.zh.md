@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 简介
 
-`dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`）——模型可以借宠物说话、做动作、感知被触摸。多只宠物实现可以并存：目录注册表（`~/.dsh/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
+`dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`）——模型可以借宠物说话、做动作、感知被触摸。说话内容可通过 [BreezeBlue](https://breezeblue.ai) TTS 朗读——carrier 侧合成每条 `/say` 文本，语音就绪后与气泡同时下发；合成失败或超时静默降级为只显示（桌面设置页可配）。多只宠物实现可以并存：目录注册表（`~/.dsh/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
 
 宠物本身是零 DSH 知识的纯显示端。理解运行时的一切——事件收敛、交互瀑布、多宠路由、模型工具——都在插件的 driver 里，宠物只实现一个小型本地 HTTP 控制接口。任何讲同一 HTTP 契约的宠物实现都能被采纳，插件零改动。
 
@@ -47,6 +47,7 @@ TypeScript 构建仍在 dsh monorepo workspace 内进行（被打包的 `@deepse
 ## 文档
 
 - 控制面契约（所有宠物实现共同讲述的冻结消费方 API）见项目文档的多宠指南。
+- 说话朗读（BreezeBlue TTS）设计笔记见 monorepo 工作区的 `packages/bundle/pet-app/docs/tts.md`。
 - 已知边界与设计笔记见仓库 wiki 与项目工程文档。
 
 
