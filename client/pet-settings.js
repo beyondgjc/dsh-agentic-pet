@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
     var useState = React.useState
     var useEffect = React.useEffect
     var useCallback = React.useCallback
+    var useRef = React.useRef
 
     var READ = '/api/pet-settings/read'
     var UPDATE = '/api/pet-settings/update'
@@ -60,6 +61,11 @@ window.__ModuleLoader__.load({
       var busyState = useState(false)
       var busy = busyState[0]
       var setBusy = busyState[1]
+      // 语音朗读的声音选择器：null = 收起；展开后 {loading, error, items, search}。
+      var voiceState = useState(null)
+      var voice = voiceState[0]
+      var setVoice = voiceState[1]
+      var previewAudioRef = useRef(null)
 
       var refresh = useCallback(function () {
         fetch(READ, { credentials: 'same-origin' })
@@ -91,6 +97,7 @@ window.__ModuleLoader__.load({
       var settings = (data && data.settings) || {}
       var pro = settings.proactivity || {}
       var iv = settings.innerVoice || {}
+      var tts = settings.tts || {}
       var debug = settings.debug || {}
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
@@ -126,6 +133,31 @@ window.__ModuleLoader__.load({
       }
 
       function update(patch, doneMessage) { act(UPDATE, { patch: patch }, doneMessage) }
+
+      // ── 语音朗读（BreezeBlue TTS）的取声/试听 ──
+      // 列表走宿主代理路由（浏览器直连 api.breeze.blue 会被 CORS 拦下，
+      // key 也不该进页面日志）；试听直接播 preview_url，不经过本插件。
+      var loadVoices = function (search) {
+        setVoice({ loading: true, error: '', items: (voice && voice.items) || [], search: search || '' })
+        fetch('/api/pet-settings/tts/voices?search=' + encodeURIComponent(search || ''), { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (d && d.error) setVoice({ loading: false, error: d.error, items: [], search: search || '' })
+            else setVoice({ loading: false, error: '', items: (d && d.voices) || [], search: search || '' })
+          })
+          .catch(function (e) {
+            setVoice({ loading: false, error: '请求失败: ' + ((e && e.message) || e), items: [], search: search || '' })
+          })
+      }
+      var playPreview = function (url) {
+        if (!url) return
+        try {
+          if (previewAudioRef.current) previewAudioRef.current.pause()
+          var audio = new Audio(url)
+          previewAudioRef.current = audio
+          audio.play().catch(function () { /* 试听失败不打断配置 */ })
+        } catch (e) { /* ignore */ }
+      }
 
       return h('div', { style: { width: '100%', maxWidth: 720 } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 10px' } },
@@ -253,6 +285,59 @@ window.__ModuleLoader__.load({
             } }),
             '分钟'),
           h(Hint, null, '自由活动：宠物空闲时随机播放一段小动画（纯动画，无模型参与），改动即时推送。')),
+
+        // ── 语音朗读（BreezeBlue TTS）──
+        h(Section, { title: h('span', null, '语音朗读 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, 'BreezeBlue TTS')) },
+          h('div', { style: row }, '朗读开关', h(Toggle, { value: tts.enabled === true, onChange: function () {
+            update({ tts: { enabled: !(tts.enabled === true) } })
+          } }),
+          h('span', { style: muted }, '宠物展示说话气泡的同时读出来')),
+          // key / 声音 / 语速音量均为 commit-on-blur：输入期间不落盘，
+          // 清空 = 删除配置（宠物回落为不朗读）。
+          h('div', { style: row },
+            'API Key',
+            h('input', { key: 'tts-key-' + String(tts.apiKey || ''), style: Object.assign({}, inputStyle, { width: 260 }), type: 'password', defaultValue: tts.apiKey || '', placeholder: 'brz_...（breezeblue.ai 申请）',
+              onBlur: function (e) { var v = e.target.value.trim(); if (v !== (tts.apiKey || '')) update({ tts: { apiKey: v } }) },
+              onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } })),
+          h('div', { style: row },
+            '声音',
+            h('input', { key: 'tts-voice-' + String(tts.voiceId || ''), style: Object.assign({}, inputStyle, { width: 210, fontFamily: 'monospace' }), defaultValue: tts.voiceId || '', placeholder: 'voice_id，点右侧选择',
+              onBlur: function (e) { var v = e.target.value.trim(); if (v !== (tts.voiceId || '')) update({ tts: { voiceId: v } }) },
+              onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
+            h(SButton, { disabled: busy, onClick: function () {
+              if (voice) setVoice(null)
+              else loadVoices('')
+            } }, voice ? '收起' : '选择声音')),
+          voice
+            ? h('div', { style: { border: '1px solid rgba(127,127,127,.3)', borderRadius: 8, padding: '8px 10px', margin: '4px 0 6px' } },
+                h('div', { style: row },
+                  h('input', { style: Object.assign({}, inputStyle, { width: 190 }), value: voice.search || '', placeholder: '搜索声音（名称/风格）',
+                    onChange: function (e) { setVoice(Object.assign({}, voice, { search: e.target.value })) },
+                    onKeyDown: function (e) { if (e.key === 'Enter') loadVoices(voice.search) } }),
+                  h(SButton, { disabled: voice.loading, onClick: function () { loadVoices(voice.search) } }, '搜索')),
+                voice.error ? h('div', { style: { color: '#ff7369', fontSize: 12, margin: '2px 0' } }, voice.error) : null,
+                h('div', { style: { maxHeight: 220, overflowY: 'auto' } },
+                  (voice.items || []).map(function (v) {
+                    return h('div', { key: v.voice_id, style: Object.assign({}, row, { borderBottom: '1px solid rgba(127,127,127,.15)' }) },
+                      h('span', { style: { fontWeight: 600 } }, v.name || v.voice_id),
+                      h('span', { style: muted }, [v.language_code, v.gender, (v.tone || []).join('/')].filter(Boolean).join(' · ')),
+                      v.voice_id === tts.voiceId ? h('span', { style: { color: '#3ddc84', fontSize: 12, fontWeight: 700 } }, '当前') : null,
+                      h('span', { style: { flex: 1 } }),
+                      v.preview_url ? h(SButton, { onClick: function () { playPreview(v.preview_url) } }, '试听') : null,
+                      h(SButton, { variant: 'primary', onClick: function () { update({ tts: { voiceId: v.voice_id } }, '已选用 ' + (v.name || v.voice_id)) } }, '选用'))
+                  }),
+                  (!voice.loading && !voice.error && (voice.items || []).length === 0) ? h('div', { style: muted }, '没有匹配的声音') : null))
+            : null,
+          h('div', { style: row },
+            '语速',
+            h('input', { key: 'tts-speed-' + String(tts.speed ?? 1), style: inputStyle, defaultValue: String(tts.speed ?? 1), title: '0.5 – 2.0，1 = 正常',
+              onBlur: function (e) { var v = parseFloat(e.target.value); if (Number.isFinite(v) && v !== (tts.speed ?? 1)) update({ tts: { speed: Math.min(2, Math.max(0.5, v)) } }) },
+              onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
+            '音量',
+            h('input', { key: 'tts-volume-' + String(tts.volume ?? 1), style: inputStyle, defaultValue: String(tts.volume ?? 1), title: '0.01 – 2.0，1 = 默认',
+              onBlur: function (e) { var v = parseFloat(e.target.value); if (Number.isFinite(v) && v !== (tts.volume ?? 1)) update({ tts: { volume: Math.min(2, Math.max(0.01, v)) } }) },
+              onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } })),
+          h(Hint, null, '接入 BreezeBlue（breezeblue.ai）文字转语音：说话气泡显示时用所选声音朗读。key 只保存在本机 pet-settings.json；改动即时生效，无需重启宠物。')),
 
         // ── 调试 ──
         h(Section, { title: '调试' },

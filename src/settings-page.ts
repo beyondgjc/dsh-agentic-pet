@@ -49,9 +49,28 @@ interface DebugSettings {
   cdp?: boolean
 }
 
+/** Say-side TTS (BreezeBlue): consumed by the carrier's /say pipeline, which
+ * re-reads pet-settings.json with an mtime cache — a saved switch reaches the
+ * pet on its next utterance, no push and no restart. The key lives in the
+ * same local settings file as the rest of the dsh home's machine-local
+ * secrets; the voices proxy route below is the only code that forwards it
+ * onward (the settings page's browser cannot reach api.breeze.blue: CORS). */
+interface TtsSettings {
+  enabled?: boolean
+  apiKey?: string
+  voiceId?: string
+  modelId?: string
+  languageCode?: string
+  /** 0.5–2.0 */
+  speed?: number
+  /** 0.01–2.0 */
+  volume?: number
+}
+
 interface PetSettings {
   proactivity?: ProactivitySettings
   innerVoice?: InnerVoiceSettings
+  tts?: TtsSettings
   debug?: DebugSettings
 }
 
@@ -72,6 +91,7 @@ const DEFAULT_SETTINGS: PetSettings = {
     touchReplyCooldownSeconds: 30,
     boundSessions: {},
   },
+  tts: { enabled: false },
   debug: { cdp: false },
 }
 
@@ -179,12 +199,34 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     const d = patchDebug as Record<string, unknown>
     if (typeof d.cdp === 'boolean') debug.cdp = d.cdp
   }
+  const tts = { ...current.tts }
+  const patchTts = patch.tts
+  if (typeof patchTts === 'object' && patchTts !== null) {
+    const t = patchTts as Record<string, unknown>
+    if (typeof t.enabled === 'boolean') tts.enabled = t.enabled
+    // Credentials and ids: empty string clears the stored value (the carrier
+    // treats absent/empty as "not configured" — the pipeline stays off).
+    const setText = (key: 'apiKey' | 'voiceId' | 'modelId' | 'languageCode'): void => {
+      const value = t[key]
+      if (typeof value !== 'string') return
+      const trimmed = value.trim()
+      if (trimmed === '') delete tts[key]
+      else tts[key] = trimmed
+    }
+    setText('apiKey')
+    setText('voiceId')
+    setText('modelId')
+    setText('languageCode')
+    // Fractional ranges: clamp without the round() clampNumber applies.
+    if (typeof t.speed === 'number' && Number.isFinite(t.speed)) tts.speed = Math.min(2, Math.max(0.5, t.speed))
+    if (typeof t.volume === 'number' && Number.isFinite(t.volume)) tts.volume = Math.min(2, Math.max(0.01, t.volume))
+  }
   // NOTE: display names are NOT a pet-settings.json section anymore — they
   // live in whale598/<petId>/pet-name.json (see the update handler).
   // pet-settings.json is SHARED with the carrier (its tuning/outfit/rev keys
   // live in the same file): preserve every key this page does not own, or one
   // save here silently wipes the carrier's half.
-  return { ...current, proactivity, innerVoice, debug }
+  return { ...current, proactivity, innerVoice, tts, debug }
 }
 
 function openPathInFileManager(path: string): void {
@@ -344,5 +386,55 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     const target = existsSync(logsDir) ? logsDir : home
     openPathInFileManager(target)
     writeJson(res, 200, { ok: true, opened: target })
+  })
+
+  route('GET', '/api/pet-settings/tts/voices', async (req, res) => {
+    // The BreezeBlue voices search, proxied with the stored key: the settings
+    // page's browser cannot call api.breeze.blue itself (CORS), and the key
+    // never leaves this loopback process. A trimmed voice list is all the
+    // picker needs (voice_id/name/language/gender/tone/accent/preview_url).
+    const settings = await readSettings()
+    const apiKey = typeof settings.tts?.apiKey === 'string' ? settings.tts.apiKey : ''
+    if (apiKey === '') {
+      writeJson(res, 400, { error: '尚未配置 BreezeBlue API key' })
+      return
+    }
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const params = new URLSearchParams()
+    for (const key of ['search', 'language_code', 'gender', 'accent']) {
+      const value = url.searchParams.get(key)
+      if (value !== null && value !== '') params.set(key, value)
+    }
+    const rawPageSize = url.searchParams.get('page_size')
+    const pageSize = rawPageSize !== null ? clampNumber(Number(rawPageSize), 1, 100) : undefined
+    params.set('page_size', String(pageSize ?? 30))
+    try {
+      const response = await fetch(`https://api.breeze.blue/v1/voices?${params.toString()}`, {
+        headers: { 'xi-api-key': apiKey },
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '')
+        writeJson(res, 502, { error: `BreezeBlue HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 200)}` : ''}` })
+        return
+      }
+      const raw = await response.json() as { voices?: unknown; total?: unknown }
+      const voices = (Array.isArray(raw.voices) ? raw.voices : []).map((entry) => {
+        const voice = entry as Record<string, unknown>
+        const str = (key: string): string | null => typeof voice[key] === 'string' ? voice[key] as string : null
+        return {
+          voice_id: str('voice_id') ?? '',
+          name: str('name') ?? '',
+          language_code: str('language_code'),
+          gender: str('gender'),
+          tone: Array.isArray(voice.tone) ? voice.tone.filter((item): item is string => typeof item === 'string').slice(0, 3) : [],
+          accent: str('accent'),
+          preview_url: str('preview_url'),
+        }
+      }).filter(voice => voice.voice_id !== '')
+      writeJson(res, 200, { voices, total: typeof raw.total === 'number' ? raw.total : voices.length })
+    } catch (error: unknown) {
+      writeJson(res, 502, { error: `声音列表请求失败: ${error instanceof Error ? error.message : String(error)}` })
+    }
   })
 }

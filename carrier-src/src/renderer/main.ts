@@ -26,6 +26,7 @@ interface PetGlobals {
     onInteractionCancel(listener: (notice: { id: string }) => void): void
     answerInteraction(id: string, answer: unknown): void
     onSay(listener: (notice: { text: string }) => void): void
+    onTtsPlay(listener: (notice: { text: string; audio: Uint8Array<ArrayBuffer> }) => void): void
     reportStatus(snapshot: Record<string, unknown>): void
     reportTouch(touch: { part: string }): void
     reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void
@@ -568,6 +569,7 @@ function openChatCard(): void {
   // One bubble at a time: an interaction card outranks the chat input, and
   // the chat card itself parks inside THE bubble (hidden by hideBubble()).
   if (override !== null || Date.now() < errorUntil) return
+  stopSayAudio() // the chat card replaces the say bubble; its voice stops too
   bubble.replaceChildren()
   const row = document.createElement('div')
   row.className = 'bubble-chat'
@@ -631,10 +633,42 @@ petBody.addEventListener('dblclick', (event) => {
 // state machine side by side; the WS path retires when the driver-side lands
 // (DSH-PET.md §7.2).
 
+// The say bubble's hide timer, ONE slot: a fresh /say re-arms it with the
+// text-length formula, an arriving TTS track re-arms it to cover the audio —
+// so the text never disappears mid-sentence. The guard re-checks the bubble:
+// a timer from a superseded display must not close a newer one.
+let sayHideTimer: ReturnType<typeof setTimeout> | undefined
+
+function armSayHide(text: string, delayMs: number): void {
+  if (sayHideTimer !== undefined) clearTimeout(sayHideTimer)
+  sayHideTimer = setTimeout(() => {
+    sayHideTimer = undefined
+    if (override !== null || bubble.textContent !== text) return
+    hideBubble()
+  }, Math.max(1000, delayMs))
+}
+
+// ── say TTS (BreezeBlue, carrier-side synthesis) ────────────────────────────
+// When configured, the main process synthesizes /say texts and pushes the mp3
+// bytes here. Playback is the bubble's companion with three rules: it plays
+// ONLY while the bubble of the SAME text is still on screen (an interaction
+// takeover or a newer say renders the track stale — skip), it EXTENDS the
+// bubble lifetime to the audio's duration, and when it ends the bubble goes
+// with it. Synthesis failures never reach this page: silence is the fallback.
+let sayAudio: HTMLAudioElement | undefined
+let sayAudioUrl: string | undefined
+
+function stopSayAudio(): void {
+  const audio = sayAudio
+  if (audio !== undefined && !audio.paused) audio.pause()
+}
+
 globals.petDesktop?.onSay((notice) => {
   // Fire-and-forget speech: self-dismisses, never blocks, and an interaction
-  // bubble in flight outranks it (single-bubble design).
+  // bubble in flight outranks it (single-bubble design). A new say also
+  // stops the previous utterance — the voice follows the newest bubble.
   if (override !== null || notice.text === '') return
+  stopSayAudio()
   bubble.replaceChildren()
   const text = document.createElement('p')
   text.className = 'bubble-detail'
@@ -642,10 +676,28 @@ globals.petDesktop?.onSay((notice) => {
   bubble.append(text)
   bubble.hidden = false
   globals.petDesktop?.setBubbleVisible(true)
-  setTimeout(() => {
-    if (override !== null || bubble.textContent !== notice.text) return
-    hideBubble()
-  }, 4000 + Math.min(notice.text.length * 60, 4000))
+  armSayHide(notice.text, 4000 + Math.min(notice.text.length * 60, 4000))
+})
+
+globals.petDesktop?.onTtsPlay((notice) => {
+  const text = notice?.text
+  const bytes = notice?.audio
+  if (typeof text !== 'string' || text === '' || !(bytes instanceof Uint8Array) || bytes.length === 0) return
+  if (override !== null || bubble.textContent !== text) return
+  if (sayAudioUrl !== undefined) URL.revokeObjectURL(sayAudioUrl)
+  const audio = sayAudio ?? (sayAudio = new Audio())
+  sayAudioUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
+  audio.src = sayAudioUrl
+  audio.onloadedmetadata = () => {
+    // The authoritative lifetime: the track's own length plus a small tail,
+    // replacing the text-length estimate for as long as this bubble lives.
+    if (Number.isFinite(audio.duration) && audio.duration > 0) armSayHide(text, audio.duration * 1000 + 1500)
+  }
+  audio.onended = () => {
+    if (override === null && bubble.textContent === text) hideBubble()
+  }
+  audio.onerror = () => { /* the say timer already governs the bubble */ }
+  void audio.play().catch(() => { /* synthesis is an enhancement: silence is fine */ })
 })
 
 let reportedSnapshot = ''
@@ -717,6 +769,7 @@ function refreshQueueBadge(): void {
 /** Present one interaction as THE bubble. Only called when nothing is
  * displayed — later arrivals queue until this one settles or is withdrawn. */
 function displayInteraction(id: string, message: InteractionMessage): void {
+  stopSayAudio() // the say bubble (if any) is superseded; its voice stops with it
   const epoch = ++interactionEpoch
   currentInteractionId = id
   const settle = (answer: unknown): void => {

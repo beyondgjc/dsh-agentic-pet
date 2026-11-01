@@ -61,4 +61,10 @@ contextBridge.exposeInMainWorld('petDesktop', {
   async sendChat(text: string): Promise<{ ok: boolean; reason?: string }> {
     return await ipcRenderer.invoke('pet:chat', { text })
   },
+  /** Say-side TTS (BreezeBlue): the synthesized mp3 for a /say text, pushed
+   * by the main process when speech synthesis is configured. The renderer
+   * plays it against the still-displayed bubble of the SAME text. */
+  onTtsPlay(listener: (notice: { text: string; audio: Uint8Array<ArrayBuffer> }) => void): void {
+    ipcRenderer.on('pet:tts-play', (_event, notice) => { listener(notice) })
+  },
 })

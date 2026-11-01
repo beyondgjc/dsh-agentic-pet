@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { createSayTts } from "./tts.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PET_PROFILE_NAME = 'pet';
 const ASSET_SCHEME = 'pet-asset';
@@ -445,6 +446,9 @@ async function main() {
         return;
     }
     const window = createPetWindow();
+    // Say-side TTS: the /say pipeline's audio companion (see tts.ts). Created
+    // once, fed by the control handler below; failures never touch the bubble.
+    const sayTts = createSayTts({ home: DSH_HOME, window });
     window.on('resize', () => {
         console.log(`[pet] resized: ${JSON.stringify(window.getBounds())}`);
     });
@@ -887,9 +891,12 @@ async function main() {
             }
             if (url.pathname === '/say') {
                 // Fire-and-forget: the driver says something through the pet; the
-                // bubble self-dismisses and never blocks a turn.
+                // bubble self-dismisses and never blocks a turn. The TTS pipeline
+                // rides along out-of-band (a no-op unless configured): the bubble
+                // shows FIRST, the voice follows when the audio lands.
                 const text = typeof body.text === 'string' ? body.text.slice(0, 200) : '';
                 window.webContents.send('pet:say', { text });
+                sayTts.speak(text);
                 send(200, { ok: true });
                 return;
             }
