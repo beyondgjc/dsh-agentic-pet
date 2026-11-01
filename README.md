@@ -48,3 +48,9 @@ Tests: `npx vitest run tests/registry-service.spec.ts` runs self-contained (need
 
 - Control-plane contract (the frozen consumer API every pet implementation speaks): see the multi-pet guide in the project documentation.
 - Known limitations and design notes live in the repo wiki and the project's engineering docs.
+
+
+## Credits & Licensing
+
+- This project is a derivative of [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) — the upstream dsh-pet plugin by PC2005-cloud. Plugin code is licensed MIT.
+- The character artwork (the "大肥鱼" whale-girl character under `carrier/assets` and `dsh-agentic-pet-assets`) is licensed **CC BY-NC-SA 4.0** (attribution · non-commercial · share-alike) by its original author — [original statement](https://www.bilibili.com/opus/1247156596114456581). Non-commercial use only; artwork derivatives must be shared under the same license.

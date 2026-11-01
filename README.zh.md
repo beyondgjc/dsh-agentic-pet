@@ -48,3 +48,9 @@ TypeScript 构建仍在 dsh monorepo workspace 内进行（被打包的 `@deepse
 
 - 控制面契约（所有宠物实现共同讲述的冻结消费方 API）见项目文档的多宠指南。
 - 已知边界与设计笔记见仓库 wiki 与项目工程文档。
+
+
+## 致谢与授权
+
+- 本项目基于 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 衍生（上游 dsh-pet 插件，作者 PC2005-cloud）。插件代码以 MIT 许可发布。
+- 角色形象（"大肥鱼"鲸鱼娘，见 `carrier/assets` 与 `dsh-agentic-pet-assets`）的形象授权为 **CC BY-NC-SA 4.0**（署名 · 非商业 · 相同方式共享），[原作者声明](https://www.bilibili.com/opus/1247156596114456581)。仅限非商业使用；形象衍生须以相同方式共享。
