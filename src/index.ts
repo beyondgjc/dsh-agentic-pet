@@ -47,7 +47,8 @@ export const name = 'pet-surface'
 export const inject = ['webServer', 'connection', 'sessionController', 'workspaceController']
 
 /** The URL path prefix the pet renderer is served under. No trailing slash. */
-export const PET_PATH_PREFIX = '/pet'
+export const PET_PATH_PREFIX = '/whale598'
+// ↑ 前缀含专属标识（whale598）：'/pet' 太通用，易与其他插件的路由注册撞车。
 
 /**
  * Locator file naming this runtime's authenticated root for the pet carrier.
@@ -117,7 +118,7 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
 /**
  * Answer one GET or HEAD `/pet` request. The URL path is the full server
  * pathname (`/pet` prefix included); it must be exactly the prefix or stay
- * under it. The index entry (`/pet`, `/pet/`, `/pet/index.html`) passes
+ * under it. The index entry (`/whale598`, `/whale598/`, `/whale598/index.html`) passes
  * Connection's browser authentication; every other file is public with a weak
  * ETag and `cache-control: no-cache`, answering a matching `If-None-Match`
  * with 304. Traversal outside the dist root is 403, missing paths are 404, a
@@ -132,6 +133,13 @@ export async function servePetStatic(
   authorizeIndex: () => Response | undefined,
 ): Promise<Response> {
   const pathname = decodeURIComponent(new URL(request.url).pathname)
+  // Prefix guard: anything not under PET_PATH_PREFIX is an ordinary miss.
+  // (The webserver only routes the prefix here, but servePetStatic is also
+  // unit-driven — and a path SHORTER than the prefix would degenerate the
+  // slice below into serving the index to a foreign path.)
+  if (!(pathname === PET_PATH_PREFIX || pathname.startsWith(`${PET_PATH_PREFIX}/`))) {
+    return new Response(null, { status: 404 })
+  }
   const relative = pathname === PET_PATH_PREFIX || pathname === `${PET_PATH_PREFIX}/`
     ? '/'
     : pathname.slice(PET_PATH_PREFIX.length)

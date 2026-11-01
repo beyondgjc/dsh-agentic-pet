@@ -29,7 +29,7 @@ export declare const name = "pet-surface";
  */
 export declare const inject: string[];
 /** The URL path prefix the pet renderer is served under. No trailing slash. */
-export declare const PET_PATH_PREFIX = "/pet";
+export declare const PET_PATH_PREFIX = "/whale598";
 /**
  * Locator file naming this runtime's authenticated root for the pet carrier.
  * The desktop shell keeps its authenticated URL in process memory only, so a
@@ -41,7 +41,7 @@ export declare function petLocatorPath(): string;
 /**
  * Answer one GET or HEAD `/pet` request. The URL path is the full server
  * pathname (`/pet` prefix included); it must be exactly the prefix or stay
- * under it. The index entry (`/pet`, `/pet/`, `/pet/index.html`) passes
+ * under it. The index entry (`/whale598`, `/whale598/`, `/whale598/index.html`) passes
  * Connection's browser authentication; every other file is public with a weak
  * ETag and `cache-control: no-cache`, answering a matching `If-None-Match`
  * with 304. Traversal outside the dist root is 403, missing paths are 404, a

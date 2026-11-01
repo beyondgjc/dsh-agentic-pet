@@ -53,6 +53,9 @@ interface PetSettings {
   proactivity?: ProactivitySettings
   innerVoice?: InnerVoiceSettings
   debug?: DebugSettings
+  /** User-defined display names, petId → label. A missing key falls back to
+   * the client's built-in default per id. */
+  names?: Record<string, string>
 }
 
 const DEFAULT_SETTINGS: PetSettings = {
@@ -73,6 +76,7 @@ const DEFAULT_SETTINGS: PetSettings = {
     boundSessions: {},
   },
   debug: { cdp: false },
+  names: {},
 }
 
 /** The touch ledger the driver owns; reset writes the driver's empty shape. */
@@ -177,10 +181,22 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     const d = patchDebug as Record<string, unknown>
     if (typeof d.cdp === 'boolean') debug.cdp = d.cdp
   }
+  // Display names: the client sends the WHOLE map (boundSessions precedent);
+  // entries are validated (non-empty key, non-empty trimmed value) and an
+  // empty value drops the key (fall back to the built-in default name).
+  let names = { ...DEFAULT_SETTINGS.names, ...current.names }
+  const patchNames = patch.names
+  if (typeof patchNames === 'object' && patchNames !== null) {
+    const record: Record<string, string> = {}
+    for (const [petId, label] of Object.entries(patchNames as Record<string, unknown>)) {
+      if (petId !== '' && typeof label === 'string' && label.trim() !== '') record[petId] = label.trim()
+    }
+    names = record // whole-map replacement: a dropped key = fall back to default
+  }
   // pet-settings.json is SHARED with the carrier (its tuning/outfit/rev keys
   // live in the same file): preserve every key this page does not own, or one
   // save here silently wipes the carrier's half.
-  return { ...current, proactivity, innerVoice, debug }
+  return { ...current, proactivity, innerVoice, debug, names }
 }
 
 function openPathInFileManager(path: string): void {

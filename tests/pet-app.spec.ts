@@ -1,5 +1,5 @@
 /**
- * The pet-surface bundle: the patch list parses, and the `/pet` route serves
+ * The pet-surface bundle: the patch list parses, and the `/whale598` route serves
  * the renderer dist with browser authentication on the index entry.
  */
 
@@ -65,7 +65,7 @@ describe('servePetStatic', () => {
 
   it('serves the raw index behind authentication', async () => {
     const response = await servePetStatic(
-      new Request('http://127.0.0.1:3080/pet/'), dist, distIndex, admitted,
+      new Request('http://127.0.0.1:3080/whale598/'), dist, distIndex, admitted,
     )
     expect(response.status).toBe(200)
     const html = await response.text()
@@ -76,7 +76,7 @@ describe('servePetStatic', () => {
 
   it('answers the bare /pet prefix with the index', async () => {
     const response = await servePetStatic(
-      new Request('http://127.0.0.1:3080/pet'), dist, distIndex, admitted,
+      new Request('http://127.0.0.1:3080/whale598'), dist, distIndex, admitted,
     )
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8')
@@ -85,13 +85,13 @@ describe('servePetStatic', () => {
   it('refuses the index when authentication refuses', async () => {
     const refusal = new Response('no', { status: 401 })
     const response = await servePetStatic(
-      new Request('http://127.0.0.1:3080/pet/'), dist, distIndex, () => refusal,
+      new Request('http://127.0.0.1:3080/whale598/'), dist, distIndex, () => refusal,
     )
     expect(response.status).toBe(401)
   })
 
   it('serves assets publicly with a weak ETag and answers 304', async () => {
-    const url = 'http://127.0.0.1:3080/pet/assets/main.js'
+    const url = 'http://127.0.0.1:3080/whale598/assets/main.js'
     const first = await servePetStatic(new Request(url), dist, distIndex, admitted)
     expect(first.status).toBe(200)
     expect(first.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
@@ -105,14 +105,14 @@ describe('servePetStatic', () => {
 
   it('rejects traversal outside the dist root with 403', async () => {
     const response = await servePetStatic(
-      new Request('http://127.0.0.1:3080/pet/..%2F..%2Fsecret.txt'), dist, distIndex, admitted,
+      new Request('http://127.0.0.1:3080/whale598/..%2F..%2Fsecret.txt'), dist, distIndex, admitted,
     )
     expect(response.status).toBe(403)
   })
 
   it('answers missing files with 404', async () => {
     const response = await servePetStatic(
-      new Request('http://127.0.0.1:3080/pet/assets/absent.js'), dist, distIndex, admitted,
+      new Request('http://127.0.0.1:3080/whale598/assets/absent.js'), dist, distIndex, admitted,
     )
     expect(response.status).toBe(404)
   })
@@ -122,7 +122,7 @@ describe('servePetStatic', () => {
     // p and p/<anything>); the slice logic alone would read dist/foo, which is
     // a 404 — never a traversal escape.
     const response = await servePetStatic(
-      new Request('http://127.0.0.1:3080/petfoo'), dist, distIndex, admitted,
+      new Request('http://127.0.0.1:3080/whale598foo'), dist, distIndex, admitted,
     )
     expect(response.status).toBe(404)
   })

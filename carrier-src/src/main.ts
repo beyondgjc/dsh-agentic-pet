@@ -314,7 +314,7 @@ function spawnHostChild(): HostChildHandle {
  * The pet-surface locator: pet-app bundles inside a running runtime publish
  * their authenticated root here (the desktop shell keeps its URL in process
  * memory only). A published URL wins over spawning a dedicated profile, so the
- * pet follows whichever live runtime serves /pet/ — the user's desktop when it
+ * pet follows whichever live runtime serves /whale598/ — the user's desktop when it
  * runs, otherwise the last publisher still alive.
  */
 async function readLocatorUrl(): Promise<string | undefined> {
@@ -332,14 +332,16 @@ async function readLocatorUrl(): Promise<string | undefined> {
 }
 
 /**
- * The pet surface URL for an authenticated web root: path `/pet/` with the
+ * The pet surface URL for an authenticated web root: path `/whale598/` with the
  * token **dropped** — authorizeIndex mints the root cookie from the token and
  * rejects any token-carrying request on a subpath, so the pet page itself is
  * entered cookie-only after the root mint.
  */
 function petSurfaceUrl(authenticated: string): string {
   const parsed = new URL(authenticated)
-  parsed.pathname = '/pet/'
+  // MUST stay in lockstep with the plugin's PET_PATH_PREFIX (/whale598) —
+  // separate builds, so the literal is duplicated here by design.
+  parsed.pathname = '/whale598/'
   parsed.search = ''
   parsed.hash = ''
   return parsed.toString()
@@ -490,7 +492,7 @@ async function main(): Promise<void> {
   })
   // Connection's token exchange is root-path-only (authorizeIndex admits
   // `/?token=…`, never a subpath): load the authenticated root once to mint
-  // the browser cookie, then enter /pet/ with it. The root load starts the
+  // the browser cookie, then enter /whale598/ with it. The root load starts the
   // Web GUI; the second navigation aborts it, so the web app is at most a
   // flash.
   await window.loadURL(authenticated).catch(() => { /* the cookie is minted by the 303 */ })

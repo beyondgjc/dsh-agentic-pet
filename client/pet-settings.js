@@ -96,6 +96,13 @@ window.__ModuleLoader__.load({
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
       var moodOf = function (a) { return a >= 80 ? '开心' : a >= 40 ? '满足' : '平静' }
+      // 显示名：用户自定义（settings.names）优先，缺省回落内置名；
+      // 宠物区改名后好感度区自动跟随（同一状态、同一渲染趟）。
+      var defaultName = function (id) { return id === 'electron' ? '鲸鱼娘' : id === 'pure' ? 'Pure 宠物' : id }
+      var petName = function (id) {
+        var custom = settings.names && settings.names[id]
+        return custom ? String(custom) : defaultName(id)
+      }
 
       function update(patch, doneMessage) { act(UPDATE, { patch: patch }, doneMessage) }
 
@@ -111,9 +118,14 @@ window.__ModuleLoader__.load({
         h(Section, { title: '宠物' },
           pets.length
             ? pets.map(function (p) {
-              var name = p.id === 'electron' ? 'TS 宠物' : p.id === 'pure' ? 'Pure 宠物' : String(p.id)
               return h('div', { key: p.id, style: row },
-                h('span', { style: { fontWeight: 700 } }, name),
+                h('input', { style: Object.assign({}, inputStyle, { width: 120, fontWeight: 700 }), value: petName(p.id), title: '点击改名；清空恢复默认', onChange: function (e) {
+                  var v = e.target.value.trim()
+                  var next = Object.assign({}, settings.names || {})
+                  if (v !== '' && v !== defaultName(p.id)) next[p.id] = v
+                  else delete next[p.id]
+                  update({ names: next })
+                } }),
                 p.online
                   ? h('span', null, '在线',
                     h('span', { style: muted }, 'pid ' + String(p.pid ?? '?')),
@@ -121,7 +133,7 @@ window.__ModuleLoader__.load({
                     p.animation ? h('span', { style: muted }, String(p.animation)) : null)
                   : h('span', { style: muted }, '离线'))
             })
-            : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后 TS 宠物会自动上桌；Pure 宠物需自行启动。'))),
+            : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。'))),
 
         // ── 好感度（每宠独立账本） ──
         h(Section, { title: '好感度' },
@@ -133,7 +145,7 @@ window.__ModuleLoader__.load({
             if (!ids.length) return h('div', { style: muted }, '还没有互动记录')
             return ids.map(function (id) {
               var book = (affection && affection[id]) || { affection: 0, total: 0 }
-              var name = id === 'electron' ? 'TS 宠物' : id === 'pure' ? 'Pure 宠物' : id
+              var name = petName(id)
               return h('div', { key: id, style: row },
                 h('span', { style: { fontWeight: 700 } }, name),
                 h('span', { style: { fontSize: 18, fontWeight: 700 } }, String(book.affection ?? 0)),

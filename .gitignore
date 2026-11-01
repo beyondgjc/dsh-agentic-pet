@@ -4,3 +4,4 @@ pnpm-lock.yaml
 carrier/assets/
 tsconfig.tsbuildinfo
 .idea/
+nul
