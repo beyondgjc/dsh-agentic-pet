@@ -210,7 +210,7 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
       const value = t[key]
       if (typeof value !== 'string') return
       const trimmed = value.trim()
-      if (trimmed === '') delete tts[key]
+      if (trimmed === '') Reflect.deleteProperty(tts, key)
       else tts[key] = trimmed
     }
     setText('apiKey')
