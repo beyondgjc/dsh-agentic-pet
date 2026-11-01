@@ -66,6 +66,7 @@ window.__ModuleLoader__.load({
       var voice = voiceState[0]
       var setVoice = voiceState[1]
       var previewAudioRef = useRef(null)
+      var keyInputRef = useRef(null)
 
       var refresh = useCallback(function () {
         fetch(READ, { credentials: 'same-origin' })
@@ -157,6 +158,19 @@ window.__ModuleLoader__.load({
           previewAudioRef.current = audio
           audio.play().catch(function () { /* 试听失败不打断配置 */ })
         } catch (e) { /* ignore */ }
+      }
+      // 取声音列表前先把 key 输入框里未提交的值落盘（输入框是失焦提交，
+      // “输完 key 立刻点选择声音”时 blur 的 POST 会和列表 GET 赛跑——
+      // 代理读到旧文件，401。这里等提交完成再查。）
+      var flushKeyThen = function (done) {
+        var el = keyInputRef.current
+        var current = el ? String(el.value || '').trim() : ''
+        if (current === '' || current === (tts.apiKey || '')) { done(); return }
+        fetch(UPDATE, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ patch: { tts: { apiKey: current } } }),
+        }).then(function () { done() }, function () { done() })
       }
 
       return h('div', { style: { width: '100%', maxWidth: 720 } },
@@ -291,22 +305,24 @@ window.__ModuleLoader__.load({
           h('div', { style: row }, '朗读开关', h(Toggle, { value: tts.enabled === true, onChange: function () {
             update({ tts: { enabled: !(tts.enabled === true) } })
           } }),
-          h('span', { style: muted }, '宠物展示说话气泡的同时读出来')),
+          h('span', { style: muted }, '宠物展示说话气泡的同时读出来（语音就绪立即一起显示；最多等 5 秒，超时只展示气泡）')),
           // key / 声音 / 语速音量均为 commit-on-blur：输入期间不落盘，
           // 清空 = 删除配置（宠物回落为不朗读）。
           h('div', { style: row },
             'API Key',
-            h('input', { key: 'tts-key-' + String(tts.apiKey || ''), style: Object.assign({}, inputStyle, { width: 260 }), type: 'password', defaultValue: tts.apiKey || '', placeholder: 'brz_...（breezeblue.ai 申请）',
+            h('input', { key: 'tts-key-' + String(tts.apiKey || ''), ref: function (el) { keyInputRef.current = el }, style: Object.assign({}, inputStyle, { width: 260 }), type: 'password', defaultValue: tts.apiKey || '', placeholder: 'brz_...（breezeblue.ai 申请）',
               onBlur: function (e) { var v = e.target.value.trim(); if (v !== (tts.apiKey || '')) update({ tts: { apiKey: v } }) },
-              onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } })),
+              onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
+            h('a', { href: 'https://breezeblue.ai/app/developer/api-keys', target: '_blank', rel: 'noopener noreferrer',
+              style: Object.assign(btnStyle('primary'), { display: 'inline-block', textDecoration: 'none' }), title: '打开 BreezeBlue 开发者控制台的 API Keys 页面' }, '获取 Key')),
           h('div', { style: row },
             '声音',
             h('input', { key: 'tts-voice-' + String(tts.voiceId || ''), style: Object.assign({}, inputStyle, { width: 210, fontFamily: 'monospace' }), defaultValue: tts.voiceId || '', placeholder: 'voice_id，点右侧选择',
               onBlur: function (e) { var v = e.target.value.trim(); if (v !== (tts.voiceId || '')) update({ tts: { voiceId: v } }) },
               onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
             h(SButton, { disabled: busy, onClick: function () {
-              if (voice) setVoice(null)
-              else loadVoices('')
+              if (voice) { setVoice(null); return }
+              flushKeyThen(function () { loadVoices('') })
             } }, voice ? '收起' : '选择声音')),
           voice
             ? h('div', { style: { border: '1px solid rgba(127,127,127,.3)', borderRadius: 8, padding: '8px 10px', margin: '4px 0 6px' } },
@@ -314,7 +330,7 @@ window.__ModuleLoader__.load({
                   h('input', { style: Object.assign({}, inputStyle, { width: 190 }), value: voice.search || '', placeholder: '搜索声音（名称/风格）',
                     onChange: function (e) { setVoice(Object.assign({}, voice, { search: e.target.value })) },
                     onKeyDown: function (e) { if (e.key === 'Enter') loadVoices(voice.search) } }),
-                  h(SButton, { disabled: voice.loading, onClick: function () { loadVoices(voice.search) } }, '搜索')),
+                  h(SButton, { disabled: voice.loading, onClick: function () { flushKeyThen(function () { loadVoices(voice.search) }) } }, '搜索')),
                 voice.error ? h('div', { style: { color: '#ff7369', fontSize: 12, margin: '2px 0' } }, voice.error) : null,
                 h('div', { style: { maxHeight: 220, overflowY: 'auto' } },
                   (voice.items || []).map(function (v) {
@@ -337,7 +353,7 @@ window.__ModuleLoader__.load({
             h('input', { key: 'tts-volume-' + String(tts.volume ?? 1), style: inputStyle, defaultValue: String(tts.volume ?? 1), title: '0.01 – 2.0，1 = 默认',
               onBlur: function (e) { var v = parseFloat(e.target.value); if (Number.isFinite(v) && v !== (tts.volume ?? 1)) update({ tts: { volume: Math.min(2, Math.max(0.01, v)) } }) },
               onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } })),
-          h(Hint, null, '接入 BreezeBlue（breezeblue.ai）文字转语音：说话气泡显示时用所选声音朗读。key 只保存在本机 pet-settings.json；改动即时生效，无需重启宠物。')),
+          h(Hint, null, '接入 BreezeBlue（breezeblue.ai）文字转语音：说话气泡显示时用所选声音朗读。key 只保存在本机 pet-settings.json；改动即时生效，无需重启宠物。气泡等语音的超时上限可在 pet-settings.json 的 tts.holdMs 调整（0–8000 毫秒，默认 5000；语音先就绪就立刻展示，超时则只展示气泡）。')),
 
         // ── 调试 ──
         h(Section, { title: '调试' },

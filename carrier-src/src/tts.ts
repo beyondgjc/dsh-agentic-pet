@@ -1,9 +1,16 @@
 /**
- * Say-side TTS (BreezeBlue): speech synthesis as the /say bubble's companion.
- * The control plane hands every spoken text here after the bubble is
- * forwarded; synthesis runs out-of-band so the fire-and-forget semantics and
- * the HTTP budget of /say are untouched — any failure (no key, rate limit,
- * network) degrades to visual-only and never surfaces to the driver.
+ * Say-side TTS (BreezeBlue): speech synthesis as the /say bubble's voice.
+ * The control plane hands every spoken text here; this module owns the
+ * DELIVERY to the page — when synthesis is configured it holds the bubble
+ * until the mp3 lands (bounded by `holdMs`, default 3s) and forwards text +
+ * audio as ONE message, so the pet's mouth and voice start together. A
+ * timeout or failure shows the bubble alone and discards the late audio:
+ * the complaint to avoid is a voice trailing seconds behind its text. With
+ * synthesis off, delivery is the immediate bubble — yesterday's behavior.
+ *
+ * Any failure (no key, rate limit, network) degrades to visual-only and
+ * never surfaces to the driver: the /say HTTP response keeps its
+ * fire-and-forget budget, the delivery race runs entirely out-of-band.
  *
  * Configuration lives in the shared pet-settings.json (`tts` section, written
  * by the plugin's settings page) and is read lazily per utterance with an
@@ -30,6 +37,9 @@ export interface TtsConfig {
   speed?: number
   /** 0.01–2.0, 1 = default. */
   volume?: number
+  /** How long the bubble may wait for the audio before going out alone
+   * (0–8000, default 3000). 0 = never hold (bubble immediate, voice off). */
+  holdMs?: number
 }
 
 interface SayTtsDeps {
@@ -37,20 +47,28 @@ interface SayTtsDeps {
    * fallback — same dual-path rule as the driver's petdata). */
   home: string
   window: BrowserWindow
+  /** The one delivery channel to the page: the bubble, optionally with its
+   * voice. Main process owns the wire shape; this module owns the timing. */
+  deliver: (text: string, audio?: Uint8Array<ArrayBuffer>) => void
   log?: (line: string) => void
 }
 
 export interface SayTts {
-  /** Hand one spoken text to the pipeline. Fire-and-forget: returns
+  /** Forward one /say text to the page. Fire-and-forget: returns
    * immediately, never throws, and a newer call always wins — the older
-   * fetch is aborted so the pet's voice follows the bubble. */
-  speak(text: string): void
+   * delivery is abandoned (the newest say owns the bubble and the voice). */
+  deliver(text: string): void
 }
 
 /** The BreezeBlue TTS endpoint (convert, synchronous mp3). */
 const TTS_URL = 'https://api.breeze.blue/v1/text-to-speech'
 /** Bounded wait for one synthesis round trip; the bubble shows regardless. */
 const REQUEST_TIMEOUT_MS = 20_000
+/** The bubble's default patience for its voice: the mp3 lands earlier →
+ * bubble + voice go out together at once (this hold is a TIMEOUT ceiling,
+ * never a fixed wait); later → the bubble goes alone and the audio is
+ * discarded, so a voice never trails its text. */
+const DEFAULT_HOLD_MS = 5_000
 /** A 200-char mp3 is at most ~1.5MB; anything larger is not a say track. */
 const MAX_AUDIO_BYTES = 8_000_000
 /** Repeating the identical text within this window re-shows the bubble but
@@ -75,6 +93,9 @@ function normalizeTts(raw: unknown): TtsConfig {
   }
   if (typeof record.volume === 'number' && Number.isFinite(record.volume)) {
     config.volume = Math.min(2, Math.max(0.01, record.volume))
+  }
+  if (typeof record.holdMs === 'number' && Number.isFinite(record.holdMs)) {
+    config.holdMs = Math.min(8000, Math.max(0, Math.round(record.holdMs)))
   }
   return config
 }
@@ -109,6 +130,7 @@ export function createSayTts(deps: SayTtsDeps): SayTts {
       const echo = `config from ${newest.path}: enabled=${String(config.enabled === true)}`
         + ` key=${config.apiKey ? 'set' : 'unset'} voice=${config.voiceId ?? '-'}`
         + ` model=${config.modelId ?? 'auto'} speed=${String(config.speed ?? 1)} volume=${String(config.volume ?? 1)}`
+        + ` hold=${String(config.holdMs ?? DEFAULT_HOLD_MS)}ms`
       if (echo !== lastConfigEcho) {
         lastConfigEcho = echo
         log(echo)
@@ -121,15 +143,16 @@ export function createSayTts(deps: SayTtsDeps): SayTts {
   }
 
   // ── the single voice slot ─────────────────────────────────────────────────
-  // One utterance in flight: a newer speak() aborts the older fetch, so the
-  // voice always tracks the newest bubble (the bubble itself overwrites, and
-  // the renderer drops audio whose text no longer matches).
+  // One delivery in flight: a newer deliver() abandons the older one (abort
+  // the fetch, disarm its hold), so bubble and voice always track the newest
+  // say. `settled` makes each delivery one-shot: whoever lands first — audio,
+  // error, or the hold timer — delivers and disarms the others.
   let generation = 0
   let inflight: AbortController | undefined
   let lastSpoken: { text: string; at: number } | undefined
   let mutedUntil = 0
 
-  const speak = (text: string): void => {
+  const deliver = (text: string): void => {
     generation += 1
     const gen = generation
     inflight?.abort()
@@ -137,34 +160,65 @@ export function createSayTts(deps: SayTtsDeps): SayTts {
     const trimmed = text.trim()
     if (trimmed === '') return
     const config = loadConfig()
-    if (config.enabled !== true) return
-    if (!config.apiKey || !config.voiceId) return
-    if (Date.now() < mutedUntil) return
-    if (lastSpoken !== undefined && lastSpoken.text === trimmed && Date.now() - lastSpoken.at < DEDUPE_MS) return
+    const speakable = config.enabled === true
+      && config.apiKey !== undefined && config.apiKey !== ''
+      && config.voiceId !== undefined && config.voiceId !== ''
+      && Date.now() >= mutedUntil
+    const dup = lastSpoken !== undefined
+      && lastSpoken.text === trimmed && Date.now() - lastSpoken.at < DEDUPE_MS
+    if (!speakable || dup) {
+      deps.deliver(trimmed)
+      return
+    }
     lastSpoken = { text: trimmed, at: Date.now() }
-    void synthesize(trimmed, config, gen)
+    holdAndDeliver(trimmed, config, gen)
   }
 
-  const synthesize = async (text: string, config: TtsConfig, gen: number): Promise<void> => {
+  /** Race the synthesis against the bubble's patience; the first to land
+   * delivers (audio or alone) and the loser is discarded, never late. */
+  const holdAndDeliver = (text: string, config: TtsConfig, gen: number): void => {
     const abort = new AbortController()
     inflight = abort
-    try {
-      const url = new URL(`${TTS_URL}/${encodeURIComponent(config.voiceId ?? '')}`)
-      url.searchParams.set('output_format', 'mp3')
-      const body: Record<string, unknown> = { text }
-      if (config.modelId !== undefined) body.model_id = config.modelId
-      if (config.languageCode !== undefined) body.language_code = config.languageCode
-      const voiceSettings: Record<string, number> = {}
-      if (config.speed !== undefined && config.speed !== 1) voiceSettings.speed = config.speed
-      if (config.volume !== undefined && config.volume !== 1) voiceSettings.volume = config.volume
-      if (Object.keys(voiceSettings).length > 0) body.voice_settings = voiceSettings
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'xi-api-key': config.apiKey ?? '', 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-      })
-      if (gen !== generation) return
+    const holdMs = config.holdMs ?? DEFAULT_HOLD_MS
+    let settled = false
+    const finish = (audio?: Uint8Array<ArrayBuffer>): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (inflight === abort) inflight = undefined
+      if (gen === generation) deps.deliver(text, audio)
+    }
+    const timer = setTimeout(() => finish(), holdMs)
+    void synthesize(text, config, abort).then(
+      (audio) => { finish(audio) },
+      (error: unknown) => {
+        // Superseded (our own abort): the newer delivery already owns the
+        // stage — stay silent. A real failure: deliver the bubble NOW
+        // instead of making it wait out the hold.
+        if (!abort.signal.aborted) {
+          log(`say TTS failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        finish()
+      },
+    )
+  }
+
+  const synthesize = (text: string, config: TtsConfig, abort: AbortController): Promise<Uint8Array<ArrayBuffer>> => {
+    const url = new URL(`${TTS_URL}/${encodeURIComponent(config.voiceId ?? '')}`)
+    url.searchParams.set('output_format', 'mp3')
+    const body: Record<string, unknown> = { text }
+    if (config.modelId !== undefined) body.model_id = config.modelId
+    if (config.languageCode !== undefined) body.language_code = config.languageCode
+    const voiceSettings: Record<string, number> = {}
+    if (config.speed !== undefined && config.speed !== 1) voiceSettings.speed = config.speed
+    if (config.volume !== undefined && config.volume !== 1) voiceSettings.volume = config.volume
+    if (Object.keys(voiceSettings).length > 0) body.voice_settings = voiceSettings
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'xi-api-key': config.apiKey ?? '', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+    }).then(async (response): Promise<Uint8Array<ArrayBuffer>> => {
       if (!response.ok) {
         const detail = await response.text().catch(() => '')
         if (response.status === 429) {
@@ -175,20 +229,11 @@ export function createSayTts(deps: SayTtsDeps): SayTts {
         throw new Error(`BreezeBlue HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 200)}` : ''}`)
       }
       const audio = new Uint8Array(await response.arrayBuffer())
-      if (gen !== generation) return
       if (audio.length === 0) throw new Error('empty audio response')
       if (audio.length > MAX_AUDIO_BYTES) throw new Error(`audio too large (${String(audio.length)} bytes)`)
-      if (deps.window.isDestroyed() || deps.window.webContents.isDestroyed()) return
-      deps.window.webContents.send('pet:tts-play', { text, audio })
-    } catch (error: unknown) {
-      // Superseded by a newer utterance (our own abort): silence is correct.
-      if (abort.signal.aborted) return
-      if (gen !== generation) return
-      log(`say TTS failed: ${error instanceof Error ? error.message : String(error)}`)
-    } finally {
-      if (inflight === abort) inflight = undefined
-    }
+      return audio
+    })
   }
 
-  return { speak }
+  return { deliver }
 }

@@ -18,7 +18,9 @@ contextBridge.exposeInMainWorld('petDesktop', {
     dragStart(screenX, screenY) { ipcRenderer.send('pet:drag-start', screenX, screenY); },
     dragMove(screenX, screenY) { ipcRenderer.send('pet:drag-move', screenX, screenY); },
     dragEnd() { ipcRenderer.send('pet:drag-end'); },
-    /** Control interface (driver's four operations) deliveries from the main process. */
+    /** Control interface (driver's four operations) deliveries from the main
+     * process. `audio` rides along when say-side TTS is configured and the
+     * synthesized mp3 landed in time — the bubble and its voice, one message. */
     onSay(listener) {
         ipcRenderer.on('pet:say', (_event, notice) => { listener(notice); });
     },
@@ -58,12 +60,6 @@ contextBridge.exposeInMainWorld('petDesktop', {
      * by a /events response. */
     async sendChat(text) {
         return await ipcRenderer.invoke('pet:chat', { text });
-    },
-    /** Say-side TTS (BreezeBlue): the synthesized mp3 for a /say text, pushed
-     * by the main process when speech synthesis is configured. The renderer
-     * plays it against the still-displayed bubble of the SAME text. */
-    onTtsPlay(listener) {
-        ipcRenderer.on('pet:tts-play', (_event, notice) => { listener(notice); });
     },
 });
 //# sourceMappingURL=preload.js.map

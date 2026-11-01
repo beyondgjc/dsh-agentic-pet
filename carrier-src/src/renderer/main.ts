@@ -25,8 +25,7 @@ interface PetGlobals {
     onInteraction(listener: (request: unknown) => void): void
     onInteractionCancel(listener: (notice: { id: string }) => void): void
     answerInteraction(id: string, answer: unknown): void
-    onSay(listener: (notice: { text: string }) => void): void
-    onTtsPlay(listener: (notice: { text: string; audio: Uint8Array<ArrayBuffer> }) => void): void
+    onSay(listener: (notice: { text: string; audio?: Uint8Array<ArrayBuffer> }) => void): void
     reportStatus(snapshot: Record<string, unknown>): void
     reportTouch(touch: { part: string }): void
     reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void
@@ -648,19 +647,36 @@ function armSayHide(text: string, delayMs: number): void {
   }, Math.max(1000, delayMs))
 }
 
-// ── say TTS (BreezeBlue, carrier-side synthesis) ────────────────────────────
-// When configured, the main process synthesizes /say texts and pushes the mp3
-// bytes here. Playback is the bubble's companion with three rules: it plays
-// ONLY while the bubble of the SAME text is still on screen (an interaction
-// takeover or a newer say renders the track stale — skip), it EXTENDS the
-// bubble lifetime to the audio's duration, and when it ends the bubble goes
-// with it. Synthesis failures never reach this page: silence is the fallback.
+// ── say voice (BreezeBlue, carrier-side synthesis) ──────────────────────────
+// When TTS is configured, the main process holds the bubble until the mp3
+// lands (bounded) and delivers text + audio as ONE message. Playback rules:
+// the track starts the moment its bubble appears (they are the same event),
+// the bubble lifetime extends to the audio's duration, and when it ends the
+// bubble goes with it. A delivery without audio (synthesis off, slow, or
+// failed) is exactly yesterday's bubble.
 let sayAudio: HTMLAudioElement | undefined
 let sayAudioUrl: string | undefined
 
 function stopSayAudio(): void {
   const audio = sayAudio
   if (audio !== undefined && !audio.paused) audio.pause()
+}
+
+function playSayAudio(text: string, bytes: Uint8Array<ArrayBuffer>): void {
+  if (sayAudioUrl !== undefined) URL.revokeObjectURL(sayAudioUrl)
+  const audio = sayAudio ?? (sayAudio = new Audio())
+  sayAudioUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
+  audio.src = sayAudioUrl
+  audio.onloadedmetadata = () => {
+    // The authoritative lifetime: the track's own length plus a small tail,
+    // replacing the text-length estimate for as long as this bubble lives.
+    if (Number.isFinite(audio.duration) && audio.duration > 0) armSayHide(text, audio.duration * 1000 + 1500)
+  }
+  audio.onended = () => {
+    if (override === null && bubble.textContent === text) hideBubble()
+  }
+  audio.onerror = () => { /* the say timer already governs the bubble */ }
+  void audio.play().catch(() => { /* synthesis is an enhancement: silence is fine */ })
 }
 
 globals.petDesktop?.onSay((notice) => {
@@ -677,27 +693,8 @@ globals.petDesktop?.onSay((notice) => {
   bubble.hidden = false
   globals.petDesktop?.setBubbleVisible(true)
   armSayHide(notice.text, 4000 + Math.min(notice.text.length * 60, 4000))
-})
-
-globals.petDesktop?.onTtsPlay((notice) => {
-  const text = notice?.text
-  const bytes = notice?.audio
-  if (typeof text !== 'string' || text === '' || !(bytes instanceof Uint8Array) || bytes.length === 0) return
-  if (override !== null || bubble.textContent !== text) return
-  if (sayAudioUrl !== undefined) URL.revokeObjectURL(sayAudioUrl)
-  const audio = sayAudio ?? (sayAudio = new Audio())
-  sayAudioUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
-  audio.src = sayAudioUrl
-  audio.onloadedmetadata = () => {
-    // The authoritative lifetime: the track's own length plus a small tail,
-    // replacing the text-length estimate for as long as this bubble lives.
-    if (Number.isFinite(audio.duration) && audio.duration > 0) armSayHide(text, audio.duration * 1000 + 1500)
-  }
-  audio.onended = () => {
-    if (override === null && bubble.textContent === text) hideBubble()
-  }
-  audio.onerror = () => { /* the say timer already governs the bubble */ }
-  void audio.play().catch(() => { /* synthesis is an enhancement: silence is fine */ })
+  const bytes = notice.audio
+  if (bytes !== undefined && bytes.length > 0) playSayAudio(notice.text, bytes)
 })
 
 let reportedSnapshot = ''

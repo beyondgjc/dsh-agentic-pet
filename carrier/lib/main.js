@@ -446,9 +446,17 @@ async function main() {
         return;
     }
     const window = createPetWindow();
-    // Say-side TTS: the /say pipeline's audio companion (see tts.ts). Created
-    // once, fed by the control handler below; failures never touch the bubble.
-    const sayTts = createSayTts({ home: DSH_HOME, window });
+    // Say-side TTS: the /say pipeline's audio companion (see tts.ts). It owns
+    // the DELIVERY to the page — bubble alone when synthesis is off, bubble +
+    // voice as one message when the mp3 lands in time. Failures never touch
+    // the bubble beyond showing it alone.
+    const sayTts = createSayTts({
+        home: DSH_HOME,
+        window,
+        deliver: (text, audio) => {
+            window.webContents.send('pet:say', audio === undefined ? { text } : { text, audio });
+        },
+    });
     window.on('resize', () => {
         console.log(`[pet] resized: ${JSON.stringify(window.getBounds())}`);
     });
@@ -891,12 +899,12 @@ async function main() {
             }
             if (url.pathname === '/say') {
                 // Fire-and-forget: the driver says something through the pet; the
-                // bubble self-dismisses and never blocks a turn. The TTS pipeline
-                // rides along out-of-band (a no-op unless configured): the bubble
-                // shows FIRST, the voice follows when the audio lands.
+                // bubble self-dismisses and never blocks a turn. The TTS module owns
+                // the delivery: immediate bubble when synthesis is off, otherwise
+                // bubble + voice as ONE message once the mp3 lands (held ≤ holdMs —
+                // text and voice appear together instead of the voice trailing).
                 const text = typeof body.text === 'string' ? body.text.slice(0, 200) : '';
-                window.webContents.send('pet:say', { text });
-                sayTts.speak(text);
+                sayTts.deliver(text);
                 send(200, { ok: true });
                 return;
             }
