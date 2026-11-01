@@ -99,9 +99,30 @@ window.__ModuleLoader__.load({
       // 显示名：用户自定义（settings.names）优先，缺省回落内置名；
       // 宠物区改名后好感度区自动跟随（同一状态、同一渲染趟）。
       var defaultName = function (id) { return id === 'electron' ? '鲸鱼娘' : id === 'pure' ? 'Pure 宠物' : id }
+      var BOND_TIERS = [[0, "陌生"], [5, "认识"], [15, "熟了"], [40, "亲近"], [90, "离不开"], [180, "只有你"]]
+      var bondTier = function (days) {
+        var name = "陌生"
+        BOND_TIERS.forEach(function (t) { if (days >= t[0]) name = t[1] })
+        return name
+      }
       var petName = function (id) {
         var custom = settings.names && settings.names[id]
         return custom ? String(custom) : defaultName(id)
+      }
+      // 提交一次改名（失焦/回车调用）：与当前值比较，无变化零开销；
+      // 空值删键（回落默认）。一次编辑 = 至多一次 update = 至多一条 [改名]。
+      var commitName = function (id, raw) {
+        var v = (raw || '').trim()
+        var next = Object.assign({}, (settings.names || {}))
+        var current = next[id]
+        if (v !== '' && v !== defaultName(id)) {
+          if (current === v) return
+          next[id] = v
+        } else {
+          if (current === undefined) return
+          delete next[id]
+        }
+        update({ names: next })
       }
 
       function update(patch, doneMessage) { act(UPDATE, { patch: patch }, doneMessage) }
@@ -119,13 +140,12 @@ window.__ModuleLoader__.load({
           pets.length
             ? pets.map(function (p) {
               return h('div', { key: p.id, style: row },
-                h('input', { style: Object.assign({}, inputStyle, { width: 120, fontWeight: 700 }), value: petName(p.id), title: '点击改名；清空恢复默认', onChange: function (e) {
-                  var v = e.target.value.trim()
-                  var next = Object.assign({}, settings.names || {})
-                  if (v !== '' && v !== defaultName(p.id)) next[p.id] = v
-                  else delete next[p.id]
-                  update({ names: next })
-                } }),
+                // Uncontrolled + commit-on-blur/Enter: typing is LOCAL until the
+                // edit completes — a per-keystroke update would fire a [改名]
+                // turn per character.清空 + 失焦 = 恢复默认名。
+                h('input', { style: Object.assign({}, inputStyle, { width: 120, fontWeight: 700 }), defaultValue: petName(p.id), title: '改名后点击空白处或回车生效；清空恢复默认',
+                  onBlur: function (e) { commitName(p.id, e.target.value) },
+                  onKeyDown: function (e) { if (e.key === 'Enter') { commitName(p.id, e.target.value); e.target.blur() } } }),
                 p.online
                   ? h('span', null, '在线',
                     h('span', { style: muted }, 'pid ' + String(p.pid ?? '?')),
@@ -149,14 +169,16 @@ window.__ModuleLoader__.load({
               return h('div', { key: id, style: row },
                 h('span', { style: { fontWeight: 700 } }, name),
                 h('span', { style: { fontSize: 18, fontWeight: 700 } }, String(book.affection ?? 0)),
-                h('span', { style: muted }, '/ 100 · ' + moodOf(book.affection ?? 0)),
+                h('span', { style: muted }, '/ 100 · ' + moodOf(book.affection ?? 0) + ' · 羁绊：' + bondTier(book.bond ? (book.bond.value ?? book.bond.days ?? 0) : 0) + '（' + String(book.bond ? (book.bond.value ?? book.bond.days ?? 0) : 0) + ' 天）'),
                 h('span', { style: muted }, '累计 ' + String(book.total ?? 0) + ' 次'))
             })
           })(),
           h('div', { style: row }, h(SButton, { variant: 'danger', disabled: busy, onClick: function () {
             if (window.confirm('清空所有好感度账本？此操作不可撤销。')) act('/api/pet-settings/reset-affection', {}, '账本已清空')
           } }, '重置账本'),
-          h('span', { style: muted }, '每跨 10 点该宠物会自主庆祝一次'))),
+          h('span', { style: muted }, '每 10 次触摸该宠物会自主庆祝一次'))),
+
+
 
         // ── 内心戏（宠物自主说话）──
         h(Section, { title: h('span', null, '自主表达 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '模型驱动')) },
@@ -202,11 +224,11 @@ window.__ModuleLoader__.load({
                   marginLeft: side === 'right' ? -1 : 0 }
               }
               return h('div', { style: { display: 'inline-flex' } },
-                h('button', { style: seg(iv.preset !== 'pet', 'left'), onClick: function () {
-                  if (iv.preset !== 'pet-inner-voice') update({ innerVoice: { preset: 'pet-inner-voice' } })
+                h('button', { style: seg(iv.preset === 'whale598', 'left'), onClick: function () {
+                  if (iv.preset !== 'whale598') update({ innerVoice: { preset: 'whale598' } })
                 } }, '精简（仅表达）'),
-                h('button', { style: seg(iv.preset === 'pet', 'right'), onClick: function () {
-                  if (iv.preset !== 'pet') update({ innerVoice: { preset: 'pet' } })
+                h('button', { style: seg(iv.preset === 'whale598-standard', 'right'), onClick: function () {
+                  if (iv.preset !== 'whale598-standard') update({ innerVoice: { preset: 'whale598-standard' } })
                 } }, '普通（含工作工具）'))
             })()),
           h('div', { style: row }, '指定会话（高级）',

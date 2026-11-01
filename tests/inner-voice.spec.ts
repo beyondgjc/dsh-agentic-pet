@@ -40,7 +40,7 @@ describe('readInnerVoiceConfig', () => {
     const home = await tempHome()
     expect(await readInnerVoiceConfig(home)).toEqual({
       enabled: true,
-      preset: 'pet-inner-voice',
+      preset: 'whale598',
       wakeIntervalMinutes: 2,
       speakProbability: 0.5,
       touchReplyProbability: 0.3,
@@ -56,7 +56,7 @@ describe('readInnerVoiceConfig', () => {
     await writeFile(join(home, 'pet-settings.json'), JSON.stringify({
       innerVoice: {
         enabled: false,
-        preset: 'pet',
+        preset: 'whale598-standard',
         wakeIntervalMinutes: 15,
         speakProbability: 0.9,
         touchReplyProbability: 0,
@@ -66,7 +66,7 @@ describe('readInnerVoiceConfig', () => {
     }), 'utf8')
     expect(await readInnerVoiceConfig(home)).toEqual({
       enabled: false,
-      preset: 'pet',
+      preset: 'whale598-standard',
       wakeIntervalMinutes: 15,
       speakProbability: 0.9,
       touchReplyProbability: 0,
@@ -91,7 +91,7 @@ describe('readInnerVoiceConfig', () => {
     expect(config.speakProbability).toBe(1)
     expect(config.touchReplyProbability).toBe(0)
     expect(config.touchReplyCooldownSeconds).toBe(30)
-    expect(config.preset).toBe('pet-inner-voice')
+    expect(config.preset).toBe('whale598')
   })
 
   it('folds the legacy minute cooldown key into seconds (x60), seconds key wins once saved', async () => {
@@ -177,11 +177,15 @@ describe('prompts and helpers', () => {
   })
 
   it('builds the wake prompt with the durable trigger tag and first-wake branch', () => {
-    const prompt = buildWakePrompt({ affection: 66, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false })
+    const prompt = buildWakePrompt({
+      affection: 66, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+    })
     expect(prompt.startsWith('[自主唤醒]')).toBe(true)
     expect(prompt).toContain('第一次醒来')
     expect(prompt).toContain('好感 66')
-    const again = buildWakePrompt({ affection: 66, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true })
+    const again = buildWakePrompt({
+      affection: 66, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
+    })
     expect(again).toContain('上次开口是 30 分钟前')
     expect(again).toContain('正在会话中工作')
   })

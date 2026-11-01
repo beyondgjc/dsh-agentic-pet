@@ -53,9 +53,6 @@ interface PetSettings {
   proactivity?: ProactivitySettings
   innerVoice?: InnerVoiceSettings
   debug?: DebugSettings
-  /** User-defined display names, petId → label. A missing key falls back to
-   * the client's built-in default per id. */
-  names?: Record<string, string>
 }
 
 const DEFAULT_SETTINGS: PetSettings = {
@@ -68,7 +65,7 @@ const DEFAULT_SETTINGS: PetSettings = {
   },
   innerVoice: {
     enabled: true,
-    preset: 'pet-inner-voice',
+    preset: 'whale598',
     wakeIntervalMinutes: 2,
     speakProbability: 0.5,
     touchReplyProbability: 0.3,
@@ -76,10 +73,11 @@ const DEFAULT_SETTINGS: PetSettings = {
     boundSessions: {},
   },
   debug: { cdp: false },
-  names: {},
 }
 
 /** The touch ledger the driver owns; reset writes the driver's empty shape. */
+import * as petdata from './petdata.ts'
+
 const EMPTY_LEDGER = { affection: 0, total: 0, byPart: {}, recent: [] }
 
 /** Same-origin loopback fence (dsh-qqbot precedent): local host only, no
@@ -181,22 +179,12 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     const d = patchDebug as Record<string, unknown>
     if (typeof d.cdp === 'boolean') debug.cdp = d.cdp
   }
-  // Display names: the client sends the WHOLE map (boundSessions precedent);
-  // entries are validated (non-empty key, non-empty trimmed value) and an
-  // empty value drops the key (fall back to the built-in default name).
-  let names = { ...DEFAULT_SETTINGS.names, ...current.names }
-  const patchNames = patch.names
-  if (typeof patchNames === 'object' && patchNames !== null) {
-    const record: Record<string, string> = {}
-    for (const [petId, label] of Object.entries(patchNames as Record<string, unknown>)) {
-      if (petId !== '' && typeof label === 'string' && label.trim() !== '') record[petId] = label.trim()
-    }
-    names = record // whole-map replacement: a dropped key = fall back to default
-  }
+  // NOTE: display names are NOT a pet-settings.json section anymore — they
+  // live in whale598/<petId>/pet-name.json (see the update handler).
   // pet-settings.json is SHARED with the carrier (its tuning/outfit/rev keys
   // live in the same file): preserve every key this page does not own, or one
   // save here silently wipes the carrier's half.
-  return { ...current, proactivity, innerVoice, debug, names }
+  return { ...current, proactivity, innerVoice, debug }
 }
 
 function openPathInFileManager(path: string): void {
@@ -219,7 +207,6 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
   // and the /status field matrix are the service's job — this page only
   // renders.
   const settingsPath = join(home, 'pet-settings.json')
-  const ledgerPath = join(home, 'pet-affection.json') // legacy electron book
   const windowPath = join(home, 'pet-window.json')
 
   /** Summarize EVERY live pet (id, online flag, normalized /status). */
@@ -287,23 +274,40 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     // Per-pet affection books: the registry's pet ids plus the legacy single
     // book (folded under 'electron' for pre-registry history).
     const affection: Record<string, unknown> = {}
-    const legacyBook = await readFile(ledgerPath, 'utf8').then(
-      raw => JSON.parse(raw) as Record<string, unknown>,
-      () => null,
-    )
     const bookIds = new Set(status.pets.map(pet => String(pet.id)))
     bookIds.add('electron')
     for (const id of bookIds) {
-      const file = id === 'electron' && legacyBook !== null
-        ? ledgerPath
-        : join(home, 'pet-affection.d', `${id}.json`)
-      const book = await readFile(file, 'utf8').then(
-        raw => JSON.parse(raw) as Record<string, unknown>,
-        () => null,
-      )
+      const book = await petdata.readAffectionRaw(home, id)
       if (book !== null) affection[id] = book
     }
-    writeJson(res, 200, { settings, affection, windowPosition, pets: status.pets })
+    // Display names: composed from the per-pet store (legacy fallbacks
+    // inside petdata), so the client keeps its `settings.names` map shape.
+    const names: Record<string, string> = {}
+    for (const id of bookIds) {
+      const label = await petdata.readPetName(home, id)
+      if (label !== undefined) names[id] = label
+    }
+    const composed = { ...settings, names }
+    // 三期 history: per-pet touch totals + recent tool calls, aggregated
+    // from the whale598/<petId>/ JSONL streams.
+    const history: Array<Record<string, unknown>> = []
+    const touchTotals: Record<string, { total: number; byPart: Record<string, number> }> = {}
+    for (const id of bookIds) {
+      const events = await petdata.readJsonl(petdata.eventsFile(home, id), 600)
+      const totals = { total: 0, byPart: {} as Record<string, number> }
+      for (const event of events) {
+        if (event.type !== 'touch') continue
+        const part = typeof event.part === 'string' ? event.part : 'miss'
+        totals.total += 1
+        totals.byPart[part] = (totals.byPart[part] ?? 0) + 1
+      }
+      if (totals.total > 0) touchTotals[id] = totals
+      for (const call of await petdata.readJsonl(petdata.toolCallsFile(home, id), 12)) {
+        history.push({ ...call, petId: id })
+      }
+    }
+    history.sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0))
+    writeJson(res, 200, { settings: composed, affection, windowPosition, pets: status.pets, history: history.slice(0, 12), touchTotals })
   })
 
   route('POST', '/api/pet-settings/update', async (req, res) => {
@@ -312,6 +316,16 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     if (typeof patch !== 'object' || patch === null) {
       writeJson(res, 400, { error: 'body must be {patch:{...}}' })
       return
+    }
+    // names moved OUT of pet-settings.json into whale598/<petId>/pet-name.json:
+    // the patch's names map writes per-pet files (missing key = revert to the
+    // built-in default) and is stripped from the settings file entirely.
+    const patchNames = (patch as Record<string, unknown>).names
+    if (typeof patchNames === 'object' && patchNames !== null) {
+      for (const [petId, label] of Object.entries(patchNames as Record<string, unknown>)) {
+        await petdata.writePetName(home, petId, typeof label === 'string' && label.trim() !== '' ? label : null)
+      }
+      delete (patch as Record<string, unknown>).names
     }
     const current = await readSettings()
     const next = mergeSettings(current, patch as Record<string, unknown>)
@@ -324,7 +338,7 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
   })
 
   route('POST', '/api/pet-settings/reset-affection', async (_req, res) => {
-    await writeFile(ledgerPath, `${JSON.stringify(EMPTY_LEDGER)}\n`, 'utf8')
+    await petdata.writeAffectionRaw(home, 'electron', EMPTY_LEDGER)
     writeJson(res, 200, { ok: true, affection: EMPTY_LEDGER })
   })
 

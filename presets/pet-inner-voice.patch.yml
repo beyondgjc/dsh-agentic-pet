@@ -1,4 +1,4 @@
-# Agent preset pet-inner-voice: the desktop-pet persona for SELF-initiated
+# Agent preset whale598 (formerly `pet-inner-voice`): the desktop-pet persona for SELF-initiated
 # turns (the inner voice — docs/inner-voice.md). No work tools by design: the
 # pet wakes up to express, not to work; compaction is mandatory (a wake every
 # few minutes grows this session's log unboundedly). The pet-tools row is this
@@ -9,8 +9,8 @@
     - id: preset-pet-inner-voice
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: pet-inner-voice
-        name: 宠物模式·自主
+        id: whale598
+        name: 宠物模式
         description: 桌宠自主唤醒的内心戏会话——醒来只做身体表达（pet_say/pet_do），无工作工具；由 dsh-agentic-pet 的 driver 自动驱动，不建议手动使用。
         order: 6
         plugins:

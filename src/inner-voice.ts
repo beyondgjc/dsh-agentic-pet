@@ -44,6 +44,21 @@ export interface InnerVoiceConfig {
 
 export const VOICE_SESSION_PREFIX = 'whale598-'
 
+/**
+ * Saved-setting migration for preset id renames: pet-settings.json holds the
+ * user's 会话模式 choice by id, and a rename orphans that saved value (every
+ * ensure would first try a dead id and fall back). Map the legacy ids onto
+ * their successors; unknown ids pass through untouched.
+ */
+const LEGACY_PRESET_IDS: Record<string, string> = {
+  'pet-inner-voice': 'whale598',
+  'pet': 'whale598-standard',
+}
+
+function migratePreset(preset: string): string {
+  return LEGACY_PRESET_IDS[preset] ?? preset
+}
+
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value))
 
@@ -85,7 +100,9 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
     }
     return {
       enabled: v.enabled !== false,
-      preset: typeof v.preset === 'string' && v.preset !== '' ? v.preset : 'pet-inner-voice',
+      preset: migratePreset(
+        typeof v.preset === 'string' && v.preset !== '' ? v.preset : 'whale598',
+      ),
       wakeIntervalMinutes: typeof v.wakeIntervalMinutes === 'number' && Number.isFinite(v.wakeIntervalMinutes)
         ? clamp(Math.round(v.wakeIntervalMinutes), 1, 60)
         : 2,
@@ -97,7 +114,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
   } catch {
     return {
       enabled: true,
-      preset: 'pet-inner-voice',
+      preset: 'whale598',
       wakeIntervalMinutes: 2,
       speakProbability: 0.5,
       touchReplyProbability: 0.3,
@@ -193,6 +210,9 @@ export function mintVoiceSessionId(
 
 export interface GreetPromptFacts {
   affection: number
+  bondValue: number
+  bondDays: number
+  bondTier: string
 }
 
 /** The boot-greeting prompt: fired once per dsh start when the pet first
@@ -201,9 +221,27 @@ export interface GreetPromptFacts {
 export function buildGreetPrompt(facts: GreetPromptFacts): string {
   return [
     '[启动问好]',
-    `用户刚打开 DeepSeek，你的世界刚亮起来（好感 ${String(facts.affection)}，${moodOf(facts.affection)}）。`,
+    `用户刚打开 DeepSeek，你的世界刚亮起来（好感 ${String(facts.affection)}，${moodOf(facts.affection)}；羁绊 ${facts.bondTier}，一起过了 ${String(facts.bondDays)} 天）。`,
     '主动打个招呼（pet_say）——按当下的时辰自然问好，一两句就好，别问问题等回答。',
   ].join(' ')
+}
+
+/** B 层 · 羁绊档位：days-with-interaction → tier name. Only grows, never
+ * decays; the names are the display contract (settings page keeps its own
+ * copy of the thresholds). */
+export const BOND_TIERS: Array<{ since: number; name: string }> = [
+  { since: 0, name: '陌生' },
+  { since: 5, name: '认识' },
+  { since: 15, name: '熟了' },
+  { since: 40, name: '亲近' },
+  { since: 90, name: '离不开' },
+  { since: 180, name: '只有你' },
+]
+
+export function bondTier(days: number): string {
+  let tier = BOND_TIERS[0]?.name ?? '陌生'
+  for (const t of BOND_TIERS) if (days >= t.since) tier = t.name
+  return tier
 }
 
 /** Shared mood vocabulary (pet_state computes the same from the ledger). */
@@ -221,6 +259,9 @@ export function touchPartWording(part: string): string | undefined {
 
 export interface WakePromptFacts {
   affection: number
+  bondValue: number
+  bondTier: string
+  bondDays: number
   /** Minutes since this pet last spoke on its own; undefined = first wake. */
   minutesSinceLastSpoke: number | undefined
   /** Minutes since the bound session last showed activity; undefined = none recorded. */
@@ -239,7 +280,7 @@ export function buildWakePrompt(facts: WakePromptFacts): string {
     : '用户最近没有活动'
   return [
     '[自主唤醒]',
-    `好感 ${String(facts.affection)}（${moodOf(facts.affection)}）；${lastSpoke}；${user}。`,
+    `好感 ${String(facts.affection)}（${moodOf(facts.affection)}）；羁绊 ${facts.bondTier}（一起过了 ${String(facts.bondDays)} 天）；${lastSpoke}；${user}。`,
     '醒来想到什么就说一句（pet_say），想配动作就 pet_do；也可以只是安静待着（两者都不调，正文写「…」）。',
   ].join(' ')
 }

@@ -9,13 +9,13 @@
 
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { existsSync } from 'node:fs'
-import { appendFile, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { formatAvailableActions, resolveActionRequest } from './actions.ts'
 import {
+  bondTier,
   buildChatPrompt,
   buildGreetPrompt,
   buildTouchPrompt,
@@ -29,6 +29,7 @@ import {
   type InnerVoiceStore,
 } from './inner-voice.ts'
 import { notifyPets, routePet, type PetEntry } from './registry.ts'
+import * as petdata from './petdata.ts'
 import type { PetService } from './service.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -81,39 +82,93 @@ declare module '@deepseek-ai/cordis' {
  * @param ctx - plugin context inside the runtime whose sessions are watched.
  * @param home - the dsh home holding the pet control manifest.
  */
-/** The affection ledger the driver alone writes (single-writer, §6). */
+/** The affection ledger. TWO layers with separate writers: the touch
+ * FACTS (total/byPart/lastTouchAt/recent) are system-recorded from events;
+ * the `affection` VALUE is the model's judgment, maintained through
+ * pet_affection_adjust (delta + mandatory reason) — the driver never
+ * moves it on a touch. Every judgment change lands in `adjustments`
+ * (audit trail, incl. system decay entries marked system:true). */
 interface TouchLedger {
   affection: number
   total: number
   byPart: Record<string, number>
   lastTouchAt: number | undefined
   recent: Array<{ part: string; at: number }>
+  adjustments?: Array<{ delta: number; reason: string; at: number; system?: boolean }> | undefined
+  quota?: { date: string; count: number; sum: number } | undefined
+  lastDecayAt?: number | undefined
+  /** B 层 · 羁绊，TWO fields with separate writers — mixing them made
+   * both untrustworthy (a pet's considered -1 was cancelled by the next
+   * day's automatic +1; the tier was counting app-open days):
+   *   days  ← system fact ONLY (countBondDay): 一起过过几天，自动记；
+   *   value ← the model's judgment ONLY (bondDelta ±1 + reason): 我觉得
+    *     我们到哪了。 tier derives from value (much slower thresholds). */
+  bond?: { value: number; days: number; lastCountedDate: string } | undefined
+  bondAdjustments?: Array<{ delta: number; reason: string; at: number }> | undefined
 }
 
 const EMPTY_LEDGER: TouchLedger = { affection: 0, total: 0, byPart: {}, lastTouchAt: undefined, recent: [] }
 
-async function readLedger(ledgerFile: string): Promise<TouchLedger> {
+// Affection judgment locks: delta-only with mandatory reason, a cooldown
+// between adjustments, and a daily quota — the model judges the
+// relationship, it does not farm it.
+const ADJUST_MAX_DELTA = 3
+const ADJUST_COOLDOWN_MS = 5 * 60_000
+const ADJUST_DAILY_LIMIT = 8
+const ADJUST_DAILY_SUM = 10
+// Decay is SYSTEM-computed (lazy — no timer): silent for 3 days, then -1
+// per further 3 days, floor 0.
+const DECAY_START_DAYS = 3
+const DECAY_STEP_DAYS = 3
+
+async function readLedger(home: string, petId: string): Promise<TouchLedger> {
   try {
-    const raw = JSON.parse(await readFile(ledgerFile, 'utf8')) as Partial<TouchLedger>
+    const raw = await petdata.readAffectionRaw(home, petId) as Partial<TouchLedger> | null
+    if (raw === null) return { ...EMPTY_LEDGER, byPart: {}, recent: [] }
     return {
       affection: typeof raw.affection === 'number' ? raw.affection : 0,
       total: typeof raw.total === 'number' ? raw.total : 0,
       byPart: raw.byPart ?? {},
       lastTouchAt: raw.lastTouchAt,
       recent: raw.recent ?? [],
+      adjustments: Array.isArray(raw.adjustments)
+        ? (raw.adjustments as unknown[]).filter(
+          (a): a is NonNullable<TouchLedger['adjustments']>[number] =>
+            typeof a === 'object' && a !== null
+              && typeof (a as Record<string, unknown>).delta === 'number'
+              && typeof (a as Record<string, unknown>).reason === 'string'
+              && typeof (a as Record<string, unknown>).at === 'number',
+        )
+        : undefined,
+      quota: typeof raw.quota === 'object' && raw.quota !== null
+        ? raw.quota as TouchLedger['quota']
+        : undefined,
+      lastDecayAt: typeof raw.lastDecayAt === 'number' ? raw.lastDecayAt : undefined,
+      bond: typeof raw.bond === 'object' && raw.bond !== null
+        && typeof (raw.bond as Record<string, unknown>).lastCountedDate === 'string'
+        ? {
+          value: typeof (raw.bond as Record<string, unknown>).value === 'number'
+            ? (raw.bond as Record<string, unknown>).value as number
+            : 0, // judgment starts from zero on the split (was days-polluted)
+          days: typeof (raw.bond as Record<string, unknown>).days === 'number'
+            ? (raw.bond as Record<string, unknown>).days as number
+            : 0,
+          lastCountedDate: (raw.bond as Record<string, unknown>).lastCountedDate as string,
+        }
+        : undefined,
+      bondAdjustments: Array.isArray(raw.bondAdjustments)
+        ? (raw.bondAdjustments as unknown[]).filter(
+          (a): a is NonNullable<TouchLedger['bondAdjustments']>[number] =>
+            typeof a === 'object' && a !== null
+              && typeof (a as Record<string, unknown>).delta === 'number'
+              && typeof (a as Record<string, unknown>).reason === 'string'
+              && typeof (a as Record<string, unknown>).at === 'number',
+        )
+        : undefined,
     }
   } catch {
     return { ...EMPTY_LEDGER, byPart: {}, recent: [] }
   }
-}
-
-/** The per-pet ledger file. Legacy deployments' single book is folded under
- * the electron id so pre-registry affection history survives the upgrade. */
-function ledgerFileFor(home: string, petId: string): string {
-  if (petId === 'electron' && !existsSync(join(home, 'pet-affection.d'))) {
-    return join(home, 'pet-affection.json')
-  }
-  return join(home, 'pet-affection.d', `${petId}.json`)
 }
 
 /** Local-time log stamp: the driver log is the user's primary debugging
@@ -162,7 +217,7 @@ async function readEvents(pet: PetService, entry: PetEntry, since: number, holdS
  * transitive source graph into its types.
  */
 interface SessionControllerFace {
-  create(request: { sessionId?: string; agentPreset?: string }): Promise<{ sessionId: string }>
+  create(request: { sessionId?: string; agentPreset?: string; cwd?: string }): Promise<{ sessionId: string }>
   prompt(
     request: {
       requestId: string
@@ -236,8 +291,24 @@ const voiceGreetedOnce = new Set<string>()
 // name line so the pet self-identifies with the user's naming.
 const voiceNames = new Map<string, string>()
 // Built-in defaults when no custom name is set (the settings client keeps
-  // its own copy — separate build face).
+// its own copy — separate build face).
 const DEFAULT_PET_NAME: Record<string, string> = { electron: '鲸鱼娘' }
+
+/** B-layer bond day counting: the FIRST interaction of a calendar day
+ * (touch / user chat / model adjustment) marks that day as shared. Called
+ * at the interaction points, never on reads — reading the ledger does not
+ * make a day meaningful. Mutates in place; the caller persists. Module-level
+ * because both the driver closures AND the model tools (registerPetTools)
+ * count bond days. */
+const countBondDay = (ledger: TouchLedger): void => {
+  const today = new Date().toDateString()
+  if (ledger.bond?.lastCountedDate === today) return
+  ledger.bond = {
+    value: ledger.bond?.value ?? 0, // judgment untouched by the fact writer
+    days: (ledger.bond?.days ?? 0) + 1,
+    lastCountedDate: today,
+  }
+}
 // Dead-session detection (§ archive black hole): counts relative to the last
 // pet_say, NOT per-prompt windows — consecutive admissions renew a per-prompt
 // deadline forever, which is exactly what a user rapidly re-sending into a
@@ -337,7 +408,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
       if (!latestArchived.has(entry.sessionId)) continue
       const generation = (voiceStore.generations[petId] ?? 0) + 1
       voiceStore.generations[petId] = generation
-      delete voiceStore.sessions[petId]
+      Reflect.deleteProperty(voiceStore.sessions, petId)
       const ownerEntry = [...voiceOwners.entries()].find(([, owner]) => owner === petId)
       if (ownerEntry !== undefined) voiceOwners.delete(ownerEntry[0])
       voicePendingUntil.delete(petId)
@@ -365,6 +436,10 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   // into the archive by the host — the "new session black hole". Duck-typed
   // on the workspace registry, fail-soft; once per session id.
   const attachedSessions = new Set<string>()
+  // The pet sessions' project directory (workspace): OUTSIDE ~/.dsh so the
+  // attach gate accepts it, and the sidebar shows the sessions grouped under
+  // a real 项目 instead of 未分组 orphans.
+  const petWorkspaceDir = (): string => join(homedir(), 'whale598')
   const attachVoiceSession = async (sessionId: string): Promise<void> => {
     if (attachedSessions.has(sessionId)) return
     attachedSessions.add(sessionId)
@@ -372,8 +447,11 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
       const registry = (ctx as { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryFace | undefined
       if (registry === undefined) return
       // cwd must be an ORDINARY user directory: the host re-resolves ~/.dsh
-      // paths to the active profile and refuses the attach.
-      const workspace = await registry.create(homedir())
+      // paths to the active profile and refuses the attach. The directory
+      // must exist (realpath) — existing sessions retry here before any
+      // create has made it.
+      await mkdir(petWorkspaceDir(), { recursive: true })
+      const workspace = await registry.create(petWorkspaceDir())
       await workspace?.attachSession?.(sessionId)
       driverLog(home, `VOICE session attached to workspace (${sessionId})`)
     } catch (error) {
@@ -398,7 +476,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     })()
     ctx.effect(() => () => followAbort.abort(), 'pet-surface: workspace archive watch')
   }
-  void loadInnerVoiceStore(home).then(store => {
+  void loadInnerVoiceStore(home).then((store) => {
     voiceStore = store
     for (const [petId, entry] of Object.entries(store.sessions)) {
       voiceOwners.set(entry.sessionId, petId)
@@ -534,7 +612,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
       const petId = voiceOwners.get(sessionId)
       voiceOwners.delete(sessionId)
       if (petId !== undefined) {
-        delete voiceStore.sessions[petId]
+        Reflect.deleteProperty(voiceStore.sessions, petId)
         voicePendingUntil.delete(petId)
         void saveInnerVoiceStore(home, voiceStore)
         driverLog(home, `VOICE session removed by user; pet=${petId} will re-create on next wake`)
@@ -552,15 +630,25 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   // every settings change (promptVoice prepends the name line; pet_state
   // surfaces it to the model; the inner-voice session retitles to match).
   const refreshNames = async (): Promise<void> => {
+    voiceNames.clear()
+    // New layout: every pet directory under whale598/ with a name file.
+    try {
+      for (const petId of await readdir(join(home, petdata.WHALE_DIR))) {
+        const name = await petdata.readPetName(home, petId)
+        if (name !== undefined) voiceNames.set(petId, name)
+      }
+    } catch { /* no whale598 dir yet */ }
+    // Legacy names in pet-settings.json (readPetName falls back per id too).
     try {
       const raw = JSON.parse(await readFile(join(home, 'pet-settings.json'), 'utf8')) as { names?: unknown }
-      voiceNames.clear()
       if (typeof raw.names === 'object' && raw.names !== null) {
         for (const [petId, label] of Object.entries(raw.names as Record<string, unknown>)) {
-          if (petId !== '' && typeof label === 'string' && label.trim() !== '') voiceNames.set(petId, label.trim())
+          if (petId !== '' && typeof label === 'string' && label.trim() !== '' && !voiceNames.has(petId)) {
+            voiceNames.set(petId, label.trim())
+          }
         }
       }
-    } catch { /* unreadable settings: defaults apply */ }
+    } catch { /* none */ }
   }
   void refreshNames()
 
@@ -578,18 +666,30 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     // re-pushes the current state immediately (the dedup key includes the
     // payload, so an unchanged semantic state still delivers the new config).
     // Manual session bindings live in the same file — refresh the cache.
-    void refreshBoundSessions()
-    // A renamed pet retitles her inner-voice session (cosmetic; the rename
-    // RPC is fail-soft — a failed retitle never blocks the settings save).
+    // Deterministic order: snapshot the PREVIOUS names, refresh, then diff —
+    // a real rename retitles the session AND fires a [改名] turn (she
+    // acknowledges out loud). The per-turn short name line remains the
+    // compaction-proof invariant; this event turn is the immediate feedback.
+    const prevNames = new Map(voiceNames)
     void (async () => {
-      for (const [petId, entry] of Object.entries(voiceStore.sessions)) {
-        const title = `${voiceNames.get(petId) ?? DEFAULT_PET_NAME[petId] ?? petId}的内心戏`
-        try {
-          await voiceController?.rename({ sessionId: entry.sessionId, title })
-          driverLog(home, `VOICE session retitled pet=${petId} → ${title}`)
-        } catch (error) {
-          driverLog(home, `VOICE retitle skipped pet=${petId}: ${error instanceof Error ? error.message : String(error)}`)
+      await refreshNames()
+      void refreshBoundSessions()
+      const changedPets = new Set<string>([...prevNames.keys(), ...voiceNames.keys()])
+      for (const petId of changedPets) {
+        if (prevNames.get(petId) === voiceNames.get(petId)) continue
+        const nextName = voiceNames.get(petId)
+        const label = nextName ?? DEFAULT_PET_NAME[petId] ?? petId
+        const entry = voiceStore.sessions[petId]
+        if (entry !== undefined) {
+          const title = `${label}的内心戏`
+          try {
+            await voiceController?.rename({ sessionId: entry.sessionId, title })
+            driverLog(home, `VOICE session retitled pet=${petId} → ${title}`)
+          } catch (error) {
+            driverLog(home, `VOICE retitle skipped pet=${petId}: ${error instanceof Error ? error.message : String(error)}`)
+          }
         }
+        void triggerRenameNotice(petId, nextName, label)
       }
     })()
     if (currentState !== undefined) void pushState(currentState)
@@ -825,11 +925,12 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     }
     const sessionId = minted.sessionId
     try {
-      await voiceController.create({ sessionId, agentPreset: config.preset })
+      await mkdir(petWorkspaceDir(), { recursive: true })
+      await voiceController.create({ sessionId, agentPreset: config.preset, cwd: petWorkspaceDir() })
     } catch (firstError) {
       driverLog(home, `VOICE preset "${config.preset}" rejected for pet=${petId}: ${firstError instanceof Error ? firstError.message : String(firstError)}; falling back`)
       try {
-        await voiceController.create({ sessionId, agentPreset: 'pet-inner-voice' })
+        await voiceController.create({ sessionId, agentPreset: 'whale598', cwd: petWorkspaceDir() })
       } catch (secondError) {
         driverLog(home, `VOICE session create failed for pet=${petId}: ${secondError instanceof Error ? secondError.message : String(secondError)}`)
         return undefined
@@ -874,7 +975,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     // instruction wins). Guarded so a re-submitted text is not tagged twice.
     const customName = voiceNames.get(petId)
     if (customName !== undefined && !text.startsWith('[名字]')) {
-      text = `[名字] 用户给你起名叫「${customName}」——自我介绍、气泡里自称，都用这个名字。
+      text = `[名字] 你叫「${customName}」。
 ${text}`
     }
     const sessionId = await ensureVoiceSession(petId)
@@ -890,7 +991,25 @@ ${text}`
         new AbortController().signal,
       )
     } catch (error) {
-      driverLog(home, `VOICE prompt failed pet=${petId}: ${error instanceof Error ? error.message : String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      driverLog(home, `VOICE prompt failed pet=${petId}: ${message}`)
+      // Preset-rename migration: a session recorded under a since-renamed
+      // preset id fails resume with a machine-readable error. Retire it once
+      // and retry — the fresh create mounts the CURRENT preset id.
+      if (/Unknown agent preset/i.test(message) && !retried) {
+        const known = voiceStore.sessions[petId]
+        if (known !== undefined) {
+          const generation = (voiceStore.generations[petId] ?? 0) + 1
+          voiceStore.generations[petId] = generation
+          Reflect.deleteProperty(voiceStore.sessions, petId)
+          const ownerEntry = [...voiceOwners.entries()].find(([, owner]) => owner === petId)
+          if (ownerEntry !== undefined) voiceOwners.delete(ownerEntry[0])
+          voiceLastPrompt.delete(petId)
+          void saveInnerVoiceStore(home, voiceStore)
+          driverLog(home, `VOICE session retired pet=${petId} (recorded preset no longer exists — id renamed) — fresh -g${generation} mounts the current preset`)
+          return promptVoice(petId, text, { retried: true, userDriven })
+        }
+      }
       return false
     }
     // The prompt is accepted: hold the pet's pending lock until pet_say
@@ -950,14 +1069,32 @@ ${text}`
    * greeting (pet offline) releases the flag for the next sweep to retry. */
   const triggerGreeting = async (petId: string): Promise<void> => {
     if (!(await voiceGateOpen(petId, false, 'greeting'))) return
-    const ledger = await readLedger(ledgerFileFor(home, petId))
-    const spoke = await promptVoice(petId, buildGreetPrompt({ affection: ledger.affection }))
+    const ledger = await readLedger(home, petId)
+    const spoke = await promptVoice(petId, buildGreetPrompt({
+      affection: ledger.affection,
+      bondValue: ledger.bond?.value ?? 0,
+      bondDays: ledger.bond?.days ?? 0,
+      bondTier: bondTier(ledger.bond?.value ?? 0),
+    }))
     if (spoke) {
       voiceGreetedOnce.add(petId)
       driverLog(home, `VOICE boot greeting pet=${petId}`)
     } else {
       voiceGreetedOnce.delete(petId)
     }
+  }
+
+  /** Rename notice (user request): fired when the user's custom name actually
+   * changes — she acknowledges out loud, once. The per-turn short name line
+   * stays as the compaction-proof invariant; a skipped notice (pet offline /
+   * turn in flight) loses nothing because that line still carries the name. */
+  const triggerRenameNotice = async (petId: string, nextName: string | undefined, label: string): Promise<void> => {
+    if (!(await voiceGateOpen(petId, false, 'rename'))) return
+    const text = nextName !== undefined
+      ? `[改名] 用户给你改名叫「${label}」——以后自我介绍、气泡里自称，都用这个名字。`
+      : `[改名] 用户把你改回了「${label}」。`
+    const spoke = await promptVoice(petId, text)
+    if (spoke) driverLog(home, `VOICE rename notice pet=${petId} → ${label}`)
   }
 
   /** Random-wake trigger (docs/inner-voice.md §6.3). The gate decides whether
@@ -973,11 +1110,14 @@ ${text}`
       return
     }
     if (!(await voiceGateOpen(petId, true, 'wake'))) return
-    const ledger = await readLedger(ledgerFileFor(home, petId))
+    const ledger = await readLedger(home, petId)
     const now = Date.now()
     const lastSpoke = voiceLastSpokeAt.get(petId)
     const spoke = await promptVoice(petId, buildWakePrompt({
       affection: ledger.affection,
+      bondValue: ledger.bond?.value ?? 0,
+      bondDays: ledger.bond?.days ?? 0,
+      bondTier: bondTier(ledger.bond?.value ?? 0),
       minutesSinceLastSpoke: lastSpoke === undefined ? undefined : Math.round((now - lastSpoke) / 60_000),
       minutesSinceUserActivity: voiceUserActivityAt === undefined ? undefined : Math.round((now - voiceUserActivityAt) / 60_000),
       userActive: voiceUserActivityAt !== undefined && now - voiceUserActivityAt < 30 * 60_000,
@@ -1009,7 +1149,7 @@ ${text}`
       return
     }
     if (!(await voiceGateOpen(petId, false, 'touch', true))) return
-    const ledger = await readLedger(ledgerFileFor(home, petId))
+    const ledger = await readLedger(home, petId)
     const spoke = await promptVoice(petId, buildTouchPrompt({
       part,
       touchesToday: ledger.recent.filter(entry => entry.part === part).length + 1,
@@ -1083,24 +1223,21 @@ ${text}`
   // ledger only through pet_state.
   const lastEventSeqs = new Map<string, number>()
   const recordTouch = async (petId: string, part: string, at: number): Promise<void> => {
-    const ledgerFile = ledgerFileFor(home, petId)
-    const ledger = await readLedger(ledgerFile)
+    const ledger = await readLedger(home, petId)
+    countBondDay(ledger)
     ledger.total += 1
     ledger.byPart[part] = (ledger.byPart[part] ?? 0) + 1
-    const before = ledger.affection
-    ledger.affection = Math.min(100, ledger.affection + (part === 'head' ? 2 : 1))
     ledger.lastTouchAt = at
     ledger.recent.unshift({ part, at })
     ledger.recent = ledger.recent.slice(0, 10)
     try {
-      await writeFile(ledgerFile, `${JSON.stringify(ledger)}
-`, 'utf8')
+      await petdata.writeAffectionRaw(home, petId, ledger as unknown as Record<string, unknown>)
     } catch (error: unknown) {
       console.error(`pet-surface driver: could not write the ledger: ${error instanceof Error ? error.message : String(error)}`)
     }
-    // Every crossed ten of affection earns one unprompted hop — a runtime-side
-    // reaction with no model in the loop, delivered to the touched pet only.
-    if (Math.floor(ledger.affection / 10) > Math.floor(before / 10)) {
+    // Every crossed ten TOUCHES earns one unprompted hop — a fact-layer
+    // reward (affection is the model's judgment and no longer moves here).
+    if (Math.floor(ledger.total / 10) > Math.floor((ledger.total - 1) / 10)) {
       const pets = await pet.list()
       const target = pets.find(pet => pet.id === petId)
       if (target !== undefined) {
@@ -1122,7 +1259,15 @@ ${text}`
    * path's probability/cooldown/user-busy gates entirely (a user reaching
    * out to talk is never throttled — §6 routing constraint); unknown types
    * are ignored while the cursor still advances. */
-  const handlePetEvent = async (petId: string, event: { seq: number; type: string; part?: string | undefined; text?: string | undefined; at: number }): Promise<void> => {
+  type PetEvent = { seq: number; type: string; part?: string | undefined; text?: string | undefined; at: number }
+  const handlePetEvent = async (petId: string, event: PetEvent): Promise<void> => {
+    // Event history (二期): every consumed event lands in the pet's
+    // events.jsonl — touch events in full, chat as METADATA ONLY (the user's
+    // words already live in the inner-voice session log; the driver never
+    // duplicates user prose).
+    void petdata.appendJsonl(petdata.eventsFile(home, petId), {
+      seq: event.seq, type: event.type, ...(event.type === 'touch' ? { part: event.part } : {}), at: event.at,
+    })
     if (event.type === 'touch') {
       if (event.part !== undefined) {
         await recordTouch(petId, event.part, event.at)
@@ -1130,6 +1275,9 @@ ${text}`
       return
     }
     if (event.type === 'chat' && event.text !== undefined && event.text !== '') {
+      const ledger = await readLedger(home, petId)
+      countBondDay(ledger)
+      await petdata.writeAffectionRaw(home, petId, ledger as unknown as Record<string, unknown>)
       void triggerChat(petId, event.text)
     }
   }
@@ -1274,10 +1422,14 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        const callStartedAt = Date.now()
+        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
+        let callDetail: string | undefined
         const text = String(args.text).slice(0, 200)
         console.log(`pet-surface driver: pet_say ${JSON.stringify(text).slice(0, 60)}`)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          callPet = entry.id
           await pet.call(entry, '/say', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -1290,7 +1442,10 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             driverLog(home, `VOICE pending released by say pet=${entry.id} (inner-voice turn complete)`)
           }
         } catch (error: unknown) {
+          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
+        } finally {
+          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_say', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
         // The renderer's show-time formula: the model can pace a say→act
         // sequence without guessing.
@@ -1310,8 +1465,12 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        const callStartedAt = Date.now()
+        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
+        let callDetail: string | undefined
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          callPet = entry.id
           // The menu belongs to the pet, not the driver: validate against the
           // pet's advertised catalog. An unknown id is an ERROR that names the
           // available ones, so the model can self-correct in one step.
@@ -1359,7 +1518,10 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           }
           return JSON.stringify({ performed: true, action, waitTimedOut: true })
         } catch (error: unknown) {
+          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
+        } finally {
+          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_do', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
       },
     }))
@@ -1374,8 +1536,12 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        const callStartedAt = Date.now()
+        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
+        let callDetail: string | undefined
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          callPet = entry.id
           const cursor = digestCursors.get(entry.id) ?? 0
           let payload = await readEvents(pet, entry, cursor, 0)
           if (payload.latest < cursor) {
@@ -1398,7 +1564,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             if (event.at > (lastTouchAt ?? 0)) lastTouchAt = event.at
           }
           digestCursors.set(entry.id, newest)
-          const ledger = await readLedger(ledgerFileFor(home, entry.id))
+          const ledger = await readLedger(home, entry.id)
           const mood = moodOf(ledger.affection)
           return JSON.stringify({
             pet: entry.id,
@@ -1410,7 +1576,10 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             cursor: newest,
           })
         } catch (error: unknown) {
+          callDetail = error instanceof Error ? error.message : String(error)
           throw classify(error)
+        } finally {
+          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_digest', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
         }
       },
     }))
@@ -1435,7 +1604,141 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         } catch {
           // no interactions recorded yet
         }
+        void petdata.appendJsonl(petdata.toolCallsFile(home, 'all'), { tool: 'pet_interactions', petId: 'all', ok: true, durationMs: 0, at: Date.now() })
         return JSON.stringify({ recent: list.slice(0, limit) })
+      },
+    }))
+    // ── model-maintained affection (判断层)：the ONLY writers of
+    // ledger.affection. Touch facts stay system-owned; the model reads them
+    // and judges. ──
+    const settleDecay = (ledger: TouchLedger, now: number): number => {
+      // System-side decay, lazy: silent for DECAY_START_DAYS since the last
+      // interaction of ANY kind (touch or model adjustment), then -1 per
+      // DECAY_STEP_DAYS, floor 0. Returns the pending (unrecorded) units.
+      const lastInteraction = Math.max(ledger.lastTouchAt ?? 0, ledger.adjustments?.[0]?.at ?? 0, ledger.lastDecayAt ?? 0)
+      const silentDays = (now - lastInteraction) / 86_400_000
+      if (silentDays <= DECAY_START_DAYS) return 0
+      return Math.min(ledger.affection, Math.floor((silentDays - DECAY_START_DAYS) / DECAY_STEP_DAYS) + 1)
+    }
+    scope.tools.register(defineTool({
+      name: 'pet_affection_get',
+      description: 'Read the FULL affection context before adjusting it: the current value you maintain (and its mood), the touch FACTS the system records (counts by part — cause, not feeling), your recent adjustments with their reasons, the remaining daily quota, and any pending decay. Call this whenever you are deciding whether and how to adjust.',
+      parameters: {
+        pet: { type: 'string', description: 'Which pet: its id from pet_state. Omit for the default pet.' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        const callStartedAt = Date.now()
+        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
+        let callDetail: string | undefined
+        try {
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          callPet = entry.id
+          const ledger = await readLedger(home, entry.id)
+          const pendingDecay = settleDecay(ledger, Date.now())
+          const effective = Math.max(0, ledger.affection - pendingDecay)
+          const today = new Date().toDateString()
+          const quota = ledger.quota?.date === today ? ledger.quota : { date: today, count: 0, sum: 0 }
+          return JSON.stringify({
+            pet: entry.id,
+            affection: effective,
+            mood: moodOf(effective),
+            touch: { total: ledger.total, byPart: ledger.byPart, lastTouchAt: ledger.lastTouchAt ?? null },
+            bond: { value: ledger.bond?.value ?? 0, days: ledger.bond?.days ?? 0, tier: bondTier(ledger.bond?.value ?? 0) },
+            recentBondAdjustments: (ledger.bondAdjustments ?? []).slice(0, 3),
+            recentAdjustments: (ledger.adjustments ?? []).slice(0, 5),
+            quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
+            pendingDecay,
+          })
+        } catch (error: unknown) {
+          callDetail = error instanceof Error ? error.message : String(error)
+          throw classify(error)
+        } finally {
+          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_affection_get', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
+        }
+      },
+    }))
+    scope.tools.register(defineTool({
+      name: 'pet_affection_adjust',
+      description: 'Adjust the affection YOU maintain toward the user: delta (-3..+3 integer) plus a SPECIFIC reason citing what happened. Touch counts are facts the system records separately — this tool is your judgment layer, and the driver never moves the value on a touch. Limits: at least 5 minutes between adjustments, 8 per day, |daily sum| <= 10 — violations are REJECTED with the remaining quota, not clamped. Judge honestly: this number is your read of the relationship, not a score to farm.',
+      parameters: {
+        delta: { type: 'number', required: true, description: 'The change: a NON-ZERO integer between -3 and +3.' },
+        reason: { type: 'string', required: true, description: 'WHY this delta — cite the concrete interaction. Empty or generic reasons are rejected.' },
+        pet: { type: 'string', description: 'Which pet: its id from pet_state. Omit for the default pet.' },
+        bondDelta: { type: 'number', description: 'OPTIONAL change to the long-term bond: a NON-ZERO integer between -1 and +1. The slowest variable — the smallest steps.' },
+        bondReason: { type: 'string', description: 'Required when bondDelta is given: the concrete event that moved the bond.' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        const callStartedAt = Date.now()
+        let callPet = typeof args.pet === 'string' && args.pet !== '' ? args.pet : 'default'
+        let callDetail: string | undefined
+        try {
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          callPet = entry.id
+          const ledger = await readLedger(home, entry.id)
+          const now = Date.now()
+          // Settle pending decay FIRST: system entries ride the same trail.
+          const pendingDecay = settleDecay(ledger, now)
+          if (pendingDecay > 0) {
+            ledger.affection = Math.max(0, ledger.affection - pendingDecay)
+            ledger.adjustments = [{ delta: -pendingDecay, reason: `system: decay（${String(pendingDecay)} 天未互动）`, at: now, system: true }, ...(ledger.adjustments ?? [])]
+            ledger.lastDecayAt = now
+          }
+          const delta = typeof args.delta === 'number' && Number.isInteger(args.delta) ? args.delta : Number.NaN
+          const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
+          if (Number.isNaN(delta) || delta === 0 || Math.abs(delta) > ADJUST_MAX_DELTA) {
+            throw new Error(`delta 必须是 -${String(ADJUST_MAX_DELTA)}..+${String(ADJUST_MAX_DELTA)} 的非零整数（收到 ${String(args.delta)}）`)
+          }
+          if (reason === '') throw new Error('reason 必填：没有理由的调整不予记录')
+          const adjustments = ledger.adjustments ?? []
+          const lastModelAt = adjustments.find(a => !a.system)?.at ?? 0
+          const cooldownLeft = lastModelAt + ADJUST_COOLDOWN_MS - now
+          if (cooldownLeft > 0) throw new Error(`距上次调整还有 ${String(Math.ceil(cooldownLeft / 1000))} 秒冷却`)
+          const today = new Date().toDateString()
+          const quota = ledger.quota?.date === today ? ledger.quota : { date: today, count: 0, sum: 0 }
+          if (quota.count >= ADJUST_DAILY_LIMIT) throw new Error(`今日调整次数已用完（${String(ADJUST_DAILY_LIMIT)}）——明天再判断，或者相信当前的关系状态`)
+          if (Math.abs(quota.sum + delta) > ADJUST_DAILY_SUM) throw new Error(`今日净变动将超过 ±${String(ADJUST_DAILY_SUM)}（当前 ${String(quota.sum)}）——剩下的留给明天`)
+          countBondDay(ledger)
+          // Optional bond nudge: the SLOWEST variable takes the smallest
+          // steps — at most ±1 per call, reason mandatory, audited apart
+          // from affection adjustments.
+          const bondDelta = typeof args.bondDelta === 'number' && Number.isInteger(args.bondDelta) ? args.bondDelta : 0
+          const bondReason = typeof args.bondReason === 'string' ? args.bondReason.trim() : ''
+          if (bondDelta !== 0) {
+            if (Math.abs(bondDelta) > 1) throw new Error('bondDelta 每次至多 ±1：羁绊是最慢的变量，不接受大步幅')
+            if (bondReason === '') throw new Error('bondReason 必填：羁绊的增减要有具体的事由')
+          }
+          ledger.affection = Math.min(100, Math.max(0, ledger.affection + delta))
+          quota.count += 1
+          quota.sum += delta
+          ledger.quota = quota
+          ledger.adjustments = [{ delta, reason, at: now }, ...adjustments].slice(0, 20)
+          if (bondDelta !== 0) {
+            ledger.bond = {
+              value: Math.max(0, (ledger.bond?.value ?? 0) + bondDelta),
+              days: ledger.bond?.days ?? 0, // the fact writer owns days
+              lastCountedDate: ledger.bond?.lastCountedDate ?? new Date().toDateString(),
+            }
+            ledger.bondAdjustments = [{ delta: bondDelta, reason: bondReason, at: now }, ...(ledger.bondAdjustments ?? [])].slice(0, 10)
+          }
+          await petdata.writeAffectionRaw(home, entry.id, ledger as unknown as Record<string, unknown>)
+          return JSON.stringify({
+            pet: entry.id, affection: ledger.affection, mood: moodOf(ledger.affection), applied: delta,
+            quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
+          })
+        } catch (error: unknown) {
+          callDetail = error instanceof Error ? error.message : String(error)
+          throw classify(error)
+        } finally {
+          void petdata.appendJsonl(petdata.toolCallsFile(home, callPet), { tool: 'pet_affection_adjust', petId: callPet, ok: callDetail === undefined, ...(callDetail !== undefined ? { detail: callDetail.slice(0, 120) } : {}), durationMs: Date.now() - callStartedAt, at: Date.now() })
+        }
       },
     }))
     scope.tools.register(defineTool({
@@ -1470,9 +1773,11 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         const knownIds = new Set([...pets.map(entry => entry.id), 'electron', 'pure'])
         const ledgers: Record<string, unknown> = {}
         for (const id of knownIds) {
-          const ledger = await readLedger(ledgerFileFor(home, id))
+          const ledger = await readLedger(home, id)
           const mood = moodOf(ledger.affection)
-          ledgers[id] = { ...ledger, mood }
+          const tier = bondTier(ledger.bond?.value ?? 0)
+          const bond = { value: ledger.bond?.value ?? 0, days: ledger.bond?.days ?? 0, tier }
+          ledgers[id] = { ...ledger, mood, bond }
         }
         const petsOut = states.map((state) => {
           const actions = actionsById.get(state.id)
@@ -1480,6 +1785,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           // The model addresses pets by id, but should SEE the user's naming.
           return { ...base, name: voiceNames.get(state.id) ?? DEFAULT_PET_NAME[state.id] ?? state.id }
         })
+        void petdata.appendJsonl(petdata.toolCallsFile(home, 'all'), { tool: 'pet_state', petId: 'all', ok: true, durationMs: 0, at: Date.now() })
         return JSON.stringify({ defaultPet: pets[0]?.id ?? null, pets: petsOut, affection: ledgers })
       },
     }))

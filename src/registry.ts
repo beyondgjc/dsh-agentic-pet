@@ -2,7 +2,8 @@
  * The pet registry: a directory of per-pet control manifests, replacing the
  * last-writer-wins single files whose races caused repeated swap incidents
  * (a dying carrier's late write burying a live pet's registration). Each pet
- * implementation owns its own file under pet-http.d/ and re-asserts it on a
+ * implementation owns its own file under whale598/pet-http.d/ (legacy
+ * pet-http.d/ still scanned) and re-asserts it on a
  * cadence; entries whose publisher pid is dead expire by omission. The
  * driver reads the whole table and routes per the multi-pet design: the
  * session's bound pet if alive, else the default pet (first alive entry),
@@ -12,6 +13,7 @@
 
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { WHALE_DIR } from './petdata.ts'
 
 /** One pet's published control facts. */
 export interface PetEntry {
@@ -24,7 +26,12 @@ export interface PetEntry {
   readonly since: number
 }
 
-const REGISTRY_DIR = 'pet-http.d'
+// Registry directory: namespaced under whale598/ to avoid collisions with
+// other plugins (same reasoning as the /whale598 route prefix). The LEGACY
+// directory is still SCANNED as a read fallback — pets running older
+// code publish there, and discovery must not drop them.
+const REGISTRY_DIR = `${WHALE_DIR}/pet-http.d`
+const LEGACY_REGISTRY_DIR = 'pet-http.d'
 
 /**
  * A live pet is one whose control plane ANSWERS, not merely one whose pid
@@ -62,37 +69,48 @@ export async function probeControlPlane(port: number): Promise<boolean> {
  * they expire by omission the next time their file is rewritten — and so are
  * silent entries (pid alive, control plane unresponsive). */
 export async function readLivePets(home: string): Promise<PetEntry[]> {
-  const live: PetEntry[] = []
-  try {
-    const files = (await readdir(join(home, REGISTRY_DIR))).filter(name => name.endsWith('.json'))
-    for (const file of files) {
-      try {
-        const raw = JSON.parse(await readFile(join(home, REGISTRY_DIR, file), 'utf8')) as {
-          port?: unknown
-          pid?: unknown
-          since?: unknown
-        }
-        const port = typeof raw.port === 'number' ? raw.port : Number.NaN
-        const pid = typeof raw.pid === 'number' ? raw.pid : Number.NaN
-        if (!Number.isFinite(port) || !Number.isFinite(pid)) continue
-        try {
-          process.kill(pid, 0)
-        } catch {
-          continue // dead publisher: not a live pet
-        }
-        if (!await probeControlPlane(port)) continue // frozen publisher
-        live.push({
-          id: file.slice(0, -5),
-          port,
-          pid,
-          since: typeof raw.since === 'number' ? raw.since : 0,
-        })
-      } catch {
-        // unreadable file: skip, its owner will rewrite it
-      }
+  // Candidate collection over BOTH directories — the new namespace wins on
+  // id collision (an old-dir entry from a previous layout must not shadow a
+  // live new-dir entry). Probing happens once per id, after dedup.
+  const candidates = new Map<string, string>()
+  for (const dir of [join(home, REGISTRY_DIR), join(home, LEGACY_REGISTRY_DIR)]) {
+    let names: string[] = []
+    try {
+      names = (await readdir(dir)).filter(name => name.endsWith('.json'))
+    } catch {
+      continue // directory absent: zero candidates from it
     }
-  } catch {
-    // no registry directory yet: zero pets
+    for (const name of names) {
+      const id = name.slice(0, -5)
+      if (id !== '' && !candidates.has(id)) candidates.set(id, join(dir, name))
+    }
+  }
+  const live: PetEntry[] = []
+  for (const [id, file] of candidates) {
+    try {
+      const raw = JSON.parse(await readFile(file, 'utf8')) as {
+        port?: unknown
+        pid?: unknown
+        since?: unknown
+      }
+      const port = typeof raw.port === 'number' ? raw.port : Number.NaN
+      const pid = typeof raw.pid === 'number' ? raw.pid : Number.NaN
+      if (!Number.isFinite(port) || !Number.isFinite(pid)) continue
+      try {
+        process.kill(pid, 0)
+      } catch {
+        continue // dead publisher: not a live pet
+      }
+      if (!await probeControlPlane(port)) continue // frozen publisher
+      live.push({
+        id,
+        port,
+        pid,
+        since: typeof raw.since === 'number' ? raw.since : 0,
+      })
+    } catch {
+      // unreadable file: skip, its owner will rewrite it
+    }
   }
   return live
 }

@@ -67,11 +67,22 @@ export declare function mintVoiceSessionId(petId: string, generation: number, is
 };
 export interface GreetPromptFacts {
     affection: number;
+    bondValue: number;
+    bondDays: number;
+    bondTier: string;
 }
 /** The boot-greeting prompt: fired once per dsh start when the pet first
  * comes online — before the random-wake cadence takes over. Always speaks
  * (no probability gate on this one); the time context rides the preset. */
 export declare function buildGreetPrompt(facts: GreetPromptFacts): string;
+/** B 层 · 羁绊档位：days-with-interaction → tier name. Only grows, never
+ * decays; the names are the display contract (settings page keeps its own
+ * copy of the thresholds). */
+export declare const BOND_TIERS: Array<{
+    since: number;
+    name: string;
+}>;
+export declare function bondTier(days: number): string;
 /** Shared mood vocabulary (pet_state computes the same from the ledger). */
 export declare function moodOf(affection: number): 'happy' | 'content' | 'neutral';
 /** Touch part → spoken wording; `unknown` never earns a reply turn (the
@@ -79,6 +90,9 @@ export declare function moodOf(affection: number): 'happy' | 'content' | 'neutra
 export declare function touchPartWording(part: string): string | undefined;
 export interface WakePromptFacts {
     affection: number;
+    bondValue: number;
+    bondTier: string;
+    bondDays: number;
     /** Minutes since this pet last spoke on its own; undefined = first wake. */
     minutesSinceLastSpoke: number | undefined;
     /** Minutes since the bound session last showed activity; undefined = none recorded. */

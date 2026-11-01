@@ -1,4 +1,4 @@
-# Agent preset pet: the desktop-pet persona over the standard tool set. Derived
+# Agent preset whale598-standard (formerly `pet`): the desktop-pet persona over the standard tool set. Derived
 # from presets/standard.patch.yml (tool rows copied verbatim; re-diff when standard
 # evolves). The pet-tools row is this bundle's own ./tools entry, so sessions
 # mounted with other presets keep a tool catalog without pet_*.
@@ -8,8 +8,8 @@
     - id: preset-pet
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: pet
-        name: 宠物模式
+        id: whale598-standard
+        name: 宠物模式-标准
         description: 带着桌面宠物的身体工作——气泡说话、动作表达、感知被触摸；工具目录含 pet_*，其余能力与标准模式一致。
         order: 5
         plugins:

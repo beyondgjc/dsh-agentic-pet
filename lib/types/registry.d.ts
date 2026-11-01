@@ -2,7 +2,8 @@
  * The pet registry: a directory of per-pet control manifests, replacing the
  * last-writer-wins single files whose races caused repeated swap incidents
  * (a dying carrier's late write burying a live pet's registration). Each pet
- * implementation owns its own file under pet-http.d/ and re-asserts it on a
+ * implementation owns its own file under whale598/pet-http.d/ (legacy
+ * pet-http.d/ still scanned) and re-asserts it on a
  * cadence; entries whose publisher pid is dead expire by omission. The
  * driver reads the whole table and routes per the multi-pet design: the
  * session's bound pet if alive, else the default pet (first alive entry),

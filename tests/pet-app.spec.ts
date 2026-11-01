@@ -44,7 +44,7 @@ describe('dsh-pet-app bundle', () => {
     // tools + time context + compaction, never the work-tool rows.
     expect(rows[2]).toMatchObject({ name: '@deepseek-ai/dsh-agent-preset' })
     const voiceRow = (rows[2] as { config?: { id?: string; plugins?: { id?: string }[] } }).config
-    expect(voiceRow?.id).toBe('pet-inner-voice')
+    expect(voiceRow?.id).toBe('whale598')
     expect(voiceRow?.plugins?.map(plugin => plugin.id)).toEqual(['persona', 'pet-tools', 'time-context', 'compaction'])
   })
 })

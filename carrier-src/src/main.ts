@@ -987,7 +987,9 @@ async function main(): Promise<void> {
     // swap blindness). The legacy single file keeps being written during the
     // transition so pre-registry readers still see this carrier.
     const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: 'electron' })}\n`
-    const registryDir = join(DSH_HOME, 'pet-http.d')
+    // Namespaced under whale598/ (collision avoidance); the driver scans
+    // the legacy pet-http.d/ as a read fallback for older pet builds.
+    const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d')
     try {
       mkdirSync(registryDir, { recursive: true })
     } catch (error: unknown) {
@@ -1029,7 +1031,7 @@ async function main(): Promise<void> {
     // find a dead port in pet-http.d/ — stale entries were the "旧端点残留"
     // incident class. Best effort: a killed carrier leaves the file, and the
     // readers' pid+probe validation is the backstop.
-    for (const file of ['pet-http.d/electron.json', 'pet-http-electron.json']) {
+    for (const file of ['whale598/pet-http.d/electron.json', 'pet-http.d/electron.json', 'pet-http-electron.json']) {
       void rm(join(DSH_HOME, file), { force: true }).catch(() => { /* best effort */ })
     }
     if (handle === undefined) return
