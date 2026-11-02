@@ -20,13 +20,20 @@ import {
   buildGreetPrompt,
   buildTouchPrompt,
   buildWakePrompt,
+  cancelPlans,
   loadInnerVoiceStore,
+  loadWakePlans,
   mintVoiceSessionId,
+  missedPlans,
   moodOf,
   readInnerVoiceConfig,
   saveInnerVoiceStore,
+  saveWakePlans,
+  takeDuePlans,
+  takeNearDuePlan,
   touchPartWording,
   type InnerVoiceStore,
+  type WakePlan,
 } from './inner-voice.ts'
 import { notifyPets, routePet, type PetEntry } from './registry.ts'
 import * as petdata from './petdata.ts'
@@ -116,6 +123,13 @@ const ADJUST_MAX_DELTA = 3
 const ADJUST_COOLDOWN_MS = 5 * 60_000
 const ADJUST_DAILY_LIMIT = 8
 const ADJUST_DAILY_SUM = 10
+
+// Model-authored wake plans (pet_schedule_wake): the model decides WHEN, so
+// no time clamping and no min/max — only basic validation. The generous
+// per-pet cap is a runaway valve, not a policy: the model can always cancel.
+const WAKE_PLAN_ID_MAX = 64
+const WAKE_PLAN_INTENT_MAX = 200
+const WAKE_PLAN_MAX_PER_PET = 32
 
 async function readLedger(home: string, petId: string): Promise<TouchLedger> {
   try {
@@ -279,6 +293,28 @@ const voicePendingUntil = new Map<string, number>() // petId → epoch ms
 const voiceLastSpokeAt = new Map<string, number>() // petId → epoch ms (pet_say arrivals)
 const voiceLastTouchReplyAt = new Map<string, number>() // petId → epoch ms
 const voiceNextWakeAt = new Map<string, number>() // petId → epoch ms
+// Model-authored wake plans (pet_schedule_wake): per-pet SET of one-shot
+// self alarms with absolute epoch-ms times. In-memory mirror of
+// pet-wake-plans.json (write-through on every mutation); module-level
+// because TWO registration seams share it — installPetDriver consumes due
+// plans in the sweep, while registerPetTools (a different fiber) schedules
+// and cancels them.
+const voiceWakePlans = new Map<string, WakePlan[]>()
+// Bridge from the tool plane to the driver's wake machinery (the wake path
+// lives in installPetDriver's closures, unreachable from registerPetTools):
+// the overdue-schedule immediate catch-up fire. Set at driver install,
+// cleared on entry so a re-install re-arms it; undefined until then — the
+// schedule tool degrades to storing the plan for the next sweep tick.
+let selfWakeSender: ((petId: string, plan: WakePlan) => void) | undefined
+/** Write-through the in-memory plan map to disk (empty lists dropped — the
+ * absence of a pet key IS an empty schedule). */
+const persistWakePlans = (home: string): void => {
+  const snapshot: Record<string, WakePlan[]> = {}
+  for (const [petId, list] of voiceWakePlans) {
+    if (list.length > 0) snapshot[petId] = list
+  }
+  void saveWakePlans(home, snapshot)
+}
 // Boot-greeting latch: one hello per dsh start, cleared on driver install.
 const voiceGreetedOnce = new Set<string>()
 // Custom display names (petId → label, from pet-settings.json `names`):
@@ -354,6 +390,8 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   voiceLastSpokeAt.clear()
   voiceLastTouchReplyAt.clear()
   voiceNextWakeAt.clear()
+  voiceWakePlans.clear()
+  selfWakeSender = undefined
   voiceGreetedOnce.clear()
   voiceNames.clear()
   voiceLastPrompt.clear()
@@ -488,6 +526,18 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     // the first message lands in a fresh session instead of the archive
     // black hole until the 45s behavioral timeout.
     reconcileArchivedVoiceSessions()
+  })
+  // Wake plans (自主作息) load — merge-if-absent: a plan the tool plane wrote
+  // between the clear above and this resolve must not be clobbered by the
+  // (older) disk snapshot. Plans that went due while dsh was down are NOT
+  // touched here — the first sweep's due check consumes them as one merged
+  // catch-up wake.
+  void loadWakePlans(home).then((plans) => {
+    for (const [petId, list] of Object.entries(plans)) {
+      if (!voiceWakePlans.has(petId)) voiceWakePlans.set(petId, list)
+    }
+    const count = Object.values(plans).reduce((sum, list) => sum + list.length, 0)
+    driverLog(home, `VOICE wake plans loaded: ${String(count)} plan(s) for ${String(Object.keys(plans).length)} pet(s)`)
   })
   // The pet capability seam (passed in — see index.ts for why not the
   // ctx getter): discovery, liveness, and the /status field matrix live
@@ -1095,22 +1145,58 @@ ${text}`
     if (spoke) driverLog(home, `VOICE rename notice pet=${petId} → ${label}`)
   }
 
-  /** Random-wake trigger (docs/inner-voice.md §6.3). The gate decides whether
-   * this wake speaks — never the model. */
-  const triggerWake = async (petId: string): Promise<void> => {
+  /** One wake turn (docs/inner-voice.md §6.3, reworked for 自主作息). The
+   * gate decides whether this wake speaks — never the model — EXCEPT that a
+   * consumed self plan always wakes: the dice do not re-veto a decision the
+   * model already made. `source` names the clock(s) that fired this time:
+   * 'world' = the environment's tick (probability-gated, busy gate drops),
+   * 'self' = the model's own schedule (pet_schedule_wake), 'world+self' =
+   * both due in the same sweep tick, merged into one wake. */
+  const fireWake = async (
+    petId: string,
+    opts: { source: 'world' | 'self' | 'world+self'; plans?: WakePlan[]; overdue?: boolean; label: string },
+  ): Promise<void> => {
     const config = await readInnerVoiceConfig(home)
     if (!config.enabled) return
+    const { source, overdue = false } = opts
+    const plans = opts.plans ?? []
     // The effective numbers ride the log: a settings file that fails to reach
     // the driver must be visible, not just its consequences.
-    driverLog(home, `VOICE wake tick pet=${petId} interval=${String(config.wakeIntervalMinutes)}min speakP=${String(config.speakProbability)}`)
-    if (Math.random() >= config.speakProbability) {
+    driverLog(home, `VOICE wake fire pet=${petId} source=${source} plans=${String(plans.length)} interval=${String(config.wakeIntervalMinutes)}min speakP=${String(config.speakProbability)} busyPolicy=${config.selfWakeBusyPolicy}`)
+    // The world clock alone stays probability-gated (the environment's tick
+    // is throttled); a due plan fires regardless — 概率门不否决模型自己定
+    // 的计划.
+    if (source === 'world' && Math.random() >= config.speakProbability) {
       driverLog(home, `VOICE wake silent by probability pet=${petId}`)
       return
     }
-    if (!(await voiceGateOpen(petId, true, 'wake'))) return
+    // Busy gate: the world clock keeps today's manners (a closed gate drops
+    // the tick, as before). Self wakes follow the configured policy —
+    // 'fire' (default) wakes regardless: the prompt carries the userActive
+    // facts so SHE decides whether to speak; 'defer' puts the consumed
+    // plans back for the next sweep tick, never dropped. Self wakes ALSO
+    // skip the pending lock (chat上行 precedent): queue mode stacks safely,
+    // and a consumed plan must never die on a 25s in-flight window.
+    const requireUserIdle = source === 'world' || config.selfWakeBusyPolicy === 'defer'
+    const skipPending = source !== 'world'
+    if (!(await voiceGateOpen(petId, requireUserIdle, opts.label, skipPending))) {
+      if (source !== 'world' && plans.length > 0 && config.selfWakeBusyPolicy === 'defer') {
+        voiceWakePlans.set(petId, [...plans, ...(voiceWakePlans.get(petId) ?? [])])
+        persistWakePlans(home)
+        driverLog(home, `VOICE wake plans re-armed pet=${petId} (user busy, policy=defer) ids=${plans.map(plan => plan.id).join(',')}`)
+      }
+      return
+    }
     const ledger = await readLedger(home, petId)
     const now = Date.now()
     const lastSpoke = voiceLastSpokeAt.get(petId)
+    // 未到期计划的最近 5 条 rides along on every wake: interrupted wakes
+    // must not erase what the model planned — she decides to keep, move or
+    // cancel each one.
+    const pending = (voiceWakePlans.get(petId) ?? [])
+      .slice()
+      .sort((a, b) => a.at - b.at)
+      .slice(0, 5)
     const spoke = await promptVoice(petId, buildWakePrompt({
       affection: ledger.affection,
       bondValue: ledger.bond?.value ?? 0,
@@ -1119,8 +1205,18 @@ ${text}`
       minutesSinceLastSpoke: lastSpoke === undefined ? undefined : Math.round((now - lastSpoke) / 60_000),
       minutesSinceUserActivity: voiceUserActivityAt === undefined ? undefined : Math.round((now - voiceUserActivityAt) / 60_000),
       userActive: voiceUserActivityAt !== undefined && now - voiceUserActivityAt < 30 * 60_000,
+      source,
+      dueIntents: plans.map(plan => plan.intent),
+      missedCount: missedPlans(plans, bootAt).length,
+      overdue,
+      pendingPlans: pending.map(plan => ({ at: plan.at, intent: plan.intent })),
     }))
     if (spoke) voiceLastSpokeAt.set(petId, now)
+  }
+  // Tool-plane bridge (see selfWakeSender): the schedule tool's overdue
+  // catch-up fires through the same wake path as the sweep.
+  selfWakeSender = (petId, plan) => {
+    void fireWake(petId, { source: 'self', plans: [plan], overdue: true, label: 'self-wake' })
   }
 
   /** Touch-reply trigger (docs/inner-voice.md §6.1). Low probability + a
@@ -1147,11 +1243,21 @@ ${text}`
       return
     }
     if (!(await voiceGateOpen(petId, false, 'touch', true))) return
+    // ±60s merge: a self plan due about NOW folds into this user-initiated
+    // turn — consumed only because every gate above passed (a closed gate
+    // never consumes a plan), so the same minute never wakes twice.
+    const merged = takeNearDuePlan(voiceWakePlans.get(petId) ?? [], Date.now())
+    if (merged.plan !== undefined) {
+      voiceWakePlans.set(petId, merged.next)
+      persistWakePlans(home)
+      driverLog(home, `VOICE wake plan merged into touch turn pet=${petId} id=${merged.plan.id}`)
+    }
     const ledger = await readLedger(home, petId)
     const spoke = await promptVoice(petId, buildTouchPrompt({
       part,
       touchesToday: ledger.recent.filter(entry => entry.part === part).length + 1,
       affection: ledger.affection,
+      ...(merged.plan === undefined ? {} : { mergedPlan: { at: merged.plan.at, intent: merged.plan.intent } }),
     }))
     if (spoke) {
       const now = Date.now()
@@ -1168,16 +1274,30 @@ ${text}`
    * a coin flip. Only the pet's presence is checked. */
   const triggerChat = async (petId: string, text: string): Promise<void> => {
     if (!(await voiceGateOpen(petId, false, 'chat', true))) return
-    const spoke = await promptVoice(petId, buildChatPrompt(text), { userDriven: true })
+    // ±60s merge: a self plan due about NOW folds into this user turn —
+    // consumed only because the gate above passed, so the same minute
+    // never wakes twice and the intent rides along (merged tag).
+    const merged = takeNearDuePlan(voiceWakePlans.get(petId) ?? [], Date.now())
+    if (merged.plan !== undefined) {
+      voiceWakePlans.set(petId, merged.next)
+      persistWakePlans(home)
+      driverLog(home, `VOICE wake plan merged into user turn pet=${petId} id=${merged.plan.id}`)
+    }
+    const spoke = await promptVoice(
+      petId,
+      buildChatPrompt(text, merged.plan === undefined ? undefined : { at: merged.plan.at, intent: merged.plan.intent }),
+      { userDriven: true },
+    )
     if (spoke) voiceLastSpokeAt.set(petId, Date.now())
   }
 
-  /** The wake sweep: a 60s tick checks each online pet's next-wake stamp.
-   * Cadence comes from settings fresh each sweep, with ±25% jitter so two
-   * pets never wake in lockstep; an interval change re-arms naturally. */
-  /** The wake sweep: a 60s tick checks each online pet's next-wake stamp.
-   * Cadence comes from settings fresh each sweep, with ±25% jitter so two
-   * pets never wake in lockstep; an interval change re-arms naturally. */
+  /** The wake sweep: a 60s tick over TWO coexisting clocks per pet, a UNION
+   * (互不覆盖). The world clock is the environment's rhythm (next-wake stamp,
+   * ±25% jitter, settings fresh each sweep); the self clock is the model's
+   * own pet_schedule_wake plans, consumed only when DUE — neither the world
+   * clock nor a user wake ever touches not-yet-due plans, and plans that
+   * went due while dsh or the pet was offline catch up on the first sweep
+   * that sees the pet online, merged into ONE wake. */
   const wakeSweep = async (): Promise<void> => {
     const config = await readInnerVoiceConfig(home)
     if (!config.enabled) return
@@ -1185,18 +1305,38 @@ ${text}`
     const intervalMs = config.wakeIntervalMinutes * 60_000
     for (const target of await pet.list()) {
       const next = voiceNextWakeAt.get(target.id)
+      let worldDue = false
       if (next === undefined) {
         // First sighting of this pet: arm the random-wake cadence, and
         // fire the boot greeting ONCE (per dsh start) — she says hi before
         // the cadence takes over. An offline pet releases the flag so the
-        // next sweep retries.
+        // next sweep retries. The plan check below still runs, so overdue
+        // self plans catch up on this very first sweep.
         voiceNextWakeAt.set(target.id, now + intervalMs * (0.5 + Math.random() * 0.5))
         if (!voiceGreetedOnce.has(target.id)) void triggerGreeting(target.id)
-        continue
+      } else if (now >= next) {
+        worldDue = true
+        voiceNextWakeAt.set(target.id, now + intervalMs * (0.75 + Math.random() * 0.5))
       }
-      if (now < next) continue
-      voiceNextWakeAt.set(target.id, now + intervalMs * (0.75 + Math.random() * 0.5))
-      await triggerWake(target.id)
+      // The self clock: consume every plan that is DUE now — removed from
+      // the pending set for good, because a consumed plan must produce a
+      // wake (fireWake re-arms them itself when policy=defer defers).
+      const list = voiceWakePlans.get(target.id)
+      if (list !== undefined && list.length > 0) {
+        const taken = takeDuePlans(list, now)
+        if (taken.due.length > 0) {
+          voiceWakePlans.set(target.id, taken.next)
+          persistWakePlans(home)
+          driverLog(home, `VOICE wake plans consumed pet=${target.id} ids=${taken.due.map(plan => plan.id).join(',')} worldClock=${String(worldDue)}`)
+          await fireWake(target.id, {
+            source: worldDue ? 'world+self' : 'self',
+            plans: taken.due,
+            label: worldDue ? 'wake' : 'self-wake',
+          })
+          continue // the merged/self wake IS this tick's wake for the pet
+        }
+      }
+      if (worldDue) await fireWake(target.id, { source: 'world', label: 'wake' })
     }
   }
   // Adaptive cadence: right after boot the carrier takes a few seconds to
@@ -1695,9 +1835,104 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         }
       },
     }))
+    // ── model-authored wake plans (自主作息)：the model decides WHEN it
+    // wakes. One-shot plans with absolute epoch-ms times, a SET per pet;
+    // the world clock keeps running as the environment's rhythm and NEITHER
+    // source cancels the other — a plan is consumed only when due, and a
+    // user wake never clears the model's own schedule. ──
+    scope.tools.register(defineTool({
+      name: 'pet_schedule_wake',
+      description: 'Schedule a ONE-SHOT self wake-up: YOU decide when to wake next — your own 作息. At wakeAt the driver wakes you and hands you the reason back as your original intent. The world clock and user messages never cancel your plans; plans are consumed only when due, and several can be pending at once (see pet_state wakePlans). wakeAt is an ABSOLUTE epoch-ms timestamp, NOT a delay — compute it from the current time you know. Re-calling with the same id REPLACES that plan (that is how you reschedule). A wakeAt already in the past fires one immediate catch-up wake (noted as overdue) and is not kept.',
+      parameters: {
+        id: { type: 'string', required: true, description: 'Your name for this plan (≤64 chars). Scheduling again with the same id replaces it — that is how you change the time; pet_cancel_wake with the same id removes it.' },
+        wakeAt: { type: 'number', required: true, description: 'ABSOLUTE epoch ms (milliseconds since 1970-01-01 UTC). Must be a finite number; no range clamping — a past timestamp fires one immediate catch-up wake instead of being stored.' },
+        reason: { type: 'string', required: true, description: 'WHY you want to wake at that point (≤200 chars) — it rides verbatim on the wake prompt as 你当初的打算, so a later interruption never erases the plan.' },
+        pet: { type: 'string', description: 'Whose schedule: a pet id from pet_state. Omit for the pet this session belongs to (or the default pet).' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        try {
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          const id = typeof args.id === 'string' ? args.id.trim().slice(0, WAKE_PLAN_ID_MAX) : ''
+          if (id === '') throw new Error('id 必填：给计划起个名字；同名重订即改期，pet_cancel_wake 同名即撤销')
+          const reason = typeof args.reason === 'string' ? args.reason.trim().slice(0, WAKE_PLAN_INTENT_MAX) : ''
+          if (reason === '') throw new Error('reason 必填：到点醒来时它就是你「当初的打算」，没有它这次醒来不知道为何而醒')
+          const wakeAt = typeof args.wakeAt === 'number' && Number.isFinite(args.wakeAt) ? Math.round(args.wakeAt) : Number.NaN
+          if (Number.isNaN(wakeAt)) throw new Error(`wakeAt 必须是有限的 epoch ms 数字（收到 ${String(args.wakeAt)}）`)
+          const now = Date.now()
+          if (wakeAt <= now) {
+            // 过去的计划：立即补醒一次并注明「计划时间已过」，不静默丢弃；
+            // 一次性已兑现，不存储。driver 未就绪时降级为存储，下一拍消费。
+            const plan: WakePlan = { id, at: wakeAt, intent: reason, createdAt: now }
+            if (selfWakeSender !== undefined) {
+              driverLog(home, `VOICE wake plan overdue pet=${entry.id} id=${id} (scheduled in the past — firing one catch-up now)`)
+              selfWakeSender(entry.id, plan)
+              return JSON.stringify({ scheduled: false, overdue: true, fired: 'immediately', id, wakeAt, intent: reason })
+            }
+            voiceWakePlans.set(entry.id, [plan, ...(voiceWakePlans.get(entry.id) ?? [])])
+            persistWakePlans(home)
+            driverLog(home, `VOICE wake plan overdue stored pet=${entry.id} id=${id} (wake machinery absent — the next sweep consumes it)`)
+            return JSON.stringify({ scheduled: true, overdue: true, id, wakeAt, intent: reason, note: '计划时间已过：已保留，将尽快补醒一次' })
+          }
+          const list = (voiceWakePlans.get(entry.id) ?? []).filter(plan => plan.id !== id)
+          if (list.length >= WAKE_PLAN_MAX_PER_PET) {
+            throw new Error(`待执行计划已达 ${String(WAKE_PLAN_MAX_PER_PET)} 条上限——先 pet_cancel_wake 清理不再需要的，再定新的`)
+          }
+          voiceWakePlans.set(entry.id, [{ id, at: wakeAt, intent: reason, createdAt: now }, ...list])
+          persistWakePlans(home)
+          driverLog(home, `VOICE wake plan scheduled pet=${entry.id} id=${id} at=${new Date(wakeAt).toISOString()} intent=${reason}`)
+          return JSON.stringify({ scheduled: true, id, wakeAt, intent: reason, planCount: list.length + 1, note: '世界时钟照常运行，与你的计划互不覆盖' })
+        } catch (error: unknown) {
+          throw classify(error)
+        }
+      },
+    }))
+    scope.tools.register(defineTool({
+      name: 'pet_cancel_wake',
+      description: 'Cancel your pending self wake-up plans (pet_schedule_wake). With id: cancel that one plan. Without id: cancel ALL of your pending plans. Cancelled plans are gone for good; the world clock keeps running regardless.',
+      parameters: {
+        id: { type: 'string', description: 'The plan id to cancel (as you named it in pet_schedule_wake). Omit to cancel ALL pending plans.' },
+        pet: { type: 'string', description: 'Whose schedule: a pet id from pet_state. Omit for the pet this session belongs to (or the default pet).' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        try {
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          const list = voiceWakePlans.get(entry.id) ?? []
+          if (args.id === undefined) {
+            if (list.length === 0) {
+              return JSON.stringify({ cancelled: [], remaining: 0, note: '本来就没有待执行的自主计划' })
+            }
+            driverLog(home, `VOICE wake plans cancelled ALL pet=${entry.id} ids=${list.map(plan => plan.id).join(',')}`)
+            voiceWakePlans.delete(entry.id)
+            persistWakePlans(home)
+            return JSON.stringify({ cancelled: list.map(plan => plan.id), remaining: 0 })
+          }
+          const id = String(args.id).trim()
+          const taken = cancelPlans(list, id)
+          if (taken.removed.length === 0) {
+            const remaining = list.map(plan => plan.id)
+            throw new Error(`没有叫「${id}」的待执行计划${remaining.length > 0 ? `。当前待执行：${remaining.join(', ')}` : '（当前没有待执行计划）'}`)
+          }
+          if (taken.next.length > 0) voiceWakePlans.set(entry.id, taken.next)
+          else voiceWakePlans.delete(entry.id)
+          persistWakePlans(home)
+          driverLog(home, `VOICE wake plan cancelled pet=${entry.id} id=${id}`)
+          return JSON.stringify({ cancelled: taken.removed.map(plan => plan.id), remaining: taken.next.length })
+        } catch (error: unknown) {
+          throw classify(error)
+        }
+      },
+    }))
     scope.tools.register(defineTool({
       name: 'pet_state',
-      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book. Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet.',
+      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book and pending self-wake plans (wakePlans — the pet\'s own pet_schedule_wake schedule). Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet.',
       parameters: {
         actions: { type: 'boolean', description: 'Also include each pet\'s action catalog — the ids pet_do accepts on it. Omit for the cheaper summary (an unknown pet_do action self-reports its menu).' },
       },
@@ -1726,12 +1961,18 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         }
         const knownIds = new Set([...pets.map(entry => entry.id), 'electron', 'pure'])
         const ledgers: Record<string, unknown> = {}
+        const wakePlans: Record<string, Array<{ id: string; at: number; intent: string; createdAt: number }>> = {}
         for (const id of knownIds) {
           const ledger = await readLedger(home, id)
           const mood = moodOf(ledger.affection)
           const tier = bondTier(ledger.bond?.value ?? 0)
           const bond = { value: ledger.bond?.value ?? 0, days: ledger.bond?.days ?? 0, tier }
           ledgers[id] = { ...ledger, mood, bond }
+          // Constant-null rule: an empty schedule is an empty ARRAY, never a
+          // conditionally-absent field.
+          wakePlans[id] = (voiceWakePlans.get(id) ?? []).map(plan => ({
+            id: plan.id, at: plan.at, intent: plan.intent, createdAt: plan.createdAt,
+          }))
         }
         const petsOut = states.map((state) => {
           const actions = actionsById.get(state.id)
@@ -1739,7 +1980,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           // The model addresses pets by id, but should SEE the user's naming.
           return { ...base, name: voiceNames.get(state.id) ?? DEFAULT_PET_NAME[state.id] ?? state.id }
         })
-        return JSON.stringify({ defaultPet: pets[0]?.id ?? null, pets: petsOut, affection: ledgers })
+        return JSON.stringify({ defaultPet: pets[0]?.id ?? null, pets: petsOut, affection: ledgers, wakePlans })
       },
     }))
   })

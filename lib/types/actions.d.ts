@@ -39,4 +39,3 @@ export declare function resolveActionRequest(requested: string, catalog: readonl
 /** The error-message menu: long catalogs are previewed, with a pointer to
  * pet_state {actions:true} for the full list. */
 export declare function formatAvailableActions(available: readonly string[], cap?: number): string;
-//# sourceMappingURL=actions.d.ts.map

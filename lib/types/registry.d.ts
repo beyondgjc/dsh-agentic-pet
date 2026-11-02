@@ -52,4 +52,3 @@ export declare function routePet(pets: PetEntry[], boundPetId: string | undefine
  * deployment would fall back to the web card alone for the rest of the
  * session. */
 export declare function notifyPets(pets: PetEntry[]): PetEntry[];
-//# sourceMappingURL=registry.d.ts.map

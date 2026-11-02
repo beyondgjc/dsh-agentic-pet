@@ -36,13 +36,11 @@ dsh plugin --profile <name> add dsh-agentic-pet
 
 ## 开发
 
-TypeScript 构建仍在 dsh monorepo workspace 内进行（被打包的 `@deepseek-ai/dsh-*` 依赖未发布 npm）。流程：
+日常迭代在本仓库内完成：改 `src/` → 本地构建（tsc + tsdown，工具链与私有包依赖的准备见文档）→ 部署到桌面 profile 的 vendor 目录 → 重启 DeepSeek Harness。**完整手册（含工具链准备、部署/验证/清理命令与已知坑）见 [docs/DEV-DEPLOY.md](docs/DEV-DEPLOY.md)**。
 
-1. monorepo 内：`pnpm run build`（插件 `lib/`）与 `pnpm --filter @deepseek-ai/dsh-pet run build`（载体 `lib/` + `dist-renderer/`）。
-2. 本仓库：`scripts\sync-from-monorepo.cmd`——把源码与构建产物镜像进本仓库。
-3. 本仓库提交，然后在本仓库发布（见下文「发布」；先素材包后插件包，手册见 [dsh-pet-assets/PUBLISH.md](../dsh-pet-assets/PUBLISH.md)）。
+历史上的构建在 dsh monorepo workspace 内进行（被打包的 `@deepseek-ai/dsh-*` 依赖未发布 npm），经 `scripts\sync-from-monorepo.cmd` 镜像进本仓库——monorepo 侧副本已停在 `0.2.1-rc.3`，该链路已过期，仅留档；直接运行会用旧代码覆盖本仓库。
 
-测试：`npx vitest run tests/registry-service.spec.ts` 自持可跑（只需 `cordis` 与 `vitest`）；含 `tests/pet-app.spec.ts` 的全量测试在 monorepo workspace 内跑。
+测试：`node_modules/.bin/vitest run`（vitest 及 `js-yaml@4.1.0`、`@deepseek-ai/cordis-plugin-include` 为 ad-hoc 安装，见文档 §4）；`tests/registry-service.spec.ts` 等纯函数规格只需 `cordis` 与 `vitest` 即可自持运行。
 
 ## 发布
 
@@ -60,6 +58,7 @@ git push --follow-tags
 
 ## 文档
 
+- 开发与部署手册（本地构建工具链、vendor 部署、测试、发布、已知坑）：[docs/DEV-DEPLOY.md](docs/DEV-DEPLOY.md)。
 - 控制面契约（所有宠物实现共同讲述的冻结消费方 API）见项目文档的多宠指南。
 - 说话朗读（BreezeBlue TTS）设计笔记见 monorepo 工作区的 `packages/bundle/pet-app/docs/tts.md`。
 - 已知边界与设计笔记见仓库 wiki 与项目工程文档。

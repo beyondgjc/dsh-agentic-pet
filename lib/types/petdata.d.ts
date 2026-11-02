@@ -56,4 +56,3 @@ export declare function readGlobalJson(home: string, name: string): Promise<Reco
 /** Write a global state file (current location only; pretty-printed — these
  * files are user-inspectable and hand-editable). */
 export declare function writeGlobalJson(home: string, name: string, obj: Record<string, unknown>): Promise<void>;
-//# sourceMappingURL=petdata.d.ts.map

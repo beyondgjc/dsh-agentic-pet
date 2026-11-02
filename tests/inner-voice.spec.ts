@@ -14,13 +14,21 @@ import {
   buildChatPrompt,
   buildTouchPrompt,
   buildWakePrompt,
+  cancelPlans,
   loadInnerVoiceStore,
+  loadWakePlans,
   mintVoiceSessionId,
+  missedPlans,
   moodOf,
   readInnerVoiceConfig,
   saveInnerVoiceStore,
+  saveWakePlans,
+  takeDuePlans,
+  takeNearDuePlan,
   touchPartWording,
+  upsertPlan,
   voiceSessionIdFor,
+  type WakePlan,
 } from '../src/inner-voice.ts'
 
 const dirs: string[] = []
@@ -45,6 +53,7 @@ describe('readInnerVoiceConfig', () => {
       speakProbability: 0.5,
       touchReplyProbability: 0.3,
       touchReplyCooldownSeconds: 30,
+      selfWakeBusyPolicy: 'fire',
       boundSessions: {},
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
@@ -61,6 +70,7 @@ describe('readInnerVoiceConfig', () => {
         speakProbability: 0.9,
         touchReplyProbability: 0,
         touchReplyCooldownSeconds: 45,
+        selfWakeBusyPolicy: 'defer',
         boundSessions: { electron: 'whale598-electron', bad: 7, '': 'no-key' },
       },
     }), 'utf8')
@@ -71,6 +81,7 @@ describe('readInnerVoiceConfig', () => {
       speakProbability: 0.9,
       touchReplyProbability: 0,
       touchReplyCooldownSeconds: 45,
+      selfWakeBusyPolicy: 'defer',
       boundSessions: { electron: 'whale598-electron' },
     })
   })
@@ -83,6 +94,7 @@ describe('readInnerVoiceConfig', () => {
         speakProbability: 2,
         touchReplyProbability: -1,
         touchReplyCooldownSeconds: 'five',
+        selfWakeBusyPolicy: 'next-week',
         preset: 42,
       },
     }), 'utf8')
@@ -91,6 +103,8 @@ describe('readInnerVoiceConfig', () => {
     expect(config.speakProbability).toBe(1)
     expect(config.touchReplyProbability).toBe(0)
     expect(config.touchReplyCooldownSeconds).toBe(30)
+    // 忙时策略只收白名单两个值，其余折叠默认 'fire'（到点必醒）。
+    expect(config.selfWakeBusyPolicy).toBe('fire')
     expect(config.preset).toBe('whale598')
   })
 
@@ -187,7 +201,9 @@ describe('prompts and helpers', () => {
     const prompt = buildWakePrompt({
       affection: 66, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
     })
-    expect(prompt.startsWith('[自主唤醒]')).toBe(true)
+    // 世界时钟 is the environment's tick — the old [自主唤醒] tag now names
+    // the model's OWN schedule (pet_schedule_wake).
+    expect(prompt.startsWith('[世界时钟]')).toBe(true)
     expect(prompt).toContain('第一次醒来')
     expect(prompt).toContain('好感 66')
     const again = buildWakePrompt({
@@ -211,5 +227,118 @@ describe('prompts and helpers', () => {
     // the contract's 2000-character ceiling clamps before the tag
     const long = buildChatPrompt('a'.repeat(2500))
     expect(long).toBe(`[用户对你说] ${'a'.repeat(2000)}`)
+  })
+})
+
+describe('self wake plans (自主作息)', () => {
+  const plan = (id: string, at: number, intent = `intent-${id}`): WakePlan => ({ id, at, intent, createdAt: 1_000 })
+
+  it('round-trips the plan store (saved under whale598/) and folds malformed entries', async () => {
+    const home = await tempHome()
+    expect(await loadWakePlans(home)).toEqual({})
+    const plans = { electron: [plan('tea', 5_000)], pure: [plan('walk', 6_000, '出去走走')] }
+    await saveWakePlans(home, plans)
+    expect(JSON.parse(await readFile(join(home, 'whale598', 'pet-wake-plans.json'), 'utf8'))).toEqual({ plans })
+    expect(await loadWakePlans(home)).toEqual(plans)
+    // Malformed plans fold out; empty lists and empty pet ids drop.
+    await writeFile(join(home, 'whale598', 'pet-wake-plans.json'), JSON.stringify({
+      plans: {
+        electron: [
+          plan('ok', 1),
+          { id: 'no-at', intent: 'x', createdAt: 1 },
+          { id: '', at: 1, intent: 'x', createdAt: 1 },
+          'nope',
+        ],
+        '': [plan('ghost', 1)],
+        pure: [],
+      },
+    }), 'utf8')
+    expect(await loadWakePlans(home)).toEqual({ electron: [plan('ok', 1)] })
+  })
+
+  it('upserts by id (re-schedule = 改时间) and cancels by id or all', () => {
+    const list = [plan('a', 1), plan('b', 2)]
+    const upserted = upsertPlan(list, plan('a', 9, '新打算'))
+    expect(upserted.map(p => [p.id, p.at, p.intent])).toEqual([['a', 9, '新打算'], ['b', 2, 'intent-b']])
+    expect(upsertPlan(list, plan('c', 3)).map(p => p.id)).toEqual(['c', 'a', 'b'])
+    const one = cancelPlans(list, 'a')
+    expect(one.removed.map(p => p.id)).toEqual(['a'])
+    expect(one.next.map(p => p.id)).toEqual(['b'])
+    const all = cancelPlans(list)
+    expect(all.removed.map(p => p.id)).toEqual(['a', 'b'])
+    expect(all.next).toEqual([])
+    expect(cancelPlans(list, 'ghost').removed).toEqual([])
+  })
+
+  it('consumes only DUE plans (at <= now); future plans survive interruption', () => {
+    const list = [plan('past', 900), plan('now', 1_000), plan('future', 1_100)]
+    const taken = takeDuePlans(list, 1_000)
+    expect(taken.due.map(p => p.id)).toEqual(['past', 'now'])
+    expect(taken.next.map(p => p.id)).toEqual(['future'])
+  })
+
+  it('merges a plan inside the ±60s window, leaves outside plans alone', () => {
+    const list = [plan('near', 1_000 + 30_000), plan('far', 1_000 + 120_000)]
+    const near = takeNearDuePlan(list, 1_000)
+    expect(near.plan?.id).toBe('near')
+    expect(near.next.map(p => p.id)).toEqual(['far'])
+    const none = takeNearDuePlan(list, 1_000, 10_000)
+    expect(none.plan).toBeUndefined()
+    expect(none.next).toBe(list)
+  })
+
+  it('counts plans that went stale before boot as missed (catch-up merge)', () => {
+    const due = [plan('a', 500), plan('b', 1_500), plan('c', 2_000)]
+    expect(missedPlans(due, 1_000).map(p => p.id)).toEqual(['a'])
+    expect(missedPlans(due, 0)).toEqual([])
+  })
+
+  it('builds the wake prompt per source tag with intents, missed count, overdue and pending plans', () => {
+    // self: the original intent rides verbatim — 到点记得自己当初想干嘛
+    const self = buildWakePrompt({
+      affection: 66, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
+      source: 'self', dueIntents: ['想看看用户写完没'],
+    })
+    expect(self.startsWith('[自主唤醒]')).toBe(true)
+    expect(self).toContain('你当初的打算：「想看看用户写完没」')
+    expect(self).toContain('上次开口是 30 分钟前')
+    // merged: both clocks due in the same sweep tick
+    const merged = buildWakePrompt({
+      affection: 66, minutesSinceLastSpoke: 5, minutesSinceUserActivity: undefined, userActive: false,
+      source: 'world+self', dueIntents: ['a'],
+    })
+    expect(merged.startsWith('[世界时钟+自主唤醒]')).toBe(true)
+    // catch-up: plans that went stale offline are named as missed, one wake
+    const missed = buildWakePrompt({
+      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      source: 'self', dueIntents: ['x', 'y'], missedCount: 2,
+    })
+    expect(missed).toContain('错过了 2 个已到期计划')
+    // overdue: pet_schedule_wake received a past timestamp — one catch-up
+    const overdue = buildWakePrompt({
+      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      source: 'self', dueIntents: ['晚了'], overdue: true,
+    })
+    expect(overdue).toContain('时间就已过了，现在是补醒')
+    // pending plans ride along with local-clock times (world clock wakes too)
+    const at = new Date(2026, 0, 1, 14, 5).getTime()
+    const pending = buildWakePrompt({
+      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      pendingPlans: [{ at, intent: '去看看' }],
+    })
+    expect(pending).toContain('你还有 1 个待执行计划')
+    expect(pending).toContain('14:05「去看看」')
+  })
+
+  it('merges user turns with a due plan under the [用户+自主唤醒] tag', () => {
+    const chat = buildChatPrompt('你好呀', { at: 3_600_000, intent: '遛弯' })
+    expect(chat.startsWith('[用户+自主唤醒]')).toBe(true)
+    expect(chat).toContain('遛弯')
+    expect(chat).toContain('[用户对你说] 你好呀')
+    const touch = buildTouchPrompt({ part: 'head', touchesToday: 1, affection: 9, mergedPlan: { at: 3_600_000, intent: '遛弯' } })
+    expect(touch.startsWith('[用户+自主唤醒]')).toBe(true)
+    expect(touch).toContain('遛弯')
+    const plain = buildTouchPrompt({ part: 'body', touchesToday: 1, affection: 9 })
+    expect(plain.startsWith('[被触摸]')).toBe(true)
   })
 })

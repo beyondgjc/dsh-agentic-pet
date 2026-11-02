@@ -154,6 +154,7 @@ export async function readJsonl(file: string, limit: number): Promise<Array<Reco
 export const GLOBAL_STATE_FILES = [
   'pet-settings.json',
   'pet-inner-voice.json',
+  'pet-wake-plans.json',
   'pet-interactions.json',
   'pet-world.json',
   'pet-window.json',

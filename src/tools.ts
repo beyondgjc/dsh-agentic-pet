@@ -25,7 +25,8 @@ const trace = (line: string): void => {
 }
 
 /**
- * Register the five pet tools for sessions mounted with the pet preset.
+ * Register the pet tools (say/do/digest/interactions/affection/state/schedule_wake/
+ * cancel_wake) for sessions mounted with the pet preset.
  *
  * The service instance is assembled HERE, not read from the main entry (a
  * Cordis service registered on the main row's fiber context is invisible to

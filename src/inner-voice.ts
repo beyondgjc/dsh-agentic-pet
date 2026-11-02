@@ -19,6 +19,22 @@ export interface InnerVoiceStore {
   readonly generations: Record<string, number>
 }
 
+/** 自主唤醒的忙时策略：'fire'（到点必醒，默认）| 'defer'（忙时顺延重试）。 */
+export type SelfWakeBusyPolicy = 'fire' | 'defer'
+
+/** ONE model-authored wake plan (pet_schedule_wake): a one-shot self alarm.
+ * `at` is an ABSOLUTE epoch-ms stamp — sleep/reboot can then tell "expired"
+ * and the catch-up fires once, merged, never one wake per missed plan (a
+ * relative delay would drift under sleep). The driver keeps a SET of these
+ * per pet: the model may stack plans, and neither the world clock nor a
+ * user-initiated wake ever cancels them — a plan is consumed only when DUE. */
+export interface WakePlan {
+  id: string
+  at: number
+  intent: string
+  createdAt: number
+}
+
 /** The `innerVoice` half of pet-settings.json, defaults folded in and clamped. */
 export interface InnerVoiceConfig {
   enabled: boolean
@@ -35,6 +51,10 @@ export interface InnerVoiceConfig {
    * the probability gate alone decides). Legacy minute-keyed settings fold
    * in ×60. */
   touchReplyCooldownSeconds: number
+  /** 自主唤醒（pet_schedule_wake 计划）到点遇用户主会话忙时的策略：
+   * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
+   * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
+  selfWakeBusyPolicy: SelfWakeBusyPolicy
   /** Manually bound sessions (petId → sessionId): the user's own
    * conversations the inner voice should live in — highest priority, used
    * as-is (no creation, no rename, never auto-retired). Empty = automatic
@@ -80,6 +100,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyProbability?: unknown
       touchReplyCooldownSeconds?: unknown
       touchReplyCooldownMinutes?: unknown
+      selfWakeBusyPolicy?: unknown
       boundSessions?: unknown
     }
     // Cooldown in seconds (0 allowed = gate off). The legacy minute key folds
@@ -109,6 +130,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       speakProbability: finite01(v.speakProbability, 0.5),
       touchReplyProbability: finite01(v.touchReplyProbability, 0.3),
       touchReplyCooldownSeconds: secondsRaw === undefined ? 30 : clamp(Math.round(secondsRaw), 0, 600),
+      selfWakeBusyPolicy: v.selfWakeBusyPolicy === 'defer' ? 'defer' : 'fire',
       boundSessions,
     }
   } catch {
@@ -119,6 +141,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       speakProbability: 0.5,
       touchReplyProbability: 0.3,
       touchReplyCooldownSeconds: 30,
+      selfWakeBusyPolicy: 'fire',
       boundSessions: {},
     }
   }
@@ -126,6 +149,97 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
 
 export function innerVoiceStorePath(home: string): string {
   return join(home, WHALE_DIR, 'pet-inner-voice.json')
+}
+
+// ── 自主作息（pet_schedule_wake）的持久化与纯逻辑 ─────────────────────────
+
+export function wakePlansStorePath(home: string): string {
+  return join(home, WHALE_DIR, 'pet-wake-plans.json')
+}
+
+/** Defensive extraction of one pet's plan list: only well-formed plans
+ * survive (id/intent non-empty strings, at/createdAt finite numbers). */
+function plansOf(raw: unknown): WakePlan[] {
+  if (!Array.isArray(raw)) return []
+  const out: WakePlan[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const rec = item as Record<string, unknown>
+    if (typeof rec.id !== 'string' || rec.id === ''
+      || typeof rec.at !== 'number' || !Number.isFinite(rec.at)
+      || typeof rec.intent !== 'string' || rec.intent === ''
+      || typeof rec.createdAt !== 'number' || !Number.isFinite(rec.createdAt)) continue
+    out.push({ id: rec.id, at: rec.at, intent: rec.intent, createdAt: rec.createdAt })
+  }
+  return out
+}
+
+/** Load every pet's pending wake plans: current → legacy → {} (callers'
+ * defensive checks treat {} exactly like a missing file). */
+export async function loadWakePlans(home: string): Promise<Record<string, WakePlan[]>> {
+  try {
+    const raw = await readGlobalJson(home, 'pet-wake-plans.json') as { plans?: unknown }
+    const byPet = typeof raw.plans === 'object' && raw.plans !== null ? raw.plans : {}
+    const out: Record<string, WakePlan[]> = {}
+    for (const [petId, list] of Object.entries(byPet as Record<string, unknown>)) {
+      if (petId === '') continue
+      const plans = plansOf(list)
+      if (plans.length > 0) out[petId] = plans
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+export async function saveWakePlans(home: string, plans: Record<string, WakePlan[]>): Promise<void> {
+  try {
+    await writeGlobalJson(home, 'pet-wake-plans.json', { plans } as unknown as Record<string, unknown>)
+  } catch (error: unknown) {
+    console.error(`pet-surface inner-voice: could not write the wake plans: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/** Upsert by id: re-scheduling with a known id REPLACES the old plan —
+ * "能定、能改、能撤" 的改。 */
+export function upsertPlan(list: WakePlan[], plan: WakePlan): WakePlan[] {
+  return [plan, ...list.filter(entry => entry.id !== plan.id)]
+}
+
+/** Remove one plan by id (or ALL when id is undefined). Returns the removed
+ * plans so the caller can report them; an empty removal is the unknown-id
+ * case the caller turns into a self-correcting error. */
+export function cancelPlans(list: WakePlan[], id?: string): { next: WakePlan[]; removed: WakePlan[] } {
+  if (id === undefined) return { next: [], removed: [...list] }
+  return {
+    next: list.filter(entry => entry.id !== id),
+    removed: list.filter(entry => entry.id === id),
+  }
+}
+
+/** Consume every DUE plan (at <= now): they leave the pending set for good —
+ * a consumed plan must produce a wake, never a silent drop. Future plans
+ * survive untouched (被打断不碰 plans). */
+export function takeDuePlans(list: WakePlan[], now: number): { next: WakePlan[]; due: WakePlan[] } {
+  return {
+    next: list.filter(entry => entry.at > now),
+    due: list.filter(entry => entry.at <= now),
+  }
+}
+
+/** The ±60s merge window: a plan due around NOW folds into a user-initiated
+ * turn instead of firing its own wake a minute later (同一分钟不醒两次). */
+export function takeNearDuePlan(list: WakePlan[], now: number, windowMs = 60_000): { next: WakePlan[]; plan: WakePlan | undefined } {
+  const plan = list.find(entry => Math.abs(entry.at - now) <= windowMs)
+  if (plan === undefined) return { next: list, plan: undefined }
+  return { next: list.filter(entry => entry !== plan), plan }
+}
+
+/** Plans among `due` that went stale BEFORE the driver came up (at < bootAt):
+ * the catch-up wake says 「错过了 N 个计划」 and lists them together instead
+ * of bombing one wake per missed plan. */
+export function missedPlans(due: WakePlan[], bootAt: number): WakePlan[] {
+  return due.filter(entry => entry.at < bootAt)
 }
 
 /** Defensive extraction of the persisted generation counters (petId → n). */
@@ -269,10 +383,32 @@ export interface WakePromptFacts {
   /** Minutes since the bound session last showed activity; undefined = none recorded. */
   minutesSinceUserActivity: number | undefined
   userActive: boolean
+  /** 唤醒源：'world' = 世界时钟（环境节拍，程序周期）；'self' = 模型自己定的
+   * 计划到点；'world+self' = 两者同拍合并。缺省按 'world'（旧调用点）。 */
+  source?: 'world' | 'self' | 'world+self'
+  /** 本次已消费的到期计划 intent（self / world+self 时非空）。 */
+  dueIntents?: Array<string>
+  /** 到期计划中离线期间错过的条数（补醒时 >0 → 「错过了 N 个计划」）。 */
+  missedCount?: number
+  /** 计划定下时就已经过期（pet_schedule_wake 收到过去的时间戳，立即补醒一次）。 */
+  overdue?: boolean
+  /** 未到期的待执行计划（最近 ≤5 条）：世界时钟唤醒也告知模型自己的作息，
+   * 继续、改时间或取消由模型决定。 */
+  pendingPlans?: Array<{ at: number; intent: string }>
+}
+
+/** Local HH:mm for plan times: the model's clock talk is the USER's wall
+ * clock (logStamp precedent), and plans are compared against it. */
+export const wakePlanClock = (at: number): string => {
+  const d = new Date(at)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 /** The wake prompt. Time context is injected by the preset's time-context
- * row; the leading tag doubles as the durable trigger marker in the log. */
+ * row; the leading tag doubles as the durable trigger marker in the log —
+ * and now names the SOURCE: [世界时钟] (the environment's tick), [自主唤醒]
+ * (the model's own schedule, with the original intent), or the merged form. */
 export function buildWakePrompt(facts: WakePromptFacts): string {
   const lastSpoke = facts.minutesSinceLastSpoke === undefined
     ? '这是你今天第一次醒来'
@@ -280,11 +416,41 @@ export function buildWakePrompt(facts: WakePromptFacts): string {
   const user = facts.userActive
     ? `用户最近正在会话中工作（${String(facts.minutesSinceUserActivity ?? 0)} 分钟内有动静）`
     : '用户最近没有活动'
-  return [
-    '[自主唤醒]',
-    `好感 ${String(facts.affection)}（${moodOf(facts.affection)}）；羁绊 ${facts.bondTier}（一起过了 ${String(facts.bondDays)} 天）；${lastSpoke}；${user}。`,
-    '醒来想到什么就说一句（pet_say），想配动作就 pet_do；也可以只是安静待着（两者都不调，正文写「…」）。',
-  ].join(' ')
+  const ledgerLine = `好感 ${String(facts.affection)}（${moodOf(facts.affection)}）；羁绊 ${facts.bondTier}（一起过了 ${String(facts.bondDays)} 天）；${lastSpoke}；${user}。`
+  const source = facts.source ?? 'world'
+  const lines: string[] = []
+  if (source === 'world') {
+    lines.push('[世界时钟]', `环境节拍到了。${ledgerLine}`)
+  } else {
+    const due = facts.dueIntents ?? []
+    const reason = source === 'self'
+      ? '这是你自己定下的唤醒计划到点了'
+      : '世界时钟与你定下的计划同时到点，合并成这一次醒来'
+    const missed = facts.missedCount ?? 0
+    const missedLine = missed > 0 ? `你离线期间错过了 ${String(missed)} 个已到期计划，和这次的一并处理；` : ''
+    const overdueLine = facts.overdue === true ? '（注意：这个计划定下时时间就已过了，现在是补醒）' : ''
+    lines.push(
+      source === 'self' ? '[自主唤醒]' : '[世界时钟+自主唤醒]',
+      `${reason}${overdueLine}。${missedLine}你当初的打算：${due.map(intent => `「${intent}」`).join('、')}。${ledgerLine}`,
+    )
+  }
+  const pending = facts.pendingPlans ?? []
+  if (pending.length > 0) {
+    lines.push(
+      `你还有 ${String(pending.length)} 个待执行计划：${pending.map(plan => `${wakePlanClock(plan.at)}「${plan.intent}」`).join('；')}。`
+      + '继续等待、改时间或取消由你决定（pet_schedule_wake 同名覆盖即改期，pet_cancel_wake 撤销）。',
+    )
+  }
+  lines.push('醒来想到什么就说一句（pet_say），想配动作就 pet_do；也可以只是安静待着（两者都不调，正文写「…」）。')
+  return lines.join(' ')
+}
+
+/** A self-scheduled plan folded into a USER-initiated turn (chat 上行 / touch
+ * 回应)：the plan sat within the ±60s merge window, so both wake in one —
+ * the tag names the union ([用户+自主唤醒]) and the intent rides along. */
+export interface MergedWakePlan {
+  at: number
+  intent: string
 }
 
 export interface TouchPromptFacts {
@@ -292,13 +458,18 @@ export interface TouchPromptFacts {
   /** Touches on this pet today, from the ledger's recent window. */
   touchesToday: number
   affection: number
+  /** ±60s 内到期的自主计划：合并进这次回应，计划标记为已消费。 */
+  mergedPlan?: MergedWakePlan
 }
 
 export function buildTouchPrompt(facts: TouchPromptFacts): string {
   const wording = touchPartWording(facts.part) ?? '身体'
+  const merged = facts.mergedPlan === undefined
+    ? ''
+    : `你定的计划「${facts.mergedPlan.intent}」也正好到点，这次一并处理；`
   return [
-    '[被触摸]',
-    `用户刚摸了你的${wording}（今天第 ${String(facts.touchesToday)} 次，好感 ${String(facts.affection)}，${moodOf(facts.affection)}）。`,
+    facts.mergedPlan === undefined ? '[被触摸]' : '[用户+自主唤醒]',
+    `用户刚摸了你的${wording}（今天第 ${String(facts.touchesToday)} 次，好感 ${String(facts.affection)}，${moodOf(facts.affection)}）。${merged}`,
     '回应一句（pet_say）或做个反应（pet_do）。',
   ].join(' ')
 }
@@ -306,7 +477,11 @@ export function buildTouchPrompt(facts: TouchPromptFacts): string {
 /** The chat上行 prompt (§6 2026-10-31 revision): the user typed at the
  * pet's surface. The text rides verbatim — the pet answers through pet_say
  * (and may pet_do); it is a conversation turn, not a touch reaction. Length
- * clamps to the contract's 2000-character ceiling. */
-export function buildChatPrompt(text: string): string {
-  return `[用户对你说] ${text.slice(0, 2000)}`
+ * clamps to the contract's 2000-character ceiling. A plan inside the ±60s
+ * merge window folds in: the tag becomes the union and the intent rides. */
+export function buildChatPrompt(text: string, mergedPlan?: MergedWakePlan): string {
+  const merged = mergedPlan === undefined
+    ? ''
+    : `[用户+自主唤醒] 用户正在跟你说话，恰好也到了你定的计划点（${wakePlanClock(mergedPlan.at)}「${mergedPlan.intent}」），合并成这一次醒来。\n`
+  return `${merged}[用户对你说] ${text.slice(0, 2000)}`
 }

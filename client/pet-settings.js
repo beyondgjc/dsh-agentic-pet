@@ -233,14 +233,14 @@ window.__ModuleLoader__.load({
             update({ innerVoice: { enabled: !(iv.enabled !== false) } })
           } })),
           h('div', { style: row },
-            '唤醒间隔',
+            '世界时钟间隔',
             h('input', { style: inputStyle, value: String(iv.wakeIntervalMinutes ?? 2), onChange: function (e) {
               var v = parseInt(e.target.value, 10)
               if (Number.isFinite(v)) update({ innerVoice: { wakeIntervalMinutes: v } })
             } }),
             '分钟'),
           h('div', { style: row },
-            '请求模型的概率',
+            '世界时钟唤醒概率',
             h('input', { style: inputStyle, value: String(Math.round(((typeof iv.speakProbability === 'number' ? iv.speakProbability : 0.5)) * 100)), onChange: function (e) {
               var v = parseFloat(e.target.value)
               if (Number.isFinite(v)) update({ innerVoice: { speakProbability: Math.min(100, Math.max(0, v)) / 100 } })
@@ -260,6 +260,25 @@ window.__ModuleLoader__.load({
               if (Number.isFinite(v) && v >= 0) update({ innerVoice: { touchReplyCooldownSeconds: Math.min(600, v) } })
             } }),
             '秒（0 = 不限）'),
+          h('div', { style: row }, '自主唤醒遇用户忙',
+            (function () {
+              var seg = function (active, side) {
+                return { padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+                  border: '1px solid ' + (active ? '#22c55e' : '#c9d4e0'),
+                  background: active ? '#22c55e' : '#f4f7fa',
+                  color: active ? '#ffffff' : '#1c2733',
+                  borderRadius: side === 'left' ? '4px 0 0 4px' : '0 4px 4px 0',
+                  marginLeft: side === 'right' ? -1 : 0 }
+              }
+              var policy = iv.selfWakeBusyPolicy === 'defer' ? 'defer' : 'fire'
+              return h('div', { style: { display: 'inline-flex' } },
+                h('button', { style: seg(policy === 'fire', 'left'), onClick: function () {
+                  if (policy !== 'fire') update({ innerVoice: { selfWakeBusyPolicy: 'fire' } })
+                } }, '到点必醒'),
+                h('button', { style: seg(policy === 'defer', 'right'), onClick: function () {
+                  if (policy !== 'defer') update({ innerVoice: { selfWakeBusyPolicy: 'defer' } })
+                } }, '忙时顺延'))
+            })()),
           h('div', { style: row }, '会话模式',
             (function () {
               var seg = function (active, side) {
@@ -286,7 +305,7 @@ window.__ModuleLoader__.load({
               else delete next.electron
               update({ innerVoice: { boundSessions: next } })
             } })),
-          h(Hint, null, '宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。用户忙于会话或宠物表达未完成时不会打扰。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。指定会话立即生效——下一次对话就用新绑定的会话；清空后自动回落到她之前的会话（那条若已被归档，会自动创建新的）。')),
+          h(Hint, null, '宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。醒来有两个来源：世界时钟是环境节拍，按上面的间隔和唤醒概率随机轻拍她，用户忙于会话或宠物表达未完成时不会打扰；自主唤醒是她用 pet_schedule_wake 给自己定的闹钟，到点带着当初的打算醒来，不受这个概率影响（上面的「自主唤醒遇用户忙」决定你正忙时她是否照醒，默认到点必醒）。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。指定会话立即生效——下一次对话就用新绑定的会话；清空后自动回落到她之前的会话（那条若已被归档，会自动创建新的）。')),
 
         h(Section, { title: h('span', null, '自由活动 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '逻辑驱动')) },
           h('div', { style: row }, '自由活动（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {

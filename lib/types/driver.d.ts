@@ -54,4 +54,3 @@ export declare function installPetDriver(ctx: Context, home: string, pet: PetSer
  * @param home - the dsh home holding the pet control manifest.
  */
 export declare function registerPetTools(ctx: Context, home: string, pet: PetService): void;
-//# sourceMappingURL=driver.d.ts.map

@@ -41,6 +41,9 @@ interface InnerVoiceSettings {
   speakProbability?: number
   touchReplyProbability?: number
   touchReplyCooldownSeconds?: number
+  /** 自主唤醒（pet_schedule_wake 计划）到点遇用户忙的策略：
+   * 'fire' = 到点必醒（默认）；'defer' = 忙时顺延下一拍重试。 */
+  selfWakeBusyPolicy?: 'defer' | 'fire'
   boundSessions?: Record<string, string>
 }
 
@@ -89,6 +92,7 @@ const DEFAULT_SETTINGS: PetSettings = {
     speakProbability: 0.5,
     touchReplyProbability: 0.3,
     touchReplyCooldownSeconds: 30,
+    selfWakeBusyPolicy: 'fire',
     boundSessions: {},
   },
   tts: { enabled: false },
@@ -183,6 +187,10 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     }
     const replyCooldown = clampNumber(v.touchReplyCooldownSeconds, 0, 600)
     if (replyCooldown !== undefined) innerVoice.touchReplyCooldownSeconds = replyCooldown
+    // 自主唤醒忙时策略：只收白名单里的两个值，其余折叠默认（'fire'）。
+    if (v.selfWakeBusyPolicy === 'defer' || v.selfWakeBusyPolicy === 'fire') {
+      innerVoice.selfWakeBusyPolicy = v.selfWakeBusyPolicy
+    }
     // Manual binding: petId → session id, empty strings dropped; an absent
     // key in the patch leaves the stored map untouched (partial updates).
     const bound = v.boundSessions
