@@ -25,6 +25,12 @@ import { resolve } from 'node:path'
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
 /** Concrete ranges this repo publishes; upstream declares them as `workspace:`. */
 const DEV_RANGES = { '@deepseek-ai/cordis': '^4.0.5', vitest: '^4.1.11' }
+/**
+ * Manifest fields this repo owns. The monorepo copy is a workspace manifest and
+ * carries none of them, so a plain mirror deletes them — `repository` is how the
+ * npm package links back to the repo that the plugin list points at.
+ */
+const RELEASE_OWNED = ['repository', 'bugs', 'homepage']
 
 const [monoArg, releaseArg] = process.argv.slice(2)
 if (monoArg === undefined || releaseArg === undefined) {
@@ -71,6 +77,9 @@ if (typeof version !== 'string' || !SEMVER.test(version)) {
 }
 
 mono.version = version
+for (const field of RELEASE_OWNED) {
+  if (release[field] !== undefined) mono[field] = release[field]
+}
 mono.devDependencies = { ...mono.devDependencies }
 for (const [name, range] of Object.entries(DEV_RANGES)) {
   if (name in mono.devDependencies || name === '@deepseek-ai/cordis') mono.devDependencies[name] = range
