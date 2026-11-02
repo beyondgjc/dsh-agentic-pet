@@ -1,7 +1,7 @@
 {
   "name": "dsh-agentic-pet",
   "description": "The pet-surface bundle: serves the desktop pet renderer over the web composition, turning dsh into a surface the desktop pet attaches to as an authenticated client",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publishConfig": {
     "access": "public"
   },
