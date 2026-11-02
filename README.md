@@ -40,9 +40,23 @@ The TypeScript build still runs inside the dsh monorepo workspace (the bundled `
 
 1. In the monorepo: `pnpm run build` (plugin `lib/`) and `pnpm --filter @deepseek-ai/dsh-pet run build` (carrier `lib/` + `dist-renderer/`).
 2. Here: `scripts\sync-from-monorepo.cmd` — mirrors sources and build outputs into this repo.
-3. Commit here, then `npm publish` (assets package first; see [dsh-pet-assets/PUBLISH.md](../dsh-pet-assets/PUBLISH.md) for the release manual).
+3. Commit here, then publish from here (see [Releasing](#releasing); the assets package goes first, manual in [dsh-pet-assets/PUBLISH.md](../dsh-pet-assets/PUBLISH.md)).
 
 Tests: `npx vitest run tests/registry-service.spec.ts` runs self-contained (needs only `cordis` and `vitest`); the full suite including `tests/pet-app.spec.ts` runs in the monorepo workspace.
+
+## Releasing
+
+`package.json`'s `version` is owned by this repo: `scripts\sync-from-monorepo.cmd` mirrors every other manifest field and keeps it. The monorepo copy carries the workspace version (`0.2.1-rc.3`), so a plain mirror copy used to rewrite the published number — which is why npm `0.4.0` had no commit and no tag carrying it.
+
+```bash
+node scripts\release.mjs 0.4.1 --dry-run   # preflight and pack listing, nothing published
+node scripts\release.mjs 0.4.1             # publish, commit "chore(release): 0.4.1", tag v0.4.1
+git push --follow-tags
+```
+
+The script refuses to publish unless the working tree is clean, the version exceeds the current one, tag `v<version>` is absent, the build artifacts are present, and `lib/` carries exactly one bundle chunk (`tsdown` runs with `clean:false`, so a stale `service-*.js` would ship). A failed publish restores `package.json`, so the tree never claims a version that did not ship. A prerelease version (`x.y.z-rc.N`) publishes under `--tag rc`.
+
+Every published version is reachable as tag `v<version>` — the tag, not the manifest, is what answers "what is on npm". Version in the tree therefore always equals the last *published* version.
 
 ## Documentation
 

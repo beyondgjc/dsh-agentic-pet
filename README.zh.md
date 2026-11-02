@@ -40,9 +40,23 @@ TypeScript 构建仍在 dsh monorepo workspace 内进行（被打包的 `@deepse
 
 1. monorepo 内：`pnpm run build`（插件 `lib/`）与 `pnpm --filter @deepseek-ai/dsh-pet run build`（载体 `lib/` + `dist-renderer/`）。
 2. 本仓库：`scripts\sync-from-monorepo.cmd`——把源码与构建产物镜像进本仓库。
-3. 本仓库提交，然后 `npm publish`（先素材包后插件包；发布手册见 [dsh-pet-assets/PUBLISH.md](../dsh-pet-assets/PUBLISH.md)）。
+3. 本仓库提交，然后在本仓库发布（见下文「发布」；先素材包后插件包，手册见 [dsh-pet-assets/PUBLISH.md](../dsh-pet-assets/PUBLISH.md)）。
 
 测试：`npx vitest run tests/registry-service.spec.ts` 自持可跑（只需 `cordis` 与 `vitest`）；含 `tests/pet-app.spec.ts` 的全量测试在 monorepo workspace 内跑。
+
+## 发布
+
+`package.json` 的 `version` 归本仓库所有：`scripts\sync-from-monorepo.cmd` 镜像其余所有字段、只保留它。monorepo 那份带的是 workspace 版本（`0.2.1-rc.3`），早先的整文件覆盖会把已发布的版本号改掉——npm 上的 `0.4.0` 因此没有对应的 commit 与 tag。
+
+```bash
+node scripts\release.mjs 0.4.1 --dry-run   # 预检 + 打包清单，不发布
+node scripts\release.mjs 0.4.1             # 发布，提交 "chore(release): 0.4.1"，打 tag v0.4.1
+git push --follow-tags
+```
+
+以下任一条件不满足，脚本拒绝发布：工作树干净、新版本号大于当前值、tag `v<版本>` 不存在、构建产物齐备、`lib/` 里只有一个 bundle chunk（`tsdown` 用 `clean:false`，残留的旧 `service-*.js` 会被打进包）。发布失败会自动还原 `package.json`，工作树不会停留在一个并未发布的版本号上。预发布版本（`x.y.z-rc.N`）以 `--tag rc` 发布。
+
+每个已发布版本都能用 tag `v<版本>` 定位——回答"npm 上是什么"的是 tag，不是清单。因此仓库里的版本号恒等于**最后已发布**的版本。
 
 ## 文档
 
