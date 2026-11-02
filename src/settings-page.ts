@@ -415,7 +415,13 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
       })
       if (!response.ok) {
         const detail = await response.text().catch(() => '')
-        writeJson(res, 502, { error: `BreezeBlue HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 200)}` : ''}` })
+        // 401 is the "wrong key" case by far the most likely: name the fix,
+        // not just the wire fact (a key copied from another service reads
+        // identically to a revoked one here).
+        const message = response.status === 401
+          ? 'BreezeBlue 拒绝了这个 key（401）：请到 breezeblue.ai 的 Developer Console 复制 brz_ 开头的 API key'
+          : `BreezeBlue HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 200)}` : ''}`
+        writeJson(res, 502, { error: message })
         return
       }
       const raw = await response.json() as { voices?: unknown; total?: unknown }
