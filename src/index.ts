@@ -16,9 +16,9 @@
  * @module dsh-agentic-pet
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
@@ -335,32 +335,99 @@ export function apply(ctx: Context): void {
     } catch { /* electron dependency not found on disk */ }
     return process.versions.electron !== undefined ? process.execPath : undefined
   }
+  /** Carrier spawn diagnostics; the packaged host's stderr is not visible. */
+  const logCarrier = (line: string): void => {
+    try {
+      appendFileSync(join(dirname(petLocatorPath()), 'carrier-spawn.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
+    } catch { /* diagnostics stay best-effort */ }
+  }
   const spawnPetCarrier = (url: string): void => {
     const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
     const electronBinary = resolveElectronBinary()
     if (process.env.DSH_PET_NO_SPAWN === '1' || electronBinary === undefined
       || !existsSync(join(carrierDir, 'package.json'))) return
-    const child = spawn(electronBinary, [carrierDir], {
-      // The host often runs inside its own Electron binary in Node mode
-      // (ELECTRON_RUN_AS_NODE=1, e.g. the desktop's host child); inheriting
-      // that flag would boot the carrier headless in Node mode too.
-      env: {
-        ...stripRunAsNode(process.env),
-        DSH_PET_URL: url,
-        // The carrier's liveness anchor: dispose-time kill never runs when the
-        // runtime is terminated (only on graceful shutdown), and a detached
-        // child escapes OS tree-kills — the carrier polls this pid itself.
-        DSH_PET_RUNTIME_PID: String(process.pid),
-      },
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    // Chromium's sandbox fails to initialise on some Windows setups: the
+    // process dies with a status-breakpoint before a single line of app code
+    // runs, so the carrier never logs and no window ever appears. A `--version`
+    // probe costs one short-lived process and tells the two worlds apart;
+    // failing it means a sandboxed launch would die silently again, so fall
+    // back to `--no-sandbox` — the carrier only ever renders this runtime's own
+    // authenticated pet page, and no pet at all is the worse trade.
+    let probeStatus = 'unstarted'
+    const startsSandboxed = ((): boolean => {
+      try {
+        const probe = spawnSync(electronBinary, ['--version'], {
+          env: stripRunAsNode(process.env),
+          stdio: 'ignore',
+          timeout: 5_000,
+        })
+        probeStatus = probe.error === undefined
+          ? `status=${String(probe.status)}`
+          : `error=${String((probe.error as NodeJS.ErrnoException).code ?? probe.error.message)}`
+        return probe.status === 0
+      } catch (error) {
+        probeStatus = `throw=${error instanceof Error ? error.message : String(error)}`
+        return false
+      }
+    })()
+    const launchArgs = [carrierDir]
+    if (!startsSandboxed) {
+      console.error('pet-surface: this machine cannot start a sandboxed Electron; launching the carrier with --no-sandbox')
+      // The same broken setups also deny Chromium its userData directory under
+      // %APPDATA%: the singleton then reads "lock file cannot be created" as
+      // "another instance is running" and the carrier exits before a single
+      // line of app code runs. The pet home stays writable for the carrier (it
+      // writes its own boot log and registry there), so park Chromium's profile
+      // beside them.
+      const carrierUserData = join(dirname(petLocatorPath()), 'carrier-userdata')
+      try {
+        mkdirSync(carrierUserData, { recursive: true })
+      } catch { /* Electron creates it too; a failure here surfaces in the log */ }
+      launchArgs.push('--no-sandbox', `--user-data-dir=${carrierUserData}`)
+    }
+    // A packaged desktop host has no visible stderr, so the spawn decision and
+    // whatever the child manages to say before dying go to a file next to the
+    // locator.
+    logCarrier(`spawn binary=${electronBinary} args=${JSON.stringify(launchArgs)} probe=${probeStatus} pid=${String(process.pid)}`)
+    const child = ((): ReturnType<typeof spawn> | undefined => {
+      try {
+        return spawn(electronBinary, launchArgs, {
+          // The host often runs inside its own Electron binary in Node mode
+          // (ELECTRON_RUN_AS_NODE=1, e.g. the desktop's host child); inheriting
+          // that flag would boot the carrier headless in Node mode too.
+          env: {
+            ...stripRunAsNode(process.env),
+            DSH_PET_URL: url,
+            // The carrier's liveness anchor: dispose-time kill never runs when
+            // the runtime is terminated (only on graceful shutdown), and a
+            // detached child escapes OS tree-kills — the carrier polls this pid
+            // itself.
+            DSH_PET_RUNTIME_PID: String(process.pid),
+          },
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      } catch (error) {
+        logCarrier(`spawn threw: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }
+    })()
+    if (child === undefined) return
+    logCarrier(`spawned pid=${String(child.pid ?? 'unknown')}`)
+    let stderrTail = ''
     // Piped, not ignored: the carrier's diagnostics (control-interface calls,
     // load failures) are the only visibility into an auto-started pet.
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => { process.stdout.write(`[pet-carrier] ${chunk}`) })
     child.stderr?.setEncoding('utf8')
-    child.stderr?.on('data', (chunk: string) => { process.stderr.write(`[pet-carrier] ${chunk}`) })
+    child.stderr?.on('data', (chunk: string) => {
+      stderrTail = (stderrTail + chunk).slice(-2_000)
+      process.stderr.write(`[pet-carrier] ${chunk}`)
+    })
+    child.on('error', (error) => { logCarrier(`child error: ${error.message}`) })
+    child.on('exit', (code, signal) => {
+      logCarrier(`child exit code=${String(code)} signal=${String(signal)} stderr=${JSON.stringify(stderrTail.slice(-700))}`)
+    })
     child.unref()
     ctx.effect(() => () => { child.kill() }, 'pet-surface: carrier shutdown')
   }

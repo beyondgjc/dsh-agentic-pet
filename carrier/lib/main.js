@@ -1022,13 +1022,20 @@ async function main() {
     // kill only runs on the runtime's graceful shutdown; a terminated runtime
     // leaves a detached pet orphaned on the desktop. Poll the spawning
     // runtime's pid and exit with it.
+    //
+    // Only ESRCH means gone: a confined carrier can run at a lower integrity
+    // level than the runtime, where probing a heavier process answers EPERM —
+    // "it exists, you may not signal it". Counting that as death made the pet
+    // quit ten seconds after an otherwise fine start.
     const runtimePid = Number(process.env.DSH_PET_RUNTIME_PID);
     if (Number.isInteger(runtimePid) && runtimePid > 0) {
         setInterval(() => {
             try {
                 process.kill(runtimePid, 0);
             }
-            catch {
+            catch (error) {
+                if (error.code !== 'ESRCH')
+                    return;
                 console.log('[pet] the spawning runtime is gone; exiting');
                 app.quit();
             }
