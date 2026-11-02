@@ -117,20 +117,19 @@ window.__ModuleLoader__.load({
         var custom = settings.names && settings.names[id]
         return custom ? String(custom) : defaultName(id)
       }
-      // 提交一次改名（失焦/回车调用）：与当前值比较，无变化零开销；
-      // 空值删键（回落默认）。一次编辑 = 至多一次 update = 至多一条 [改名]。
+      // 提交一次改名（失焦/回车调用）：与当前生效名比较，无变化零开销。
+      // 清空或改回内置名 = 发空串，宿主据此删掉 pet-name.json、回落到默认名。
+      // 早先这里删键后发的是 {}，而宿主是按 patch 里的键逐个写的——空对象等于
+      // 零次写入，"改回默认名"因此是一次静默的空操作。
       var commitName = function (id, raw) {
         var v = (raw || '').trim()
-        var next = Object.assign({}, (settings.names || {}))
-        var current = next[id]
-        if (v !== '' && v !== defaultName(id)) {
-          if (current === v) return
-          next[id] = v
-        } else {
-          if (current === undefined) return
-          delete next[id]
-        }
-        update({ names: next })
+        var next = v === '' || v === defaultName(id) ? '' : v
+        // 比较"生效名"而不是 patch：本来就用默认名时，清空/再输默认名是一次
+        // 无变化的编辑，不该发请求（否则每次点进输入框失焦都会 POST 一遍）。
+        if ((next === '' ? defaultName(id) : next) === petName(id)) return
+        var patch = {}
+        patch[id] = next
+        update({ names: patch })
       }
 
       function update(patch, doneMessage) { act(UPDATE, { patch: patch }, doneMessage) }
@@ -189,7 +188,9 @@ window.__ModuleLoader__.load({
                 // Uncontrolled + commit-on-blur/Enter: typing is LOCAL until the
                 // edit completes — a per-keystroke update would fire a [改名]
                 // turn per character.清空 + 失焦 = 恢复默认名。
-                h('input', { style: Object.assign({}, inputStyle, { width: 120, fontWeight: 700 }), defaultValue: petName(p.id), title: '改名后点击空白处或回车生效；清空恢复默认',
+                // key 钉在当前生效名上：设置异步到达或改名成功后重挂，输入框
+                // 才不会停在首帧的默认值上（曾显示"鲸鱼娘"而实际存着自定义名）。
+                h('input', { key: 'name-' + petName(p.id), style: Object.assign({}, inputStyle, { width: 120, fontWeight: 700 }), defaultValue: petName(p.id), title: '改名后点击空白处或回车生效；清空恢复默认',
                   onBlur: function (e) { commitName(p.id, e.target.value) },
                   onKeyDown: function (e) { if (e.key === 'Enter') { commitName(p.id, e.target.value); e.target.blur() } } }),
                 p.online
