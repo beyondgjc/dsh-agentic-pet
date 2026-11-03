@@ -53,7 +53,7 @@ export interface InnerVoiceConfig {
     selfWakeBusyPolicy: SelfWakeBusyPolicy;
     /** 宠物间消息（pet_say 的 audience 指向另一只宠）的投递方式：
      * 'queue' = 进收件箱，目标下次唤醒时 prompt 报数、pet_inbox 取文（默认，
-     * 像活物不刷屏）；'immediate' = 立即唤醒目标投递。 */
+     * 像活物不刷屏）；'immediate' = 气泡 5s 后立即唤醒目标投递。 */
     petToPetDelivery: 'immediate' | 'queue';
     /** Manually bound sessions (petId → sessionId): the user's own
      * conversations the inner voice should live in — highest priority, used
