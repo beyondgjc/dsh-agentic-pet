@@ -388,12 +388,13 @@ describe('pet-to-pet messaging (宠物间消息)', () => {
   })
 
   it('builds the cross-pet prompt with the sender tag and the reply path', () => {
-    const prompt = buildCrossPetPrompt({ fromName: '鲸鱼娘', fromId: 'electron', text: '一起玩吗' })
+    const prompt = buildCrossPetPrompt({ fromName: '鲸鱼娘', fromId: 'electron', text: '一起玩吗', affection: 20 })
     expect(prompt.startsWith('[来自另外桌宠 鲸鱼娘]')).toBe(true)
     expect(prompt).toContain('一起玩吗')
+    expect(prompt).toContain('你對 鲸鱼娘 的好感 20')
     expect(prompt).toContain('audience="electron"')
     // 携文钳到 200（与气泡硬顶同源）
-    const long = buildCrossPetPrompt({ fromName: 'a', fromId: 'a', text: 'x'.repeat(300) })
+    const long = buildCrossPetPrompt({ fromName: 'a', fromId: 'a', text: 'x'.repeat(300), affection: 0 })
     expect(long).toContain('x'.repeat(200))
     expect(long).not.toContain('x'.repeat(201))
   })

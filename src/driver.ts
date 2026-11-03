@@ -123,6 +123,13 @@ interface TouchLedger {
     *     我们到哪了。 tier derives from value (much slower thresholds). */
   bond?: { value: number; days: number; lastCountedDate: string } | undefined
   bondAdjustments?: Array<{ delta: number; reason: string; at: number }> | undefined
+  /** 宠物间好感（A→B 矩阵，A 的心长在 A 的账本里）：value 是 A 的模型对 B
+   * 的判断（同 0-100 刻度、同 delta+reason 审计），与对用户的 affection
+   * 互相独立。共享同一个每日配额（quota）与冷却——A 的判断力是有限资源。 */
+  petAffection?: Record<string, { value: number; adjustments: Array<{ delta: number; reason: string; at: number }> }> | undefined
+  /** 系统事实 ONLY：谁找过我、找过几次、最近一次（pet_say 投递时记录，
+   * 永不移动 petAffection 的值——判断是模型的，事实是系统的）。 */
+  petFacts?: Record<string, { total: number; lastAt: number }> | undefined
 }
 
 const EMPTY_LEDGER: TouchLedger = { affection: 0, total: 0, byPart: {}, lastTouchAt: undefined, recent: [] }
@@ -184,6 +191,33 @@ async function readLedger(home: string, petId: string): Promise<TouchLedger> {
               && typeof (a as Record<string, unknown>).reason === 'string'
               && typeof (a as Record<string, unknown>).at === 'number',
         )
+        : undefined,
+      petAffection: typeof raw.petAffection === 'object' && raw.petAffection !== null
+        ? Object.fromEntries(Object.entries(raw.petAffection as Record<string, unknown>).flatMap(([id, pair]): Array<[string, NonNullable<TouchLedger['petAffection']>[string]]> => {
+          if (typeof pair !== 'object' || pair === null) return []
+          const rec = pair as { value?: unknown; adjustments?: unknown }
+          if (typeof rec.value !== 'number' || !Number.isFinite(rec.value)) return []
+          return [[id, {
+            value: rec.value,
+            adjustments: Array.isArray(rec.adjustments)
+              ? (rec.adjustments as unknown[]).filter(
+                (a): a is { delta: number; reason: string; at: number } =>
+                  typeof a === 'object' && a !== null
+                    && typeof (a as Record<string, unknown>).delta === 'number'
+                    && typeof (a as Record<string, unknown>).reason === 'string'
+                    && typeof (a as Record<string, unknown>).at === 'number',
+              )
+              : [],
+          }]]
+        }))
+        : undefined,
+      petFacts: typeof raw.petFacts === 'object' && raw.petFacts !== null
+        ? Object.fromEntries(Object.entries(raw.petFacts as Record<string, unknown>).flatMap(([id, fact]): Array<[string, NonNullable<TouchLedger['petFacts']>[string]]> => {
+          if (typeof fact !== 'object' || fact === null) return []
+          const rec = fact as { total?: unknown; lastAt?: unknown }
+          if (typeof rec.total !== 'number' || !Number.isFinite(rec.total)) return []
+          return [[id, { total: rec.total, lastAt: typeof rec.lastAt === 'number' ? rec.lastAt : 0 }]]
+        }))
         : undefined,
     }
   } catch {
@@ -1650,6 +1684,21 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
       if (target === undefined) throw new Error('no pet is running')
       return target
     }
+    // 系统事实 ONLY：宠物间消息投递后，在接收方账本记一笔「谁找过我、几次、
+    // 最近一次」。永不移动 petAffection 的值——事实是系统的，判断是模型的
+    // （与触摸事实同一个哲学）。
+    const recordPetFact = async (toPetId: string, fromPetId: string): Promise<void> => {
+      try {
+        const ledger = await readLedger(home, toPetId)
+        const facts = ledger.petFacts ?? {}
+        const prev = facts[fromPetId] ?? { total: 0, lastAt: 0 }
+        facts[fromPetId] = { total: prev.total + 1, lastAt: Date.now() }
+        ledger.petFacts = facts
+        await petdata.writeAffectionRaw(home, toPetId, ledger as unknown as Record<string, unknown>)
+      } catch (error: unknown) {
+        console.error(`pet-surface driver: could not record the pet fact: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 表演的门卫（影子会话定案）：pet_say/pet_do（及定/撤闹钟）只属于拥有会话
     // 的宠。侧栏手动开的宠物模式会话不在 voiceOwners 里——按用户拍板，它被当作
     // 普通工作会话对待：普通会话根本没有这些工具，这里对齐其行为（拒答、不分发），
@@ -1752,25 +1801,31 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
                     // driver 重装窗口：降级入队，消息不丢
                     voicePetMessages.set(to.id, queuePetMessage(voicePetMessages.get(to.id) ?? [], { from: entry.id, text, at: Date.now() }))
                     persistPetMessages(home)
+                    void recordPetFact(to.id, entry.id)
                     return
                   }
-                  void deliverer(to.id, buildCrossPetPrompt({ fromName, fromId: entry.id, text }))
-                    .then((admitted) => {
-                      if (!admitted) {
-                        driverLog(home, `PET_SAY cross delayed delivery failed from=${entry.id} to=${to.id} (session create/prompt rejected)`)
-                      }
-                    })
+                  void (async () => {
+                    // 态度随行：目标对来者的好感（目标账本里的判断值）让回复
+                    // 带上历史语气，而不是每次都白纸一张。
+                    const toLedger = await readLedger(home, to.id)
+                    const affection = toLedger.petAffection?.[entry.id]?.value ?? 0
+                    const admitted = await deliverer(to.id, buildCrossPetPrompt({ fromName, fromId: entry.id, text, affection }))
+                    if (admitted) void recordPetFact(to.id, entry.id)
+                    else driverLog(home, `PET_SAY cross delayed delivery failed from=${entry.id} to=${to.id} (session create/prompt rejected)`)
+                  })()
                 }, 5_000)
                 audienceOut = { pet: target.id, delivered: 'immediate' }
               } else {
                 // driver 未就绪：降级排队，不丢消息
                 voicePetMessages.set(target.id, queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() }))
                 persistPetMessages(home)
+                void recordPetFact(target.id, entry.id)
                 audienceOut = { pet: target.id, delivered: 'queued', note: 'immediate 不可用，已降级排队' }
               }
             } else {
               voicePetMessages.set(target.id, queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() }))
               persistPetMessages(home)
+              void recordPetFact(target.id, entry.id)
               audienceOut = { pet: target.id, delivered: 'queued' }
             }
             driverLog(home, `PET_SAY cross from=${entry.id} to=${target.id} delivered=${String(audienceOut.delivered)} text=${JSON.stringify(text)}`)
@@ -1806,11 +1861,15 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         if (taken.next.length > 0) voicePetMessages.set(petId, taken.next)
         else voicePetMessages.delete(petId)
         persistPetMessages(home)
+        // 态度随行：每条消息带上你对来者的当前好感（你自己维护的判断值），
+        // 读信即知用什么语气。
+        const ledger = await readLedger(home, petId)
         const messages = taken.taken.map(message => ({
           from: message.from,
           fromName: petDisplayName(message.from),
           text: message.text,
           at: message.at,
+          yourAffection: ledger.petAffection?.[message.from]?.value ?? 0,
         }))
         driverLog(home, `PET_INBOX pet=${petId} consumed=${String(messages.length)}`)
         return JSON.stringify({ messages, count: messages.length })
@@ -1990,6 +2049,11 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             bond: { value: ledger.bond?.value ?? 0, days: ledger.bond?.days ?? 0, tier: bondTier(ledger.bond?.value ?? 0) },
             recentBondAdjustments: (ledger.bondAdjustments ?? []).slice(0, 3),
             recentAdjustments: (ledger.adjustments ?? []).slice(0, 5),
+            // 宠物间关系（A→B 矩阵 + 谁找过我）：对用户的账之外的另一半心。
+            petAffection: Object.fromEntries(Object.entries(ledger.petAffection ?? {}).map(([id, pair]) => [
+              id, { value: pair.value, mood: moodOf(pair.value), recentAdjustments: pair.adjustments.slice(0, 3) },
+            ])),
+            petFacts: ledger.petFacts ?? {},
             quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
             facts: { now, lastInteractionAt: lastInteractionAt > 0 ? lastInteractionAt : null, lastLoginAt: dshLoginAt },
           })
@@ -2000,12 +2064,13 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_affection_adjust',
-      description: 'Adjust the affection YOU maintain toward the user: delta (-3..+3 integer) plus a SPECIFIC reason citing what happened. Touch counts are facts the system records separately — this tool is your judgment layer, and the driver never moves the value on a touch. Limits: at least 5 minutes between adjustments, 8 per day, |daily sum| <= 10 — violations are REJECTED with the remaining quota, not clamped. Judge honestly: this number is your read of the relationship, not a score to farm.',
+      description: 'Adjust the affection YOU maintain: toward the user by default, or toward ANOTHER pet with toward (pet id) — each relationship is a separate 0-100 value in your own book, but the daily judgment quota is SHARED across all of them. delta (-3..+3 integer) plus a SPECIFIC reason citing what happened. Facts (touches, pet-to-pet messages) are recorded by the system separately — this tool is your judgment layer, and the driver never moves a value on an interaction. Limits: at least 5 minutes between adjustments (any relationship), 8 per day total, |daily sum| <= 10 — violations are REJECTED with the remaining quota, not clamped. Judge honestly: this number is your read of the relationship, not a score to farm.',
       parameters: {
         delta: { type: 'number', required: true, description: 'The change: a NON-ZERO integer between -3 and +3.' },
         reason: { type: 'string', required: true, description: 'WHY this delta — cite the concrete interaction. Empty or generic reasons are rejected.' },
-        pet: { type: 'string', description: 'Which pet: its id from pet_state. Omit for the default pet.' },
-        bondDelta: { type: 'number', description: 'OPTIONAL change to the long-term bond: a NON-ZERO integer between -1 and +1. The slowest variable — the smallest steps.' },
+        pet: { type: 'string', description: 'Whose book: a pet id from pet_state. Omit for the pet this session belongs to (or the default pet).' },
+        toward: { type: 'string', description: 'OPTIONAL pet id: adjust your affection toward THAT pet instead of the user. Must be online and not yourself; bondDelta does not apply between pets.' },
+        bondDelta: { type: 'number', description: 'OPTIONAL change to the long-term bond with the USER: a NON-ZERO integer between -1 and +1. The slowest variable — the smallest steps. Not applicable when toward is given.' },
         bondReason: { type: 'string', description: 'Required when bondDelta is given: the concrete event that moved the bond.' },
       },
       output: {
@@ -2023,8 +2088,24 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             throw new Error(`delta 必须是 -${String(ADJUST_MAX_DELTA)}..+${String(ADJUST_MAX_DELTA)} 的非零整数（收到 ${String(args.delta)}）`)
           }
           if (reason === '') throw new Error('reason 必填：没有理由的调整不予记录')
+          // toward 分支（宠物间好感）：目标须在场且非自己；bond 是跟用户的
+          // 维度，不适用。
+          const toward = typeof args.toward === 'string' && args.toward !== '' ? args.toward.trim() : undefined
+          if (toward !== undefined) {
+            if (toward === entry.id) throw new Error('toward 不能是自己')
+            const pets = await pet.list()
+            if (!pets.some(candidate => candidate.id === toward)) {
+              throw new Error(`no running pet named "${toward}" (running: ${pets.map(candidate => candidate.id).join(', ') || 'none'})`)
+            }
+            if (args.bondDelta !== undefined) throw new Error('bondDelta 只适用于对用户的关系——宠物间没有羁绊层')
+          }
           const adjustments = ledger.adjustments ?? []
-          const lastModelAt = adjustments.find(a => !a.system)?.at ?? 0
+          // 共享冷却：对用户、对每只宠的最近一次调整综合计算——A 的判断力
+          // 是一份资源，不因换了对象就重置。
+          const lastModelAt = Math.max(
+            adjustments.find(a => !a.system)?.at ?? 0,
+            ...Object.values(ledger.petAffection ?? {}).map(pair => pair.adjustments[0]?.at ?? 0),
+          )
           const cooldownLeft = lastModelAt + ADJUST_COOLDOWN_MS - now
           if (cooldownLeft > 0) throw new Error(`距上次调整还有 ${String(Math.ceil(cooldownLeft / 1000))} 秒冷却`)
           const today = new Date().toDateString()
@@ -2032,31 +2113,47 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           if (quota.count >= ADJUST_DAILY_LIMIT) throw new Error(`今日调整次数已用完（${String(ADJUST_DAILY_LIMIT)}）——明天再判断，或者相信当前的关系状态`)
           if (Math.abs(quota.sum + delta) > ADJUST_DAILY_SUM) throw new Error(`今日净变动将超过 ±${String(ADJUST_DAILY_SUM)}（当前 ${String(quota.sum)}）——剩下的留给明天`)
           countBondDay(ledger)
-          // Optional bond nudge: the SLOWEST variable takes the smallest
-          // steps — at most ±1 per call, reason mandatory, audited apart
-          // from affection adjustments.
-          const bondDelta = typeof args.bondDelta === 'number' && Number.isInteger(args.bondDelta) ? args.bondDelta : 0
-          const bondReason = typeof args.bondReason === 'string' ? args.bondReason.trim() : ''
-          if (bondDelta !== 0) {
-            if (Math.abs(bondDelta) > 1) throw new Error('bondDelta 每次至多 ±1：羁绊是最慢的变量，不接受大步幅')
-            if (bondReason === '') throw new Error('bondReason 必填：羁绊的增减要有具体的事由')
-          }
-          ledger.affection = Math.min(100, Math.max(0, ledger.affection + delta))
           quota.count += 1
           quota.sum += delta
           ledger.quota = quota
-          ledger.adjustments = [{ delta, reason, at: now }, ...adjustments].slice(0, 20)
-          if (bondDelta !== 0) {
-            ledger.bond = {
-              value: Math.max(0, (ledger.bond?.value ?? 0) + bondDelta),
-              days: ledger.bond?.days ?? 0, // the fact writer owns days
-              lastCountedDate: ledger.bond?.lastCountedDate ?? new Date().toDateString(),
+          if (toward === undefined) {
+            // Optional bond nudge: the SLOWEST variable takes the smallest
+            // steps — at most ±1 per call, reason mandatory, audited apart
+            // from affection adjustments.
+            const bondDelta = typeof args.bondDelta === 'number' && Number.isInteger(args.bondDelta) ? args.bondDelta : 0
+            const bondReason = typeof args.bondReason === 'string' ? args.bondReason.trim() : ''
+            if (bondDelta !== 0) {
+              if (Math.abs(bondDelta) > 1) throw new Error('bondDelta 每次至多 ±1：羁绊是最慢的变量，不接受大步幅')
+              if (bondReason === '') throw new Error('bondReason 必填：羁绊的增减要有具体的事由')
             }
-            ledger.bondAdjustments = [{ delta: bondDelta, reason: bondReason, at: now }, ...(ledger.bondAdjustments ?? [])].slice(0, 10)
+            ledger.affection = Math.min(100, Math.max(0, ledger.affection + delta))
+            ledger.adjustments = [{ delta, reason, at: now }, ...adjustments].slice(0, 20)
+            if (bondDelta !== 0) {
+              ledger.bond = {
+                value: Math.max(0, (ledger.bond?.value ?? 0) + bondDelta),
+                days: ledger.bond?.days ?? 0, // the fact writer owns days
+                lastCountedDate: ledger.bond?.lastCountedDate ?? new Date().toDateString(),
+              }
+              ledger.bondAdjustments = [{ delta: bondDelta, reason: bondReason, at: now }, ...(ledger.bondAdjustments ?? [])].slice(0, 10)
+            }
+            await petdata.writeAffectionRaw(home, entry.id, ledger as unknown as Record<string, unknown>)
+            return JSON.stringify({
+              pet: entry.id, affection: ledger.affection, mood: moodOf(ledger.affection), applied: delta,
+              quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
+            })
           }
+          // toward 分支：A→B 的值长在 A 的账本里（petAffection），审计独立、
+          // 刻度同 0-100、配额与冷却同上面的共享检查。
+          const petAffection = ledger.petAffection ?? {}
+          const pair = petAffection[toward] ?? { value: 0, adjustments: [] as Array<{ delta: number; reason: string; at: number }> }
+          pair.value = Math.min(100, Math.max(0, pair.value + delta))
+          pair.adjustments = [{ delta, reason, at: now }, ...pair.adjustments].slice(0, 10)
+          petAffection[toward] = pair
+          ledger.petAffection = petAffection
           await petdata.writeAffectionRaw(home, entry.id, ledger as unknown as Record<string, unknown>)
+          driverLog(home, `PET_AFFECTION pet=${entry.id} toward=${toward} applied=${String(delta)} value=${String(pair.value)} reason=${JSON.stringify(reason)}`)
           return JSON.stringify({
-            pet: entry.id, affection: ledger.affection, mood: moodOf(ledger.affection), applied: delta,
+            pet: entry.id, toward, petAffection: pair.value, mood: moodOf(pair.value), applied: delta,
             quota: { used: quota.count, limit: ADJUST_DAILY_LIMIT, sum: quota.sum, sumLimit: ADJUST_DAILY_SUM },
           })
         } catch (error: unknown) {

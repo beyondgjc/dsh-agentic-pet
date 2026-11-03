@@ -122,12 +122,15 @@ export declare function takePetMessages(list: PetMessage[]): {
 };
 /** The immediate-delivery prompt (petToPetDelivery='immediate'): the target
  * is woken right away with the sender's name and id — the id because the
- * reply path is pet_say audience="<fromId>". Responding or ignoring is the
- * target's own call, exactly like any other wake. */
+ * reply path is pet_say audience="<fromId>". The target's current affection
+ * toward the sender rides along so the reply carries history, not a blank
+ * slate. Responding or ignoring is the target's own call, exactly like any
+ * other wake. */
 export declare function buildCrossPetPrompt(facts: {
     fromName: string;
     fromId: string;
     text: string;
+    affection: number;
 }): string;
 export declare function loadInnerVoiceStore(home: string): Promise<InnerVoiceStore>;
 export declare function saveInnerVoiceStore(home: string, store: InnerVoiceStore): Promise<void>;

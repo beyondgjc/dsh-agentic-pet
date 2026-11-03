@@ -319,13 +319,15 @@ export function takePetMessages(list: PetMessage[]): { taken: PetMessage[]; next
 
 /** The immediate-delivery prompt (petToPetDelivery='immediate'): the target
  * is woken right away with the sender's name and id — the id because the
- * reply path is pet_say audience="<fromId>". Responding or ignoring is the
- * target's own call, exactly like any other wake. */
-export function buildCrossPetPrompt(facts: { fromName: string; fromId: string; text: string }): string {
+ * reply path is pet_say audience="<fromId>". The target's current affection
+ * toward the sender rides along so the reply carries history, not a blank
+ * slate. Responding or ignoring is the target's own call, exactly like any
+ * other wake. */
+export function buildCrossPetPrompt(facts: { fromName: string; fromId: string; text: string; affection: number }): string {
   return [
     `[来自另外桌宠 ${facts.fromName}]`,
     `${facts.text.slice(0, 200)}`,
-    `想回应就 pet_say 带 audience="${facts.fromId}"（同样 ≤40 字，气泡上会有 to 前缀）；不想理就安静待着。`,
+    `（你對 ${facts.fromName} 的好感 ${String(facts.affection)}，${moodOf(facts.affection)}）想回应就 pet_say 带 audience="${facts.fromId}"（同样 ≤40 字，气泡上会有 to 前缀）；不想理就安静待着。`,
   ].join(' ')
 }
 
