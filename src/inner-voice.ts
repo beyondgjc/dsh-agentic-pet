@@ -55,6 +55,10 @@ export interface InnerVoiceConfig {
    * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
    * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
   selfWakeBusyPolicy: SelfWakeBusyPolicy
+  /** 宠物间消息（pet_say 的 audience 指向另一只宠）的投递方式：
+   * 'queue' = 进收件箱，目标下次唤醒时 prompt 报数、pet_inbox 取文（默认，
+   * 像活物不刷屏）；'immediate' = 立即唤醒目标投递。 */
+  petToPetDelivery: 'immediate' | 'queue'
   /** Manually bound sessions (petId → sessionId): the user's own
    * conversations the inner voice should live in — highest priority, used
    * as-is (no creation, no rename, never auto-retired). Empty = automatic
@@ -101,6 +105,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyCooldownSeconds?: unknown
       touchReplyCooldownMinutes?: unknown
       selfWakeBusyPolicy?: unknown
+      petToPetDelivery?: unknown
       boundSessions?: unknown
     }
     // Cooldown in seconds (0 allowed = gate off). The legacy minute key folds
@@ -131,6 +136,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyProbability: finite01(v.touchReplyProbability, 0.3),
       touchReplyCooldownSeconds: secondsRaw === undefined ? 30 : clamp(Math.round(secondsRaw), 0, 600),
       selfWakeBusyPolicy: v.selfWakeBusyPolicy === 'defer' ? 'defer' : 'fire',
+      petToPetDelivery: v.petToPetDelivery === 'immediate' ? 'immediate' : 'queue',
       boundSessions,
     }
   } catch {
@@ -142,6 +148,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyProbability: 0.3,
       touchReplyCooldownSeconds: 30,
       selfWakeBusyPolicy: 'fire',
+      petToPetDelivery: 'queue',
       boundSessions: {},
     }
   }
@@ -240,6 +247,86 @@ export function takeNearDuePlan(list: WakePlan[], now: number, windowMs = 60_000
  * of bombing one wake per missed plan. */
 export function missedPlans(due: WakePlan[], bootAt: number): WakePlan[] {
   return due.filter(entry => entry.at < bootAt)
+}
+
+// ── 宠物间消息收件箱（pet_say audience → 另一只宠，排队投递侧） ────────────
+
+/** One queued pet-to-pet message. Bubbles are on the user's desktop — this
+ * is表演, not a private channel. */
+export interface PetMessage {
+  from: string
+  text: string
+  at: number
+}
+
+export const PET_MESSAGES_CAP = 20
+
+export function petMessagesStorePath(home: string): string {
+  return join(home, WHALE_DIR, 'pet-messages.json')
+}
+
+function messagesOf(raw: unknown): PetMessage[] {
+  if (!Array.isArray(raw)) return []
+  const out: PetMessage[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const rec = item as Record<string, unknown>
+    if (typeof rec.from !== 'string' || rec.from === ''
+      || typeof rec.text !== 'string' || rec.text === ''
+      || typeof rec.at !== 'number' || !Number.isFinite(rec.at)) continue
+    out.push({ from: rec.from, text: rec.text, at: rec.at })
+  }
+  return out
+}
+
+/** Load every pet's unread inbox: current → legacy → {} (defensive like the
+ * other stores). */
+export async function loadPetMessages(home: string): Promise<Record<string, PetMessage[]>> {
+  try {
+    const raw = await readGlobalJson(home, 'pet-messages.json') as { messages?: unknown }
+    const byPet = typeof raw.messages === 'object' && raw.messages !== null ? raw.messages : {}
+    const out: Record<string, PetMessage[]> = {}
+    for (const [petId, list] of Object.entries(byPet as Record<string, unknown>)) {
+      if (petId === '') continue
+      const messages = messagesOf(list)
+      if (messages.length > 0) out[petId] = messages
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+export async function savePetMessages(home: string, messages: Record<string, PetMessage[]>): Promise<void> {
+  try {
+    await writeGlobalJson(home, 'pet-messages.json', { messages } as unknown as Record<string, unknown>)
+  } catch (error: unknown) {
+    console.error(`pet-surface inner-voice: could not write pet messages: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/** Append one message to a pet's inbox, oldest dropped past the cap (a
+ * neglected inbox cannot grow without bound). */
+export function queuePetMessage(list: PetMessage[], message: PetMessage): PetMessage[] {
+  return [...list, message].slice(-PET_MESSAGES_CAP)
+}
+
+/** Consume the WHOLE inbox (pet_inbox 取文即清空; the wake prompt only
+ * announces counts). Returns the taken messages and the emptied tail. */
+export function takePetMessages(list: PetMessage[]): { taken: PetMessage[]; next: PetMessage[] } {
+  return { taken: [...list], next: [] }
+}
+
+/** The immediate-delivery prompt (petToPetDelivery='immediate'): the target
+ * is woken right away with the sender's name and id — the id because the
+ * reply path is pet_say audience="<fromId>". Responding or ignoring is the
+ * target's own call, exactly like any other wake. */
+export function buildCrossPetPrompt(facts: { fromName: string; fromId: string; text: string }): string {
+  return [
+    `[来自另外桌宠 ${facts.fromName}]`,
+    `${facts.text.slice(0, 200)}`,
+    `想回应就 pet_say 带 audience="${facts.fromId}"（同样 ≤40 字，气泡上会有 to 前缀）；不想理就安静待着。`,
+  ].join(' ')
 }
 
 /** Defensive extraction of the persisted generation counters (petId → n). */
@@ -395,6 +482,9 @@ export interface WakePromptFacts {
   /** 未到期的待执行计划（最近 ≤5 条）：世界时钟唤醒也告知模型自己的作息，
    * 继续、改时间或取消由模型决定。 */
   pendingPlans?: Array<{ at: number; intent: string }>
+  /** 收件箱未读（按来源宠聚合）：prompt 只报数不携全文——想看就调
+   * pet_inbox，读不读由她决定（宠物间消息的排队投递侧）。 */
+  unread?: Array<{ fromName: string; count: number }>
 }
 
 /** Local HH:mm for plan times: the model's clock talk is the USER's wall
@@ -439,6 +529,13 @@ export function buildWakePrompt(facts: WakePromptFacts): string {
     lines.push(
       `你还有 ${String(pending.length)} 个待执行计划：${pending.map(plan => `${wakePlanClock(plan.at)}「${plan.intent}」`).join('；')}。`
       + '继续等待、改时间或取消由你决定（pet_schedule_wake 同名覆盖即改期，pet_cancel_wake 撤销）。',
+    )
+  }
+  const unread = facts.unread ?? []
+  const unreadTotal = unread.reduce((sum, entry) => sum + entry.count, 0)
+  if (unreadTotal > 0) {
+    lines.push(
+      `你有 ${String(unreadTotal)} 条未读消息（来自${unread.map(entry => ` ${entry.fromName}×${String(entry.count)}`).join('、')}），想看就调 pet_inbox，不理也行。`,
     )
   }
   lines.push('醒来想到什么就说一句（pet_say），想配动作就 pet_do；也可以只是安静待着（两者都不调，正文写「…」）。')

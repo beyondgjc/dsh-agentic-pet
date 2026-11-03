@@ -51,6 +51,10 @@ export interface InnerVoiceConfig {
      * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
      * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
     selfWakeBusyPolicy: SelfWakeBusyPolicy;
+    /** 宠物间消息（pet_say 的 audience 指向另一只宠）的投递方式：
+     * 'queue' = 进收件箱，目标下次唤醒时 prompt 报数、pet_inbox 取文（默认，
+     * 像活物不刷屏）；'immediate' = 立即唤醒目标投递。 */
+    petToPetDelivery: 'immediate' | 'queue';
     /** Manually bound sessions (petId → sessionId): the user's own
      * conversations the inner voice should live in — highest priority, used
      * as-is (no creation, no rename, never auto-retired). Empty = automatic
@@ -94,6 +98,37 @@ export declare function takeNearDuePlan(list: WakePlan[], now: number, windowMs?
  * the catch-up wake says 「错过了 N 个计划」 and lists them together instead
  * of bombing one wake per missed plan. */
 export declare function missedPlans(due: WakePlan[], bootAt: number): WakePlan[];
+/** One queued pet-to-pet message. Bubbles are on the user's desktop — this
+ * is表演, not a private channel. */
+export interface PetMessage {
+    from: string;
+    text: string;
+    at: number;
+}
+export declare const PET_MESSAGES_CAP = 20;
+export declare function petMessagesStorePath(home: string): string;
+/** Load every pet's unread inbox: current → legacy → {} (defensive like the
+ * other stores). */
+export declare function loadPetMessages(home: string): Promise<Record<string, PetMessage[]>>;
+export declare function savePetMessages(home: string, messages: Record<string, PetMessage[]>): Promise<void>;
+/** Append one message to a pet's inbox, oldest dropped past the cap (a
+ * neglected inbox cannot grow without bound). */
+export declare function queuePetMessage(list: PetMessage[], message: PetMessage): PetMessage[];
+/** Consume the WHOLE inbox (pet_inbox 取文即清空; the wake prompt only
+ * announces counts). Returns the taken messages and the emptied tail. */
+export declare function takePetMessages(list: PetMessage[]): {
+    taken: PetMessage[];
+    next: PetMessage[];
+};
+/** The immediate-delivery prompt (petToPetDelivery='immediate'): the target
+ * is woken right away with the sender's name and id — the id because the
+ * reply path is pet_say audience="<fromId>". Responding or ignoring is the
+ * target's own call, exactly like any other wake. */
+export declare function buildCrossPetPrompt(facts: {
+    fromName: string;
+    fromId: string;
+    text: string;
+}): string;
 export declare function loadInnerVoiceStore(home: string): Promise<InnerVoiceStore>;
 export declare function saveInnerVoiceStore(home: string, store: InnerVoiceStore): Promise<void>;
 export declare function voiceSessionIdFor(petId: string): string;
@@ -162,6 +197,12 @@ export interface WakePromptFacts {
     pendingPlans?: Array<{
         at: number;
         intent: string;
+    }>;
+    /** 收件箱未读（按来源宠聚合）：prompt 只报数不携全文——想看就调
+     * pet_inbox，读不读由她决定（宠物间消息的排队投递侧）。 */
+    unread?: Array<{
+        fromName: string;
+        count: number;
     }>;
 }
 /** Local HH:mm for plan times: the model's clock talk is the USER's wall

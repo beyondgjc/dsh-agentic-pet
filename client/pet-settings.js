@@ -279,6 +279,25 @@ window.__ModuleLoader__.load({
                   if (policy !== 'defer') update({ innerVoice: { selfWakeBusyPolicy: 'defer' } })
                 } }, '忙时顺延'))
             })()),
+          h('div', { style: row }, '宠物间消息投递',
+            (function () {
+              var seg = function (active, side) {
+                return { padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+                  border: '1px solid ' + (active ? '#22c55e' : '#c9d4e0'),
+                  background: active ? '#22c55e' : '#f4f7fa',
+                  color: active ? '#ffffff' : '#1c2733',
+                  borderRadius: side === 'left' ? '4px 0 0 4px' : '0 4px 4px 0',
+                  marginLeft: side === 'right' ? -1 : 0 }
+              }
+              var mode = iv.petToPetDelivery === 'immediate' ? 'immediate' : 'queue'
+              return h('div', { style: { display: 'inline-flex' } },
+                h('button', { style: seg(mode === 'queue', 'left'), onClick: function () {
+                  if (mode !== 'queue') update({ innerVoice: { petToPetDelivery: 'queue' } })
+                } }, '排队等她醒'),
+                h('button', { style: seg(mode === 'immediate', 'right'), onClick: function () {
+                  if (mode !== 'immediate') update({ innerVoice: { petToPetDelivery: 'immediate' } })
+                } }, '立即叫醒'))
+            })()),
           h('div', { style: row }, '会话模式',
             (function () {
               var seg = function (active, side) {

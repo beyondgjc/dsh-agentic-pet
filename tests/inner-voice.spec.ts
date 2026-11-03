@@ -12,22 +12,28 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   buildChatPrompt,
+  buildCrossPetPrompt,
   buildTouchPrompt,
   buildWakePrompt,
   cancelPlans,
   loadInnerVoiceStore,
+  loadPetMessages,
   loadWakePlans,
   mintVoiceSessionId,
   missedPlans,
   moodOf,
+  queuePetMessage,
   readInnerVoiceConfig,
   saveInnerVoiceStore,
+  savePetMessages,
   saveWakePlans,
   takeDuePlans,
   takeNearDuePlan,
+  takePetMessages,
   touchPartWording,
   upsertPlan,
   voiceSessionIdFor,
+  type PetMessage,
   type WakePlan,
 } from '../src/inner-voice.ts'
 
@@ -54,6 +60,7 @@ describe('readInnerVoiceConfig', () => {
       touchReplyProbability: 0.3,
       touchReplyCooldownSeconds: 30,
       selfWakeBusyPolicy: 'fire',
+      petToPetDelivery: 'queue',
       boundSessions: {},
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
@@ -71,6 +78,7 @@ describe('readInnerVoiceConfig', () => {
         touchReplyProbability: 0,
         touchReplyCooldownSeconds: 45,
         selfWakeBusyPolicy: 'defer',
+        petToPetDelivery: 'immediate',
         boundSessions: { electron: 'whale598-electron', bad: 7, '': 'no-key' },
       },
     }), 'utf8')
@@ -82,6 +90,7 @@ describe('readInnerVoiceConfig', () => {
       touchReplyProbability: 0,
       touchReplyCooldownSeconds: 45,
       selfWakeBusyPolicy: 'defer',
+      petToPetDelivery: 'immediate',
       boundSessions: { electron: 'whale598-electron' },
     })
   })
@@ -95,6 +104,7 @@ describe('readInnerVoiceConfig', () => {
         touchReplyProbability: -1,
         touchReplyCooldownSeconds: 'five',
         selfWakeBusyPolicy: 'next-week',
+        petToPetDelivery: 'carrier-pigeon',
         preset: 42,
       },
     }), 'utf8')
@@ -105,6 +115,8 @@ describe('readInnerVoiceConfig', () => {
     expect(config.touchReplyCooldownSeconds).toBe(30)
     // 忙时策略只收白名单两个值，其余折叠默认 'fire'（到点必醒）。
     expect(config.selfWakeBusyPolicy).toBe('fire')
+    // 宠物间消息投递方式只收白名单两值，其余折叠默认 'queue'（排队等醒）。
+    expect(config.petToPetDelivery).toBe('queue')
     expect(config.preset).toBe('whale598')
   })
 
@@ -340,5 +352,58 @@ describe('self wake plans (自主作息)', () => {
     expect(touch).toContain('遛弯')
     const plain = buildTouchPrompt({ part: 'body', touchesToday: 1, affection: 9 })
     expect(plain.startsWith('[被触摸]')).toBe(true)
+  })
+})
+
+describe('pet-to-pet messaging (宠物间消息)', () => {
+  const message = (from: string, text: string, at = 1_000): PetMessage => ({ from, text, at })
+
+  it('round-trips the inbox store and folds malformed entries', async () => {
+    const home = await tempHome()
+    expect(await loadPetMessages(home)).toEqual({})
+    const messages = { electron: [message('pure', '一起玩吗')], pure: [message('electron', '好呀', 2)] }
+    await savePetMessages(home, messages)
+    expect(JSON.parse(await readFile(join(home, 'whale598', 'pet-messages.json'), 'utf8'))).toEqual({ messages })
+    expect(await loadPetMessages(home)).toEqual(messages)
+    // Malformed entries fold; empty lists and empty pet ids drop.
+    await writeFile(join(home, 'whale598', 'pet-messages.json'), JSON.stringify({
+      messages: {
+        electron: [message('ok', 'hi'), { from: 'no-text', at: 1 }, 'nope'],
+        '': [message('ghost', 'x')],
+        pure: [],
+      },
+    }), 'utf8')
+    expect(await loadPetMessages(home)).toEqual({ electron: [message('ok', 'hi')] })
+  })
+
+  it('caps the inbox at 20 (oldest dropped) and consumes whole on take', () => {
+    let list: PetMessage[] = []
+    for (let i = 0; i < 25; i += 1) list = queuePetMessage(list, message('pure', `m${String(i)}`, i))
+    expect(list).toHaveLength(20)
+    expect(list[0].text).toBe('m5') // the oldest five dropped
+    const taken = takePetMessages(list)
+    expect(taken.taken).toHaveLength(20)
+    expect(taken.next).toEqual([])
+  })
+
+  it('builds the cross-pet prompt with the sender tag and the reply path', () => {
+    const prompt = buildCrossPetPrompt({ fromName: '鲸鱼娘', fromId: 'electron', text: '一起玩吗' })
+    expect(prompt.startsWith('[来自另外桌宠 鲸鱼娘]')).toBe(true)
+    expect(prompt).toContain('一起玩吗')
+    expect(prompt).toContain('audience="electron"')
+    // 携文钳到 200（与气泡硬顶同源）
+    const long = buildCrossPetPrompt({ fromName: 'a', fromId: 'a', text: 'x'.repeat(300) })
+    expect(long).toContain('x'.repeat(200))
+    expect(long).not.toContain('x'.repeat(201))
+  })
+
+  it('announces unread counts on the wake prompt without carrying full text', () => {
+    const prompt = buildWakePrompt({
+      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      unread: [{ fromName: '鲸鱼娘', count: 2 }],
+    })
+    expect(prompt).toContain('你有 2 条未读消息（来自 鲸鱼娘×2）')
+    expect(prompt).toContain('pet_inbox')
+    expect(prompt).not.toContain('一起玩吗') // 全文只在 pet_inbox 里
   })
 })

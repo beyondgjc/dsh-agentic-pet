@@ -17,22 +17,28 @@ import { formatAvailableActions, resolveActionRequest } from './actions.ts'
 import {
   bondTier,
   buildChatPrompt,
+  buildCrossPetPrompt,
   buildGreetPrompt,
   buildTouchPrompt,
   buildWakePrompt,
   cancelPlans,
   loadInnerVoiceStore,
+  loadPetMessages,
   loadWakePlans,
   mintVoiceSessionId,
   missedPlans,
   moodOf,
+  queuePetMessage,
   readInnerVoiceConfig,
   saveInnerVoiceStore,
+  savePetMessages,
   saveWakePlans,
   takeDuePlans,
   takeNearDuePlan,
+  takePetMessages,
   touchPartWording,
   type InnerVoiceStore,
+  type PetMessage,
   type WakePlan,
 } from './inner-voice.ts'
 import { defaultPet, notifyPets, type PetEntry } from './registry.ts'
@@ -305,12 +311,24 @@ const voiceNextWakeAt = new Map<string, number>() // petId → epoch ms
 // plans in the sweep, while registerPetTools (a different fiber) schedules
 // and cancels them.
 const voiceWakePlans = new Map<string, WakePlan[]>()
+// Pet-to-pet inbox (pet_say audience=<other pet>, queued delivery): per-pet
+// unread messages, in-memory mirror of pet-messages.json (write-through).
+// Module-level because two seams share it — pet_say queues, pet_inbox drains,
+// fireWake announces counts on every wake.
+const voicePetMessages = new Map<string, PetMessage[]>()
+// Cross-pet rate limit: one directed message per from→to pair per minute —
+// the hard stop against two pets triggering each other into a bubble war.
+// In-memory (resets on restart): a throttle, not an audit record.
+const crossPetLastAt = new Map<string, number>()
 // Bridge from the tool plane to the driver's wake machinery (the wake path
 // lives in installPetDriver's closures, unreachable from registerPetTools):
 // the overdue-schedule immediate catch-up fire. Set at driver install,
 // cleared on entry so a re-install re-arms it; undefined until then — the
 // schedule tool degrades to storing the plan for the next sweep tick.
 let selfWakeSender: ((petId: string, plan: WakePlan) => void) | undefined
+// Same bridge, for cross-pet immediate delivery (pet_say audience): prompt
+// the TARGET pet's own session right away. Returns whether it was admitted.
+let crossPetDeliverer: ((petId: string, prompt: string) => Promise<boolean>) | undefined
 /** Write-through the in-memory plan map to disk (empty lists dropped — the
  * absence of a pet key IS an empty schedule). */
 const persistWakePlans = (home: string): void => {
@@ -320,6 +338,19 @@ const persistWakePlans = (home: string): void => {
   }
   void saveWakePlans(home, snapshot)
 }
+/** Write-through the in-memory pet-to-pet inbox to disk (same empty-key rule
+ * as persistWakePlans). */
+const persistPetMessages = (home: string): void => {
+  const snapshot: Record<string, PetMessage[]> = {}
+  for (const [petId, list] of voicePetMessages) {
+    if (list.length > 0) snapshot[petId] = list
+  }
+  void savePetMessages(home, snapshot)
+}
+/** The user's naming for a pet, falling back to the built-in defaults, then
+ * the raw id — used everywhere the model or a bubble needs a friendly name. */
+const petDisplayName = (petId: string): string =>
+  voiceNames.get(petId) ?? DEFAULT_PET_NAME[petId] ?? petId
 // Boot-greeting latch: one hello per dsh start, cleared on driver install.
 const voiceGreetedOnce = new Set<string>()
 // Custom display names (petId → label, from pet-settings.json `names`):
@@ -396,7 +427,10 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   voiceLastTouchReplyAt.clear()
   voiceNextWakeAt.clear()
   voiceWakePlans.clear()
+  voicePetMessages.clear()
   selfWakeSender = undefined
+  crossPetDeliverer = undefined
+  crossPetLastAt.clear()
   voiceGreetedOnce.clear()
   voiceNames.clear()
   voiceLastPrompt.clear()
@@ -543,6 +577,15 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     }
     const count = Object.values(plans).reduce((sum, list) => sum + list.length, 0)
     driverLog(home, `VOICE wake plans loaded: ${String(count)} plan(s) for ${String(Object.keys(plans).length)} pet(s)`)
+  })
+  // Pet-to-pet inbox load — merge-if-absent (same tool-plane race reasoning
+  // as the wake plans). Unread messages survive restarts by design.
+  void loadPetMessages(home).then((messages) => {
+    for (const [petId, list] of Object.entries(messages)) {
+      if (!voicePetMessages.has(petId)) voicePetMessages.set(petId, list)
+    }
+    const count = Object.values(messages).reduce((sum, list) => sum + list.length, 0)
+    driverLog(home, `VOICE pet messages loaded: ${String(count)} unread for ${String(Object.keys(messages).length)} pet(s)`)
   })
   // The pet capability seam (passed in — see index.ts for why not the
   // ctx getter): discovery, liveness, and the /status field matrix live
@@ -1257,6 +1300,13 @@ ${text}`
       .slice()
       .sort((a, b) => a.at - b.at)
       .slice(0, 5)
+    // 收件箱报数（排队投递侧）：只报「有 N 条来自 XX」，全文由 pet_inbox
+    // 取——读不读由她决定，这是宠物间消息的礼貌姿势。
+    const unreadByFrom = new Map<string, number>()
+    for (const message of voicePetMessages.get(petId) ?? []) {
+      unreadByFrom.set(message.from, (unreadByFrom.get(message.from) ?? 0) + 1)
+    }
+    const unread = [...unreadByFrom.entries()].map(([fromId, count]) => ({ fromName: petDisplayName(fromId), count }))
     const spoke = await promptVoice(petId, buildWakePrompt({
       affection: ledger.affection,
       bondValue: ledger.bond?.value ?? 0,
@@ -1270,6 +1320,7 @@ ${text}`
       missedCount: missedPlans(plans, bootAt).length,
       overdue,
       pendingPlans: pending.map(plan => ({ at: plan.at, intent: plan.intent })),
+      unread,
     }))
     if (spoke) voiceLastSpokeAt.set(petId, now)
   }
@@ -1278,6 +1329,10 @@ ${text}`
   selfWakeSender = (petId, plan) => {
     void fireWake(petId, { source: 'self', plans: [plan], overdue: true, label: 'self-wake' })
   }
+  // Tool-plane bridge for pet_say's immediate cross-pet delivery: a direct
+  // promptVoice into the TARGET pet's own session (queue mode stacks safely;
+  // no probability gate — a directed message is not the environment's dice).
+  crossPetDeliverer = (petId, prompt) => promptVoice(petId, prompt)
 
   /** Touch-reply trigger (docs/inner-voice.md §6.1). Low probability + a
    * per-pet cooldown keep a pat from turning into chatter; the user-busy gate
@@ -1627,10 +1682,11 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     const digestCursors = new Map<string, number>()
     scope.tools.register(defineTool({
       name: 'pet_say',
-      description: 'Make the desktop pet show a short speech bubble. Body language, not a message channel — put task content in your reply. Budget: show time is 4s + 60ms per character (capped at 8s), so ≤40 characters reads well and ~67+ hits the cap; keep it short and warm. A new bubble overwrites the current one, so you can interrupt yourself. Multiple pets may be running: see pet_state for their ids.',
+      description: 'Make the desktop pet show a short speech bubble. Body language, not a message channel — put task content in your reply. Budget: show time is 4s + 60ms per character (capped at 8s), so ≤40 characters reads well and ~67+ hits the cap; keep it short and warm. A new bubble overwrites the current one, so you can interrupt yourself. Multiple pets may be running: see pet_state for their ids (and selfPetId for which one you are). audience: omit or "user" to speak to the user; or ANOTHER pet\'s id to talk to that pet — the bubble (prefixed "to <name>") still shows on YOUR body: pet-to-pet speech is desktop performance, never a private channel. Directed messages must be even shorter (≤40), the target must be online and not yourself, one per minute per pair, and delivery follows the configured mode (target woken immediately with your message, or queued into its inbox and announced at its next wake — it decides whether to read and reply with audience pointing back at you).',
       parameters: {
-        text: { type: 'string', required: true, description: 'What the pet says; ≤40 characters recommended (hard cap 200), in the conversation language.' },
-        pet: { type: 'string', description: 'Which pet speaks: its id from pet_state. Omit for the default pet.' },
+        text: { type: 'string', required: true, description: 'What the pet says; ≤40 characters recommended (hard cap 200), in the conversation language. Directed messages (audience) should be ≤40 — they arrive as someone else\'s words on another pet\'s wake.' },
+        pet: { type: 'string', description: 'Which pet speaks: its id from pet_state. Omit for the pet this session belongs to (or the default pet).' },
+        audience: { type: 'string', description: '"user" (default) = speak to the user; or another pet\'s id to talk to THAT pet. The reply comes back as a pet_say with audience pointing at you (or via its pet_inbox).' },
       },
       output: {
         schema: { type: 'string' },
@@ -1639,13 +1695,36 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
       async execute(args, exec) {
         requireOwnedSession(exec)
         const text = String(args.text).slice(0, 200)
-        console.log(`pet-surface driver: pet_say ${JSON.stringify(text).slice(0, 60)}`)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          // 定向分支（audience = 另一只宠）：先做全部校验再出气泡，失败即
+          // 整体失败（不会出现"气泡演了但消息没投"的半程）。
+          let bubble = text
+          let rateKey: string | undefined
+          let target: PetEntry | undefined
+          const audience = typeof args.audience === 'string' && args.audience !== '' && args.audience !== 'user'
+            ? args.audience.trim()
+            : undefined
+          if (audience !== undefined) {
+            const pets = await pet.list()
+            target = pets.find(candidate => candidate.id === audience)
+            if (target === undefined) {
+              throw new Error(`no running pet named "${audience}" to talk to (running: ${pets.map(candidate => candidate.id).join(', ') || 'none'})`)
+            }
+            if (target.id === entry.id) throw new Error('audience 不能是自己——对用户说话就省略 audience')
+            rateKey = `${entry.id}->${target.id}`
+            const lastAt = crossPetLastAt.get(rateKey) ?? 0
+            const leftSeconds = Math.ceil((lastAt + 60_000 - Date.now()) / 1000)
+            if (leftSeconds > 0) {
+              throw new Error(`给 ${target.id} 的定向消息太快（每对每分钟 1 条），还有 ${String(leftSeconds)} 秒——气泡交流不必这么急`)
+            }
+            // 定向消息更该短：气泡带 to 前缀，用户的桌面围观是第一观众。
+            bubble = `to ${petDisplayName(target.id)}：${text}`
+          }
           await pet.call(entry, '/say', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({ text: bubble }),
           })
           // A spoken bubble is the inner voice's pending-lock release and its
           // "last spoke" truth (docs/inner-voice.md §7); a user-session say
@@ -1653,12 +1732,72 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           if (markVoiceSpoke(entry.id)) {
             driverLog(home, `VOICE pending released by say pet=${entry.id} (inner-voice turn complete)`)
           }
+          // 气泡成功后再投递（校验在 /say 之前，投递失败不回滚已演的气泡——
+          // 表演与投递是两个动作，模型从返回值得知投递结果）。
+          let audienceOut: Record<string, unknown> | undefined
+          if (target !== undefined && rateKey !== undefined) {
+            crossPetLastAt.set(rateKey, Date.now())
+            const config = await readInnerVoiceConfig(home)
+            if (config.petToPetDelivery === 'immediate') {
+              if (crossPetDeliverer !== undefined) {
+                const admitted = await crossPetDeliverer(target.id, buildCrossPetPrompt({
+                  fromName: petDisplayName(entry.id),
+                  fromId: entry.id,
+                  text,
+                }))
+                audienceOut = { pet: target.id, delivered: admitted ? 'immediate' : 'failed' }
+              } else {
+                // driver 未就绪：降级排队，不丢消息
+                voicePetMessages.set(target.id, queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() }))
+                persistPetMessages(home)
+                audienceOut = { pet: target.id, delivered: 'queued', note: 'immediate 不可用，已降级排队' }
+              }
+            } else {
+              voicePetMessages.set(target.id, queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() }))
+              persistPetMessages(home)
+              audienceOut = { pet: target.id, delivered: 'queued' }
+            }
+            driverLog(home, `PET_SAY cross from=${entry.id} to=${target.id} delivered=${String(audienceOut.delivered)} text=${JSON.stringify(text)}`)
+          }
+          // The renderer's show-time formula: the model can pace a say→act
+          // sequence without guessing (bubble includes the to-prefix).
+          return JSON.stringify({
+            shown: true,
+            durationMs: 4000 + Math.min(bubble.length * 60, 4000),
+            ...(audienceOut !== undefined ? { audience: audienceOut } : {}),
+          })
         } catch (error: unknown) {
           throw classify(error)
         }
-        // The renderer's show-time formula: the model can pace a say→act
-        // sequence without guessing.
-        return JSON.stringify({ shown: true, durationMs: 4000 + Math.min(text.length * 60, 4000) })
+      },
+    }))
+    scope.tools.register(defineTool({
+      name: 'pet_inbox',
+      description: 'Read and consume YOUR unread pet-to-pet messages (other pets talking to you via pet_say audience): {messages: [{from, fromName, text, at}], count}. The wake prompt only announces counts ("有 N 条来自 XX 的未读消息") — this is how you actually read them, and fetching clears the inbox. Empty result = nothing pending. Ignoring messages is allowed (they just sit here, oldest dropped past 20); replying is pet_say with audience pointing back at the sender.',
+      parameters: {},
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(_args, exec) {
+        requireOwnedSession(exec)
+        const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
+        const petId = sessionId !== undefined ? voiceOwners.get(sessionId) : undefined
+        if (petId === undefined) {
+          throw new Error('本会话没有绑定宠物，没有收件箱——收件箱属于宠物自己的内心戏会话')
+        }
+        const taken = takePetMessages(voicePetMessages.get(petId) ?? [])
+        if (taken.next.length > 0) voicePetMessages.set(petId, taken.next)
+        else voicePetMessages.delete(petId)
+        persistPetMessages(home)
+        const messages = taken.taken.map(message => ({
+          from: message.from,
+          fromName: petDisplayName(message.from),
+          text: message.text,
+          at: message.at,
+        }))
+        driverLog(home, `PET_INBOX pet=${petId} consumed=${String(messages.length)}`)
+        return JSON.stringify({ messages, count: messages.length })
       },
     }))
     scope.tools.register(defineTool({

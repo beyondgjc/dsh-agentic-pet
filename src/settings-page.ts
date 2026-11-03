@@ -44,6 +44,9 @@ interface InnerVoiceSettings {
   /** 自主唤醒（pet_schedule_wake 计划）到点遇用户忙的策略：
    * 'fire' = 到点必醒（默认）；'defer' = 忙时顺延下一拍重试。 */
   selfWakeBusyPolicy?: 'defer' | 'fire'
+  /** 宠物间消息（pet_say audience 指向另一只宠）的投递方式：
+   * 'queue' = 收件箱 + 下次唤醒报数（默认）；'immediate' = 立即唤醒目标。 */
+  petToPetDelivery?: 'immediate' | 'queue'
   boundSessions?: Record<string, string>
 }
 
@@ -93,6 +96,7 @@ const DEFAULT_SETTINGS: PetSettings = {
     touchReplyProbability: 0.3,
     touchReplyCooldownSeconds: 30,
     selfWakeBusyPolicy: 'fire',
+    petToPetDelivery: 'queue',
     boundSessions: {},
   },
   tts: { enabled: false },
@@ -190,6 +194,10 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     // 自主唤醒忙时策略：只收白名单里的两个值，其余折叠默认（'fire'）。
     if (v.selfWakeBusyPolicy === 'defer' || v.selfWakeBusyPolicy === 'fire') {
       innerVoice.selfWakeBusyPolicy = v.selfWakeBusyPolicy
+    }
+    // 宠物间消息投递方式：白名单两值，其余折叠默认（'queue'）。
+    if (v.petToPetDelivery === 'immediate' || v.petToPetDelivery === 'queue') {
+      innerVoice.petToPetDelivery = v.petToPetDelivery
     }
     // Manual binding: petId → session id, empty strings dropped; an absent
     // key in the patch leaves the stored map untouched (partial updates).
