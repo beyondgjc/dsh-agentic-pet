@@ -28,6 +28,7 @@ import {
   mintVoiceSessionId,
   missedPlans,
   moodOf,
+  checkPetMessageRate,
   queuePetMessage,
   readInnerVoiceConfig,
   saveInnerVoiceStore,
@@ -350,10 +351,10 @@ const voiceWakePlans = new Map<string, WakePlan[]>()
 // Module-level because two seams share it — pet_say queues, pet_inbox drains,
 // fireWake announces counts on every wake.
 const voicePetMessages = new Map<string, PetMessage[]>()
-// Cross-pet rate limit: one directed message per from→to pair per minute —
-// the hard stop against two pets triggering each other into a bubble war.
-// In-memory (resets on restart): a throttle, not an audit record.
-const crossPetLastAt = new Map<string, number>()
+// Cross-pet rate limit: tiered sliding-window per from→to pair (the pair's
+// recent send timestamps; checkPetMessageRate owns the caps). In-memory
+// (resets on restart): a throttle, not an audit record.
+const crossPetLog = new Map<string, number[]>()
 // Bridge from the tool plane to the driver's wake machinery (the wake path
 // lives in installPetDriver's closures, unreachable from registerPetTools):
 // the overdue-schedule immediate catch-up fire. Set at driver install,
@@ -464,7 +465,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   voicePetMessages.clear()
   selfWakeSender = undefined
   crossPetDeliverer = undefined
-  crossPetLastAt.clear()
+  crossPetLog.clear()
   voiceGreetedOnce.clear()
   voiceNames.clear()
   voiceLastPrompt.clear()
@@ -1732,7 +1733,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     const digestCursors = new Map<string, number>()
     scope.tools.register(defineTool({
       name: 'pet_say',
-      description: 'Make the desktop pet show a short speech bubble. Body language, not a message channel — put task content in your reply. Budget: show time is 4s + 60ms per character (capped at 8s), so ≤40 characters reads well and ~67+ hits the cap; keep it short and warm. A new bubble overwrites the current one, so you can interrupt yourself. Multiple pets may be running: see pet_state for their ids (and selfPetId for which one you are). audience: omit or "user" to speak to the user; or ANOTHER pet\'s id to talk to that pet — the bubble (prefixed "to <name>") still shows on YOUR body: pet-to-pet speech is desktop performance, never a private channel. Directed messages must be even shorter (≤40), the target must be online and not yourself, one per minute per pair, and delivery follows the configured mode (~5s after your bubble the target is woken with your message, or it is queued into its inbox and announced at its next wake — it decides whether to read and reply with audience pointing back at you).',
+      description: 'Make the desktop pet show a short speech bubble. Body language, not a message channel — put task content in your reply. Budget: show time is 4s + 60ms per character (capped at 8s), so ≤40 characters reads well and ~67+ hits the cap; keep it short and warm. A new bubble overwrites the current one, so you can interrupt yourself. Multiple pets may be running: see pet_state for their ids (and selfPetId for which one you are). audience: omit or "user" to speak to the user; or ANOTHER pet\'s id to talk to that pet — the bubble (prefixed "to <name>") still shows on YOUR body: pet-to-pet speech is desktop performance, never a private channel. Directed messages must be even shorter (≤40), the target must be online and not yourself, tiered rate-limits per pair apply (5 in 5min / 8 in 10min / 10 in 30min / 15 per hour by default, configurable), and delivery follows the configured mode (~5s after your bubble the target is woken with your message, or it is queued into its inbox and announced at its next wake — it decides whether to read and reply with audience pointing back at you).',
       parameters: {
         text: { type: 'string', required: true, description: 'What the pet says; ≤40 characters recommended (hard cap 200), in the conversation language. Directed messages (audience) should be ≤40 — they arrive as someone else\'s words on another pet\'s wake.' },
         pet: { type: 'string', description: 'Which pet speaks: its id from pet_state. Omit for the pet this session belongs to (or the default pet).' },
@@ -1747,10 +1748,13 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         const text = String(args.text).slice(0, 200)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          // 配置一次读齐（定向限频 + 投递方式都要用）。
+          const config = await readInnerVoiceConfig(home)
           // 定向分支（audience = 另一只宠）：先做全部校验再出气泡，失败即
           // 整体失败（不会出现"气泡演了但消息没投"的半程）。
           let bubble = text
           let rateKey: string | undefined
+          let pendingTimestamps: number[] = []
           let target: PetEntry | undefined
           const audience = typeof args.audience === 'string' && args.audience !== '' && args.audience !== 'user'
             ? args.audience.trim()
@@ -1763,11 +1767,12 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             }
             if (target.id === entry.id) throw new Error('audience 不能是自己——对用户说话就省略 audience')
             rateKey = `${entry.id}->${target.id}`
-            const lastAt = crossPetLastAt.get(rateKey) ?? 0
-            const leftSeconds = Math.ceil((lastAt + 60_000 - Date.now()) / 1000)
-            if (leftSeconds > 0) {
-              throw new Error(`给 ${target.id} 的定向消息太快（每对每分钟 1 条），还有 ${String(leftSeconds)} 秒——气泡交流不必这么急`)
+            const config = await readInnerVoiceConfig(home)
+            const rate = checkPetMessageRate(crossPetLog.get(rateKey) ?? [], Date.now(), config.petMessageLimits)
+            if (!rate.ok) {
+              throw new Error(`给 ${target.id} 的定向消息超频（${String(rate.windowMinutes)} 分钟窗内已 ${String(rate.count)}/${String(rate.cap)} 条），${String(rate.retryAfterSeconds)} 秒后可再发——气泡交流不必这么急`)
             }
+            pendingTimestamps = rate.recent
             // 定向消息更该短：气泡带 to 前缀，用户的桌面围观是第一观众。
             bubble = `to ${petDisplayName(target.id)}：${text}`
           }
@@ -1786,8 +1791,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           // 表演与投递是两个动作，模型从返回值得知投递结果）。
           let audienceOut: Record<string, unknown> | undefined
           if (target !== undefined && rateKey !== undefined) {
-            crossPetLastAt.set(rateKey, Date.now())
-            const config = await readInnerVoiceConfig(home)
+            crossPetLog.set(rateKey, [...pendingTimestamps, Date.now()])
             if (config.petToPetDelivery === 'immediate') {
               if (crossPetDeliverer !== undefined) {
                 // 延迟 5s 再投递：让说话宠的气泡先落地被看到，别让目标与气泡

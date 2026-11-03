@@ -55,6 +55,9 @@ export interface InnerVoiceConfig {
      * 'queue' = 进收件箱，目标下次唤醒时 prompt 报数、pet_inbox 取文（默认，
      * 像活物不刷屏）；'immediate' = 气泡 5s 后立即唤醒目标投递。 */
     petToPetDelivery: 'immediate' | 'queue';
+    /** 宠物间定向消息的分档限频上限（滑动窗口，一小时内）：任一档超了即拒，
+     * 四个数值用户可配。 */
+    petMessageLimits: PetMessageLimits;
     /** Manually bound sessions (petId → sessionId): the user's own
      * conversations the inner voice should live in — highest priority, used
      * as-is (no creation, no rename, never auto-retired). Empty = automatic
@@ -120,6 +123,30 @@ export declare function takePetMessages(list: PetMessage[]): {
     taken: PetMessage[];
     next: PetMessage[];
 };
+export interface PetMessageLimits {
+    minutes5: number;
+    minutes10: number;
+    minutes30: number;
+    minutes60: number;
+}
+export declare const DEFAULT_PET_MESSAGE_LIMITS: PetMessageLimits;
+export type PetMessageRateVerdict = {
+    ok: true;
+    recent: number[];
+} | {
+    ok: false;
+    windowMinutes: number;
+    cap: number;
+    count: number;
+    retryAfterSeconds: number;
+};
+/** The tiered sliding-window check for one from→to pair. `timestamps` are the
+ * pair's recent send times; the hour window prunes them (静默一小时后自然
+ * 重新开始), then each tier rejects when its window already holds the cap.
+ * The first (narrowest) violated tier is reported, with the earliest moment
+ * a slot frees up. `recent` on success = the pruned list — the caller appends
+ * its own timestamp after the send succeeds. */
+export declare function checkPetMessageRate(timestamps: number[], now: number, limits: PetMessageLimits): PetMessageRateVerdict;
 /** The immediate-delivery prompt (petToPetDelivery='immediate'): the target
  * is woken right away with the sender's name and id — the id because the
  * reply path is pet_say audience="<fromId>". The target's current affection

@@ -59,6 +59,9 @@ export interface InnerVoiceConfig {
    * 'queue' = 进收件箱，目标下次唤醒时 prompt 报数、pet_inbox 取文（默认，
    * 像活物不刷屏）；'immediate' = 气泡 5s 后立即唤醒目标投递。 */
   petToPetDelivery: 'immediate' | 'queue'
+  /** 宠物间定向消息的分档限频上限（滑动窗口，一小时内）：任一档超了即拒，
+   * 四个数值用户可配。 */
+  petMessageLimits: PetMessageLimits
   /** Manually bound sessions (petId → sessionId): the user's own
    * conversations the inner voice should live in — highest priority, used
    * as-is (no creation, no rename, never auto-retired). Empty = automatic
@@ -106,6 +109,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyCooldownMinutes?: unknown
       selfWakeBusyPolicy?: unknown
       petToPetDelivery?: unknown
+      petMessageLimits?: unknown
       boundSessions?: unknown
     }
     // Cooldown in seconds (0 allowed = gate off). The legacy minute key folds
@@ -137,6 +141,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyCooldownSeconds: secondsRaw === undefined ? 30 : clamp(Math.round(secondsRaw), 0, 600),
       selfWakeBusyPolicy: v.selfWakeBusyPolicy === 'defer' ? 'defer' : 'fire',
       petToPetDelivery: v.petToPetDelivery === 'immediate' ? 'immediate' : 'queue',
+      petMessageLimits: parsePetMessageLimits(v.petMessageLimits),
       boundSessions,
     }
   } catch {
@@ -149,6 +154,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyCooldownSeconds: 30,
       selfWakeBusyPolicy: 'fire',
       petToPetDelivery: 'queue',
+      petMessageLimits: { ...DEFAULT_PET_MESSAGE_LIMITS },
       boundSessions: {},
     }
   }
@@ -315,6 +321,64 @@ export function queuePetMessage(list: PetMessage[], message: PetMessage): PetMes
  * announces counts). Returns the taken messages and the emptied tail. */
 export function takePetMessages(list: PetMessage[]): { taken: PetMessage[]; next: PetMessage[] } {
   return { taken: [...list], next: [] }
+}
+
+// ── 宠物间定向消息的分档限频（滑动窗口） ─────────────────────────────────
+// 一小时内突发友好、渐进收敛：任一 5 分钟窗内 ≤5 条、任一 10 分钟窗 ≤8、
+// 任一 30 分钟窗 ≤10、任一小时窗 ≤15；静默一小时后窗口自然清空（重新开始）。
+// 四个上限用户可配；窗口宽度固定（配置只管"多少条"，不管"多长窗"）。
+
+export interface PetMessageLimits {
+  minutes5: number
+  minutes10: number
+  minutes30: number
+  minutes60: number
+}
+
+export const DEFAULT_PET_MESSAGE_LIMITS: PetMessageLimits = { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 }
+
+const PET_MESSAGE_WINDOW_MINUTES = { minutes5: 5, minutes10: 10, minutes30: 30, minutes60: 60 } as const
+
+/** Defensive per-key parse: a finite non-negative number passes (rounded),
+ * anything else folds to the default for that tier. */
+function parsePetMessageLimits(raw: unknown): PetMessageLimits {
+  const record = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
+  const limitOf = (key: keyof PetMessageLimits): number => {
+    const value = record[key]
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : DEFAULT_PET_MESSAGE_LIMITS[key]
+  }
+  return { minutes5: limitOf('minutes5'), minutes10: limitOf('minutes10'), minutes30: limitOf('minutes30'), minutes60: limitOf('minutes60') }
+}
+
+export type PetMessageRateVerdict =
+  | { ok: true; recent: number[] }
+  | { ok: false; windowMinutes: number; cap: number; count: number; retryAfterSeconds: number }
+
+/** The tiered sliding-window check for one from→to pair. `timestamps` are the
+ * pair's recent send times; the hour window prunes them (静默一小时后自然
+ * 重新开始), then each tier rejects when its window already holds the cap.
+ * The first (narrowest) violated tier is reported, with the earliest moment
+ * a slot frees up. `recent` on success = the pruned list — the caller appends
+ * its own timestamp after the send succeeds. */
+export function checkPetMessageRate(timestamps: number[], now: number, limits: PetMessageLimits): PetMessageRateVerdict {
+  const horizon = PET_MESSAGE_WINDOW_MINUTES.minutes60 * 60_000
+  const pruned = timestamps.filter(at => now - at < horizon)
+  for (const key of Object.keys(PET_MESSAGE_WINDOW_MINUTES) as Array<keyof PetMessageLimits>) {
+    const windowMs = PET_MESSAGE_WINDOW_MINUTES[key] * 60_000
+    const cap = limits[key]
+    const inWindow = pruned.filter(at => now - at < windowMs)
+    if (inWindow.length >= cap) {
+      const oldest = Math.min(...inWindow)
+      return {
+        ok: false,
+        windowMinutes: PET_MESSAGE_WINDOW_MINUTES[key],
+        cap,
+        count: inWindow.length,
+        retryAfterSeconds: Math.max(1, Math.ceil((oldest + windowMs - now) / 1000)),
+      }
+    }
+  }
+  return { ok: true, recent: pruned }
 }
 
 /** The immediate-delivery prompt (petToPetDelivery='immediate'): the target

@@ -47,6 +47,9 @@ interface InnerVoiceSettings {
   /** 宠物间消息（pet_say audience 指向另一只宠）的投递方式：
    * 'queue' = 收件箱 + 下次唤醒报数（默认）；'immediate' = 立即唤醒目标。 */
   petToPetDelivery?: 'immediate' | 'queue'
+  /** 宠物间定向消息的分档限频上限（滑动窗口分钟数固定 5/10/30/60）：
+   * 任一档超了即拒。缺省 5/8/10/15。 */
+  petMessageLimits?: { minutes5?: number; minutes10?: number; minutes30?: number; minutes60?: number }
   boundSessions?: Record<string, string>
 }
 
@@ -97,6 +100,7 @@ const DEFAULT_SETTINGS: PetSettings = {
     touchReplyCooldownSeconds: 30,
     selfWakeBusyPolicy: 'fire',
     petToPetDelivery: 'queue',
+    petMessageLimits: { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 },
     boundSessions: {},
   },
   tts: { enabled: false },
@@ -198,6 +202,27 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     // 宠物间消息投递方式：白名单两值，其余折叠默认（'queue'）。
     if (v.petToPetDelivery === 'immediate' || v.petToPetDelivery === 'queue') {
       innerVoice.petToPetDelivery = v.petToPetDelivery
+    }
+    // 宠物间定向消息分档限频上限：逐档钳 0-999，patch 缺的档位保持现值。
+    const patchLimits = v.petMessageLimits as { minutes5?: unknown; minutes10?: unknown; minutes30?: unknown; minutes60?: unknown } | undefined
+    if (typeof patchLimits === 'object' && patchLimits !== null) {
+      const merged = { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15, ...innerVoice.petMessageLimits }
+      const base = {
+        minutes5: merged.minutes5 ?? 5,
+        minutes10: merged.minutes10 ?? 8,
+        minutes30: merged.minutes30 ?? 10,
+        minutes60: merged.minutes60 ?? 15,
+      }
+      const clampLimit = (value: unknown, fallback: number): number => {
+        const parsed = clampNumber(value, 0, 999)
+        return parsed === undefined ? fallback : parsed
+      }
+      innerVoice.petMessageLimits = {
+        minutes5: clampLimit(patchLimits.minutes5, base.minutes5),
+        minutes10: clampLimit(patchLimits.minutes10, base.minutes10),
+        minutes30: clampLimit(patchLimits.minutes30, base.minutes30),
+        minutes60: clampLimit(patchLimits.minutes60, base.minutes60),
+      }
     }
     // Manual binding: petId → session id, empty strings dropped; an absent
     // key in the patch leaves the stored map untouched (partial updates).

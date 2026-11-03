@@ -17,6 +17,8 @@ import {
   buildTouchPrompt,
   buildWakePrompt,
   cancelPlans,
+  checkPetMessageRate,
+  DEFAULT_PET_MESSAGE_LIMITS,
   loadInnerVoiceStore,
   loadPetMessages,
   loadWakePlans,
@@ -62,6 +64,7 @@ describe('readInnerVoiceConfig', () => {
       touchReplyCooldownSeconds: 30,
       selfWakeBusyPolicy: 'fire',
       petToPetDelivery: 'queue',
+      petMessageLimits: { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 },
       boundSessions: {},
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
@@ -80,6 +83,7 @@ describe('readInnerVoiceConfig', () => {
         touchReplyCooldownSeconds: 45,
         selfWakeBusyPolicy: 'defer',
         petToPetDelivery: 'immediate',
+        petMessageLimits: { minutes5: 2, minutes10: 3, minutes30: 4, minutes60: 6 },
         boundSessions: { electron: 'whale598-electron', bad: 7, '': 'no-key' },
       },
     }), 'utf8')
@@ -92,6 +96,7 @@ describe('readInnerVoiceConfig', () => {
       touchReplyCooldownSeconds: 45,
       selfWakeBusyPolicy: 'defer',
       petToPetDelivery: 'immediate',
+      petMessageLimits: { minutes5: 2, minutes10: 3, minutes30: 4, minutes60: 6 },
       boundSessions: { electron: 'whale598-electron' },
     })
   })
@@ -417,5 +422,64 @@ describe('greet prompt (启动问好)', () => {
     expect(prompt).toContain('你的名字是「鲸鱼娘」')
     expect(prompt).toContain('好感 2')
     expect(prompt).toContain('一起过了 3 天')
+  })
+})
+
+describe('checkPetMessageRate (定向消息分档限频)', () => {
+  it('allows a burst up to the 5-minute tier and names the violated tier with its retry time', () => {
+    const limits = { ...DEFAULT_PET_MESSAGE_LIMITS }
+    const now = 1_000_000
+    let timestamps: number[] = []
+    for (let i = 0; i < 5; i += 1) {
+      const verdict = checkPetMessageRate(timestamps, now + i * 1000, limits)
+      expect(verdict.ok).toBe(true)
+      // 调用约定：发送成功后 recent + 本次时间戳（与 pet_say 一致）
+      if (verdict.ok) timestamps = [...verdict.recent, now + i * 1000]
+    }
+    const sixth = checkPetMessageRate(timestamps, now + 5000, limits)
+    expect(sixth.ok).toBe(false)
+    if (!sixth.ok) {
+      expect(sixth.windowMinutes).toBe(5)
+      expect(sixth.cap).toBe(5)
+      expect(sixth.count).toBe(5) // 检查时窗内已有 5 条，第 6 条是候选
+      expect(sixth.retryAfterSeconds).toBeGreaterThan(0)
+    }
+  })
+
+  it('relaxes as messages age out (aging frees the narrow window)', () => {
+    const limits = { ...DEFAULT_PET_MESSAGE_LIMITS }
+    const now = 1_000_000
+    // 5 messages inside the first 4 minutes, then check at +6min: the narrow
+    // window (last 5 min = [t+1min, t+6min]) holds only 4 — the 6th passes
+    // (10-minute tier: 6 < 8, still fine).
+    const timestamps = [0, 60_000, 120_000, 180_000, 240_000].map(offset => now + offset)
+    const verdict = checkPetMessageRate(timestamps, now + 6 * 60_000, limits)
+    expect(verdict.ok).toBe(true)
+  })
+
+  it('enforces the hour tier and forgets everything after a silent hour', () => {
+    const limits = { minutes5: 100, minutes10: 100, minutes30: 100, minutes60: 3 }
+    const now = 1_000_000
+    const timestamps = [0, 60_000, 120_000].map(offset => now + offset)
+    const fourth = checkPetMessageRate([...timestamps, now + 130_000], now + 130_000, limits)
+    expect(fourth.ok).toBe(false)
+    if (!fourth.ok) expect(fourth.windowMinutes).toBe(60)
+    // 静默一小时：全部老化出窗，重新开始算
+    const fresh = checkPetMessageRate(timestamps, now + 61 * 60_000, limits)
+    expect(fresh.ok).toBe(true)
+  })
+
+  it('honors custom limits (the four caps are user-configurable)', () => {
+    const limits = { minutes5: 1, minutes10: 1, minutes30: 1, minutes60: 2 }
+    const now = 1_000_000
+    expect(checkPetMessageRate([], now, limits).ok).toBe(true)
+    const second = checkPetMessageRate([now - 1000], now, limits)
+    expect(second.ok).toBe(false)
+    if (!second.ok) expect(second.windowMinutes).toBe(5)
+    // hour cap 2: two in-hour messages block the third even spread past the
+    // narrower windows
+    const third = checkPetMessageRate([now - 50 * 60_000, now - 45 * 60_000], now, limits)
+    expect(third.ok).toBe(false)
+    if (!third.ok) expect(third.windowMinutes).toBe(60)
   })
 })
