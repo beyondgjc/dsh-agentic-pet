@@ -23,6 +23,11 @@ declare module '@deepseek-ai/cordis' {
                 readonly [locale: string]: string | undefined;
             };
             signal?: AbortSignal;
+            /** Host-side correlation (the asking controller's agent identity).
+             * Read defensively — the ledger records null when absent. */
+            agent?: {
+                id?: unknown;
+            };
         }, next: () => Promise<unknown>): Promise<unknown>;
         'user-questions/request'(request: {
             questions: Array<{
@@ -37,6 +42,10 @@ declare module '@deepseek-ai/cordis' {
                 multiSelect?: boolean;
             }>;
             signal?: AbortSignal;
+            /** Host-side correlation — see approval/request. */
+            agent?: {
+                id?: unknown;
+            };
         }, next: () => Promise<unknown>): Promise<unknown>;
     }
 }

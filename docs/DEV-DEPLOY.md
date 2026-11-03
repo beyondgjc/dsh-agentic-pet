@@ -14,8 +14,10 @@
 **npm 安装形态**（`"dsh-agentic-pet": "0.4.5"`，node_modules 变成真实目录，vendor 的
 symlink 被清除，vendor/dsh-pet-app 被清空）：
 
-- **日常迭代 = 发补丁版**：改码 → 本地构建（§3.2 的 tsc+tsdown）→
-  `node scripts/release.mjs 0.4.x` → 桌面端插件页更新。
+- **日常迭代 = 改码 → 本地构建（§3.2 的 tsc+tsdown）→ commit（构建产物 lib/ 随手进 repo），
+  不发版**。攒批到用户拍板发版时才 `node scripts/release.mjs 0.4.x` → 桌面端插件页更新。
+  发版前必查 `npm view dsh-agentic-pet version` 与 `git log`——多窗口并行可能已占用下一个
+  版本号（0.4.6 撞号先例）。
 - **§3 的 vendor 部署流程**仅在 profile 改回 `file:vendor/dsh-pet-app` 时才需要——流程命令
   保留备查；当前形态下向 vendor 拷贝是**无效写入**（运行时不读它）。
 - ⚠️ 教训：部署前先核实通道——`cat ~/.dsh/profiles/desktop/package.json` 看依赖是

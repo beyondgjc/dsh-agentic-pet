@@ -61,6 +61,9 @@ declare module '@deepseek-ai/cordis' {
         reason?: string
         displayReason?: { readonly en?: string; readonly [locale: string]: string | undefined }
         signal?: AbortSignal
+        /** Host-side correlation (the asking controller's agent identity).
+         * Read defensively — the ledger records null when absent. */
+        agent?: { id?: unknown }
       },
       next: () => Promise<unknown>,
     ): Promise<unknown>
@@ -75,6 +78,8 @@ declare module '@deepseek-ai/cordis' {
           multiSelect?: boolean
         }>
         signal?: AbortSignal
+        /** Host-side correlation — see approval/request. */
+        agent?: { id?: unknown }
       },
       next: () => Promise<unknown>,
     ): Promise<unknown>
@@ -585,6 +590,52 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     }
   }
 
+  // Per-pet send queues: concurrent pushState calls (rapid turn transitions)
+  // must reach each pet in INITIATION order — separate HTTP requests carry no
+  // ordering guarantee, and a stale "working" landing after "idle" would pin
+  // the pet's light until the next event. The dedup entry is written at SEND
+  // time inside the queue, so the table always matches what actually went
+  // out last. A slow (5s-timeout) push delays only its own pet's chain;
+  // other pets keep flowing.
+  const stateQueues = new Map<string, Promise<void>>()
+
+  const sendState = async (
+    target: PetEntry,
+    state: 'idle' | 'thinking' | 'working' | 'error',
+    autonomy: { idleAnimation: boolean; gapMinutes: number },
+    autonomyKey: string,
+  ): Promise<void> => {
+    const last = lastPushedByPet.get(target.id)
+    if (last !== undefined && last.state === state && last.since === target.since && last.autonomy === autonomyKey) return
+    lastPushedByPet.set(target.id, { state, since: target.since, autonomy: autonomyKey })
+    try {
+      // One-shot loopback POST: the same 5s budget the seam's callBudget
+      // applies. A frozen pet (listening socket, silent HTTP) must not park
+      // this await on undici's multi-minute default — the dedup entry set
+      // above would then swallow every identical state push until it fires.
+      const response = await fetch(`http://127.0.0.1:${String(target.port)}/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state, autonomy }),
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (!response.ok) {
+        console.error(`pet-surface driver: /state answered HTTP ${String(response.status)}`)
+        lastPushedByPet.delete(target.id) // failed: the next event re-pushes
+      } else if (state === 'error') {
+        // The error flash is transient: a follow-up identical 'error' must
+        // flash again, so the dedup entry does not survive an error push.
+        lastPushedByPet.delete(target.id)
+      }
+    } catch {
+      // The port was stale (the pet was swapped or restarted): the entry is
+      // dropped so the next event re-pushes; pid + probe validation keeps
+      // dead and frozen entries out of the route.
+      console.error(`pet-surface driver: /state to ${target.id} failed`)
+      lastPushedByPet.delete(target.id)
+    }
+  }
+
   const pushState = async (state: 'idle' | 'thinking' | 'working' | 'error'): Promise<void> => {
     currentState = state
     // The state's AUDIENCE: the session's bound pet when it is alive, every
@@ -600,36 +651,13 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     if (audience.length === 0) return // no pet online: nothing recorded, the next event re-pushes
     const autonomy = await readAutonomy()
     const autonomyKey = JSON.stringify(autonomy)
-    await Promise.all(audience.map(async (target) => {
-      const last = lastPushedByPet.get(target.id)
-      if (last !== undefined && last.state === state && last.since === target.since && last.autonomy === autonomyKey) return
-      lastPushedByPet.set(target.id, { state, since: target.since, autonomy: autonomyKey })
-      try {
-        // One-shot loopback POST: the same 5s budget the seam's callBudget
-        // applies. A frozen pet (listening socket, silent HTTP) must not park
-        // this await on undici's multi-minute default — the dedup entry set
-        // below would then swallow every identical state push until it fires.
-        const response = await fetch(`http://127.0.0.1:${String(target.port)}/state`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ state, autonomy }),
-          signal: AbortSignal.timeout(5_000),
-        })
-        if (!response.ok) {
-          console.error(`pet-surface driver: /state answered HTTP ${String(response.status)}`)
-          lastPushedByPet.delete(target.id) // failed: the next event re-pushes
-        } else if (state === 'error') {
-          // The error flash is transient: a follow-up identical 'error' must
-          // flash again, so the dedup entry does not survive an error push.
-          lastPushedByPet.delete(target.id)
-        }
-      } catch {
-        // The port was stale (the pet was swapped or restarted): the entry is
-        // dropped so the next event re-pushes; pid + probe validation keeps
-        // dead and frozen entries out of the route.
-        console.error(`pet-surface driver: /state to ${target.id} failed`)
-        lastPushedByPet.delete(target.id)
-      }
+    await Promise.all(audience.map((target) => {
+      const tail = stateQueues.get(target.id) ?? Promise.resolve()
+      const next = tail.then(() => sendState(target, state, autonomy, autonomyKey))
+      // sendState never throws (fetch failures are caught inside), so the
+      // chain cannot poison — the tail stays a resolved promise.
+      stateQueues.set(target.id, next)
+      return next
     }))
   }
   events.on('api-session/status', (sessionId: string, running: boolean) => {
@@ -813,6 +841,8 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     endedBy: string
     decision?: unknown
     detail?: string | undefined
+    session?: string | null
+    pet?: string | null
   }): void => {
     const at = Date.now()
     void (async () => {
@@ -821,7 +851,14 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
         const next = Array.isArray(list) ? list : []
         // Constant-null normalization: `undefined` would be dropped by
         // JSON.stringify and the field matrix becomes conditional again.
-        next.unshift({ ...entry, decision: entry.decision ?? null, detail: entry.detail ?? null, at })
+        next.unshift({
+          ...entry,
+          decision: entry.decision ?? null,
+          detail: entry.detail ?? null,
+          session: entry.session ?? null,
+          pet: entry.pet ?? null,
+          at,
+        })
         await writeFile(interactionLedgerFile, `${JSON.stringify(next.slice(0, 50))}\n`, 'utf8')
       } catch {
         // missing or unreadable ledger: start fresh with this entry
@@ -835,12 +872,19 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   }
   const raceInteraction = async (
     body: Record<string, unknown>,
-    request: { signal?: AbortSignal },
+    request: { signal?: AbortSignal; agent?: { id?: unknown } },
     next: () => Promise<unknown>,
     accept: (answer: unknown) => boolean,
   ): Promise<unknown> => {
     const kind = typeof body.kind === 'string' ? body.kind : 'interaction'
     const iid = `ap_${randomUUID().slice(0, 8)}`
+    // Session correlation (defensive read): the asking controller may attach
+    // the agent identity to the request — absent on some paths, in which case
+    // the ledger row simply records null. Multi-session/multi-pet post-mortems
+    // need this dimension; the wire's binary answer alone cannot tell which
+    // conversation was asking.
+    const agentId = request.agent?.id
+    const session = typeof agentId === 'string' ? agentId : null
     // The gateway retires a forwarded prompt — withdrawing every delivered
     // web card — when the request's signal aborts: projectRemoteEventRequest
     // hands that signal to the gateway as its cancellation wire at dispatch
@@ -855,11 +899,11 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     const pets = notifyPets(await pet.list())
     const arms = pets.map(pet => ({ pet, ask: startAskPet(pet, body, original) }))
     let recorded = false
-    const record = (endedBy: string, decision: unknown, detail?: string): void => {
+    const record = (endedBy: string, decision: unknown, detail?: string, petId?: string): void => {
       if (recorded) return
       recorded = true
-      driverLog(home, `INTERACTION ${iid} ${kind} endedBy=${endedBy}${detail !== undefined ? ` (${detail})` : ''}`)
-      recordInteraction({ id: iid, kind, endedBy, decision, detail })
+      driverLog(home, `INTERACTION ${iid} ${kind} session=${session ?? '-'} pet=${petId ?? '-'} endedBy=${endedBy}${detail !== undefined ? ` (${detail})` : ''}`)
+      recordInteraction({ id: iid, kind, endedBy, decision, detail, session, pet: petId ?? null })
     }
     try {
       const chain = next()
@@ -894,7 +938,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
       // session's carrier (it earned the binding by answering).
       decision.abort()
       boundPetId = winner.pet.id
-      record('pet', winner.answer.answer)
+      record('pet', winner.answer.answer, undefined, winner.pet.id)
       // The newly-bound pet may have missed the session's state while
       // another pet was carrying it: catch it up immediately (the per-pet
       // dedup makes this a no-op when it is already showing the right thing).
@@ -1737,7 +1781,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_interactions',
-      description: 'Read how recent approvals/questions actually ENDED: {id, kind, endedBy, decision, detail, at}. endedBy: pet = the user clicked a pet bubble; web = the desktop card; chain = fell through (pet offline, no pet, or invalid answer — the fail-closed path); cancelled = session stopped or asker withdrew. A bare "rejected" tool result cannot tell a real click from an undelivered bubble — call this right after any approval/question to learn the real ending, and to recall past decisions across turns.',
+      description: 'Read how recent approvals/questions actually ENDED: {id, kind, session (the asking session id, null when the host attached none), pet (the pet whose answer won, null otherwise), endedBy, decision, detail, at}. endedBy: pet = the user clicked a pet bubble; web = the desktop card; chain = fell through (pet offline, no pet, or invalid answer — the fail-closed path); cancelled = session stopped or asker withdrew. A bare "rejected" tool result cannot tell a real click from an undelivered bubble — call this right after any approval/question to learn the real ending, and to recall past decisions across turns.',
       parameters: {
         limit: { type: 'number', description: 'How many recent entries to return (default 10, max 50).' },
       },
