@@ -18,7 +18,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
@@ -317,18 +317,137 @@ export function apply(ctx: Context): void {
     return binary
   }
   /**
+   * Locate the npm `electron` package WITHOUT loading it. Loading the module
+   * (`require('electron')`) runs its lazy installer synchronously — a ~250 MB
+   * download inside the host's event loop — so only the manifest is resolved
+   * here; installing is a separate, background step.
+   */
+  const findNpmElectronPackage = (): string | undefined => {
+    try {
+      const require = createRequire(import.meta.url)
+      const pkgDir = dirname(require.resolve('electron/package.json'))
+      if (existsSync(join(pkgDir, 'package.json'))) return pkgDir
+    } catch { /* no package.json export; fall back to the walk-up */ }
+    try {
+      let dir = dirname(fileURLToPath(import.meta.url))
+      for (let i = 0; i < 8; i += 1) {
+        const pkgDir = join(dir, 'node_modules', 'electron')
+        if (existsSync(join(pkgDir, 'package.json'))) return pkgDir
+        const parent = dirname(dir)
+        if (parent === dir) break
+        dir = parent
+      }
+    } catch { /* electron dependency not found on disk */ }
+    return undefined
+  }
+  const npmElectronBinary = (pkgDir: string): string | undefined => {
+    try {
+      const exe = readFileSync(join(pkgDir, 'path.txt'), 'utf8').trim()
+      const binary = join(pkgDir, 'dist', exe)
+      return existsSync(binary) ? binary : undefined
+    } catch { return undefined }
+  }
+  const INSTALL_LOCK_STALE_MS = 30 * 60_000
+  const installLockPath = (pkgDir: string): string => join(pkgDir, '.dsh-pet-install.lock')
+  const acquireInstallLock = (pkgDir: string): boolean => {
+    const lock = installLockPath(pkgDir)
+    const write = (): void => { writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: 'wx' }) }
+    try {
+      write()
+      return true
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > INSTALL_LOCK_STALE_MS) {
+          unlinkSync(lock)
+          write()
+          return true
+        }
+      } catch { /* lock inspection stays best-effort */ }
+      return false
+    }
+  }
+  const releaseInstallLock = (pkgDir: string): void => {
+    try { unlinkSync(installLockPath(pkgDir)) } catch { /* already gone */ }
+  }
+  /**
+   * Install the npm electron binary off the activation path. The package's
+   * lazy installer is a ~250 MB download; running it synchronously (which
+   * `require('electron')` does) freezes the host, so it runs as a child with
+   * progress in the spawn log and a mirror hint on failure.
+   */
+  const installNpmElectron = async (pkgDir: string): Promise<string | undefined> => {
+    const installer = join(pkgDir, 'install.js')
+    if (!existsSync(installer)) {
+      logCarrier(`electron binary missing and install.js not found: ${pkgDir}`)
+      return undefined
+    }
+    if (!acquireInstallLock(pkgDir)) {
+      logCarrier(`electron install already in progress (lock present): ${pkgDir}`)
+      return undefined
+    }
+    logCarrier(`electron binary missing; installing in background: ${pkgDir}`)
+    return await new Promise<string | undefined>((resolveInstall) => {
+      let settled = false
+      const finish = (value: string | undefined): void => {
+        if (settled) return
+        settled = true
+        releaseInstallLock(pkgDir)
+        resolveInstall(value)
+      }
+      let stderr = ''
+      let stdout = ''
+      let lastProgress = 0
+      const child = spawn(process.execPath, [installer], {
+        cwd: pkgDir,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+      child.stdout?.setEncoding('utf8')
+      child.stdout?.on('data', (chunk: string) => {
+        stdout = `${stdout}${chunk}`.slice(-2_000)
+        const now = Date.now()
+        if (now - lastProgress > 5_000) {
+          lastProgress = now
+          const line = stdout.split(/\r?\n/).map(part => part.trim()).filter(Boolean).pop()
+          if (line !== undefined) logCarrier(`electron install: ${line}`)
+        }
+      })
+      child.stderr?.setEncoding('utf8')
+      child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-2_000) })
+      child.on('error', (error: Error) => {
+        logCarrier(`electron install failed to start: ${error.message}`)
+        finish(undefined)
+      })
+      child.on('exit', (code: number | null) => {
+        if (code !== 0) {
+          logCarrier(`electron install failed (exit ${String(code)}): ${stderr.trim() || 'no stderr'}. Set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ (or electron_mirror in .npmrc) and restart DSH; or run "node ${installer}" manually.`)
+          finish(undefined)
+          return
+        }
+        const binary = npmElectronBinary(pkgDir)
+        if (binary === undefined) {
+          logCarrier(`electron install exited 0 but the binary is still missing: ${pkgDir}`)
+          finish(undefined)
+          return
+        }
+        logCarrier(`electron installed: ${binary}`)
+        finish(ensureElectronUsable(binary))
+      })
+    })
+  }
+  /**
    * Auto-start the pet window. A bare Electron binary runs any app directory
    * (`electron.exe <dir>`), but a PACKAGED one (the installed desktop) loads
-   * its own app and dies on its single-instance lock instead — so the host's
-   * `process.execPath` is only a last resort and the resolution order is an
-   * explicit env override, a binary staged beside this package, then the
-   * `electron` npm dependency (its module resolves to the binary path).
-   * The carrier's single-instance lock collapses duplicates.
+   * its own app and dies on its single-instance lock instead — so the
+   * resolution order is an explicit env override, a binary staged beside this
+   * package, then the `electron` npm dependency. The carrier's single-instance
+   * lock collapses duplicates.
    */
-  const resolveElectronBinary = (): string | undefined => {
+  const resolveElectron = (): { binary?: string; npmPackageDir?: string } => {
     const override = process.env.DSH_PET_ELECTRON
     if (override !== undefined && override !== '') {
-      if (existsSync(override)) return override
+      if (existsSync(override)) return { binary: override }
       logCarrier(`DSH_PET_ELECTRON is set but missing, falling back: ${override}`)
     }
     const pkgRoot = resolve(join(dirname(fileURLToPath(import.meta.url)), '..'))
@@ -336,39 +455,17 @@ export function apply(ctx: Context): void {
       process.platform === 'win32' ? 'electron.exe'
         : process.platform === 'darwin' ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
           : 'electron')
-    if (existsSync(staged)) return staged
-    try {
-      const require = createRequire(import.meta.url)
-      // In a Node host the electron package's module resolves to its binary
-      // path; inside an Electron main process it is the API object and the
-      // existence check below rejects it.
-      const candidate = String(require('electron'))
-      if (existsSync(candidate)) return ensureElectronUsable(candidate)
-    } catch { /* no electron dependency in this composition */ }
-    // npm-electron fallback: an npm install carries the electron
-    // DEPENDENCY (node_modules/electron/dist/electron.exe) instead of a
-    // staged electron-bin — and require('electron') inside an Electron
-    // host returns the API object, not a binary path. Walk up from the
-    // driver's own location to find the dependency's binary.
-    try {
-      let dir = dirname(fileURLToPath(import.meta.url))
-      for (let i = 0; i < 8; i += 1) {
-        const pkgDir = join(dir, 'node_modules', 'electron')
-        const exe = readFileSync(join(pkgDir, 'path.txt'), 'utf8').trim()
-        const binary = join(pkgDir, 'dist', exe)
-        if (existsSync(binary)) return ensureElectronUsable(binary)
-        const parent = dirname(dir)
-        if (parent === dir) break
-        dir = parent
-      }
-    } catch { /* electron dependency not found on disk */ }
-    return process.versions.electron !== undefined ? process.execPath : undefined
+    if (existsSync(staged)) return { binary: staged }
+    const npmPackageDir = findNpmElectronPackage()
+    if (npmPackageDir !== undefined) {
+      const binary = npmElectronBinary(npmPackageDir)
+      if (binary !== undefined) return { binary: ensureElectronUsable(binary) }
+      return { npmPackageDir }
+    }
+    logCarrier('no electron binary: no staged electron-bin, no npm electron dependency, and DSH_PET_ELECTRON is unset')
+    return {}
   }
-  const spawnPetCarrier = (url: string): void => {
-    const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
-    const electronBinary = resolveElectronBinary()
-    if (process.env.DSH_PET_NO_SPAWN === '1' || electronBinary === undefined
-      || !existsSync(join(carrierDir, 'package.json'))) return
+  const launchCarrier = (url: string, carrierDir: string, electronBinary: string): void => {
     // Escape hatch, never a default: some security suites refuse to let
     // Electron initialise its Chromium sandbox, and the carrier then dies
     // before a line of app code runs. Probing and quietly downgrading would put
@@ -422,6 +519,19 @@ export function apply(ctx: Context): void {
     })
     child.unref()
     ctx.effect(() => () => { child.kill() }, 'pet-surface: carrier shutdown')
+  }
+  const spawnPetCarrier = (url: string): void => {
+    const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
+    if (process.env.DSH_PET_NO_SPAWN === '1' || !existsSync(join(carrierDir, 'package.json'))) return
+    const resolution = resolveElectron()
+    if (resolution.binary !== undefined) {
+      launchCarrier(url, carrierDir, resolution.binary)
+      return
+    }
+    if (resolution.npmPackageDir === undefined) return
+    void installNpmElectron(resolution.npmPackageDir)
+      .then((binary) => { if (binary !== undefined) launchCarrier(url, carrierDir, binary) })
+      .catch((error: unknown) => { logCarrier(`electron install failed: ${error instanceof Error ? error.message : String(error)}`) })
   }
   const settledReady = (): void => {
     const url = authenticatedRoot()
