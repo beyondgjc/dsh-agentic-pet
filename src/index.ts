@@ -16,7 +16,7 @@
  * @module dsh-agentic-pet
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
@@ -289,6 +289,33 @@ export function apply(ctx: Context): void {
         console.error(`pet-surface: could not write the locator file: ${error instanceof Error ? error.message : String(error)}`)
       })
   }
+  /** Carrier spawn diagnostics; the packaged host's stderr is not visible. */
+  const logCarrier = (line: string): void => {
+    try {
+      appendFileSync(join(dirname(petLocatorPath()), 'carrier-spawn.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
+    } catch { /* diagnostics stay best-effort */ }
+  }
+  /**
+   * The desktop profile directory is Low-integrity (inheritable), so an
+   * electron.exe installed into it by pnpm inherits Low and Chromium crashes
+   * on spawn (exit 0x80000003). The host itself runs at Medium, so raising
+   * the label in place is enough; a later pnpm install that re-creates the
+   * files is healed the same way on the next activation.
+   */
+  const ensureElectronUsable = (binary: string): string => {
+    if (process.platform !== 'win32') return binary
+    try {
+      const acl = execFileSync('icacls', [binary], { encoding: 'utf8', windowsHide: true })
+      if (!/Low Mandatory Level/i.test(acl)) return binary
+      execFileSync('icacls', [dirname(binary), '/setintegritylevel', '(OI)(CI)M', '/T'], {
+        windowsHide: true, stdio: 'ignore', timeout: 30_000,
+      })
+      logCarrier(`raised electron integrity to Medium: ${dirname(binary)}`)
+    } catch (error) {
+      logCarrier(`could not raise electron integrity: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return binary
+  }
   /**
    * Auto-start the pet window. A bare Electron binary runs any app directory
    * (`electron.exe <dir>`), but a PACKAGED one (the installed desktop) loads
@@ -299,8 +326,10 @@ export function apply(ctx: Context): void {
    * The carrier's single-instance lock collapses duplicates.
    */
   const resolveElectronBinary = (): string | undefined => {
-    if (process.env.DSH_PET_ELECTRON !== undefined && process.env.DSH_PET_ELECTRON !== '') {
-      return process.env.DSH_PET_ELECTRON
+    const override = process.env.DSH_PET_ELECTRON
+    if (override !== undefined && override !== '') {
+      if (existsSync(override)) return override
+      logCarrier(`DSH_PET_ELECTRON is set but missing, falling back: ${override}`)
     }
     const pkgRoot = resolve(join(dirname(fileURLToPath(import.meta.url)), '..'))
     const staged = join(pkgRoot, 'electron-bin',
@@ -314,7 +343,7 @@ export function apply(ctx: Context): void {
       // path; inside an Electron main process it is the API object and the
       // existence check below rejects it.
       const candidate = String(require('electron'))
-      if (existsSync(candidate)) return candidate
+      if (existsSync(candidate)) return ensureElectronUsable(candidate)
     } catch { /* no electron dependency in this composition */ }
     // npm-electron fallback: an npm install carries the electron
     // DEPENDENCY (node_modules/electron/dist/electron.exe) instead of a
@@ -327,19 +356,13 @@ export function apply(ctx: Context): void {
         const pkgDir = join(dir, 'node_modules', 'electron')
         const exe = readFileSync(join(pkgDir, 'path.txt'), 'utf8').trim()
         const binary = join(pkgDir, 'dist', exe)
-        if (existsSync(binary)) return binary
+        if (existsSync(binary)) return ensureElectronUsable(binary)
         const parent = dirname(dir)
         if (parent === dir) break
         dir = parent
       }
     } catch { /* electron dependency not found on disk */ }
     return process.versions.electron !== undefined ? process.execPath : undefined
-  }
-  /** Carrier spawn diagnostics; the packaged host's stderr is not visible. */
-  const logCarrier = (line: string): void => {
-    try {
-      appendFileSync(join(dirname(petLocatorPath()), 'carrier-spawn.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
-    } catch { /* diagnostics stay best-effort */ }
   }
   const spawnPetCarrier = (url: string): void => {
     const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
