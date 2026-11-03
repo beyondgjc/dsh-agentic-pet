@@ -416,6 +416,8 @@ export interface GreetPromptFacts {
   bondValue: number
   bondDays: number
   bondTier: string
+  /** 用户起的名字（未起则内置默认）：自我介绍的依据，改名后第一天尤其重要。 */
+  name: string
 }
 
 /** The boot-greeting prompt: fired once per dsh start when the pet first
@@ -424,6 +426,7 @@ export interface GreetPromptFacts {
 export function buildGreetPrompt(facts: GreetPromptFacts): string {
   return [
     '[启动问好]',
+    `你的名字是「${facts.name}」。`,
     `用户刚打开 DeepSeek，你的世界刚亮起来（好感 ${String(facts.affection)}，${moodOf(facts.affection)}；羁绊 ${facts.bondTier}，一起过了 ${String(facts.bondDays)} 天）。`,
     '主动打个招呼（pet_say）——按当下的时辰自然问好，一两句就好，别问问题等回答。',
   ].join(' ')

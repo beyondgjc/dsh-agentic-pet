@@ -155,6 +155,8 @@ export interface GreetPromptFacts {
     bondValue: number;
     bondDays: number;
     bondTier: string;
+    /** 用户起的名字（未起则内置默认）：自我介绍的依据，改名后第一天尤其重要。 */
+    name: string;
 }
 /** The boot-greeting prompt: fired once per dsh start when the pet first
  * comes online — before the random-wake cadence takes over. Always speaks

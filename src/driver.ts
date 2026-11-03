@@ -1226,6 +1226,7 @@ ${text}`
       bondValue: ledger.bond?.value ?? 0,
       bondDays: ledger.bond?.days ?? 0,
       bondTier: bondTier(ledger.bond?.value ?? 0),
+      name: petDisplayName(petId),
     }))
     if (spoke) {
       voiceGreetedOnce.add(petId)

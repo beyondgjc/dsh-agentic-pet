@@ -13,6 +13,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import {
   buildChatPrompt,
   buildCrossPetPrompt,
+  buildGreetPrompt,
   buildTouchPrompt,
   buildWakePrompt,
   cancelPlans,
@@ -405,5 +406,15 @@ describe('pet-to-pet messaging (宠物间消息)', () => {
     expect(prompt).toContain('你有 2 条未读消息（来自 鲸鱼娘×2）')
     expect(prompt).toContain('pet_inbox')
     expect(prompt).not.toContain('一起玩吗') // 全文只在 pet_inbox 里
+  })
+})
+
+describe('greet prompt (启动问好)', () => {
+  it('carries the pet\'s name (custom or built-in) as the self-introduction anchor', () => {
+    const prompt = buildGreetPrompt({ affection: 2, bondValue: 0, bondDays: 3, bondTier: '陌生', name: '鲸鱼娘' })
+    expect(prompt.startsWith('[启动问好]')).toBe(true)
+    expect(prompt).toContain('你的名字是「鲸鱼娘」')
+    expect(prompt).toContain('好感 2')
+    expect(prompt).toContain('一起过了 3 天')
   })
 })
