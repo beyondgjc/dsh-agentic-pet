@@ -2008,7 +2008,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_state',
-      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book and pending self-wake plans (wakePlans — the pet\'s own pet_schedule_wake schedule). Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet.',
+      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book and pending self-wake plans (wakePlans — the pet\'s own pet_schedule_wake schedule). selfPetId tells you which pet YOU are (your own session\'s owner; null when called from a session that is not a pet\'s own). Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet.',
       parameters: {
         actions: { type: 'boolean', description: 'Also include each pet\'s action catalog — the ids pet_do accepts on it. Omit for the cheaper summary (an unknown pet_do action self-reports its menu).' },
       },
@@ -2016,7 +2016,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }],
       },
-      async execute(args) {
+      async execute(args, exec) {
         // Every running pet's NORMALIZED mirror plus every pet's ledger — the
         // model sees the whole cast, not just the default pet, and never the
         // raw field-matrix differences. A pet whose /status fails between the
@@ -2056,7 +2056,14 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           // The model addresses pets by id, but should SEE the user's naming.
           return { ...base, name: voiceNames.get(state.id) ?? DEFAULT_PET_NAME[state.id] ?? state.id }
         })
-        return JSON.stringify({ defaultPet: pets[0]?.id ?? null, pets: petsOut, affection: ledgers, wakePlans })
+        // selfPetId: who the CALLER is. A pet's own inner-voice session (or a
+        // manually bound one) resolves through voiceOwners; work sessions and
+        // shadow pet-mode sessions are nobody — constant null (the field-matrix
+        // rule). Identity, not liveness: an offline owner still reads as self,
+        // it just won't appear in pets[].
+        const selfSession = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
+        const selfPetId = (selfSession !== undefined ? voiceOwners.get(selfSession) : undefined) ?? null
+        return JSON.stringify({ selfPetId, defaultPet: pets[0]?.id ?? null, pets: petsOut, affection: ledgers, wakePlans })
       },
     }))
   })
