@@ -2,8 +2,8 @@
  * The `ctx.petService` capability seam — the dsh three-roles pattern applied
  * inside the process boundary. Pets are separate processes by design, so this
  * service is NOT the pet itself: it is the typed in-process seam over the
- * out-of-process HTTP control plane. Discovery (pet-http.d/ registry plus
- * legacy folding), liveness (pid + two-layer probe), retry policy, and the
+ * out-of-process HTTP control plane. Discovery (the whale598/pet-http.d/
+ * registry), liveness (pid + two-layer probe), retry policy, and the
  * /status field matrix (per-implementation extras) are normalized HERE —
  * consumers (the driver, the model tools, the settings page, the upcoming
  * proactivity scheduler) never see registry files, ports, or raw payloads.
@@ -16,7 +16,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { normalizeCapabilities, type PetCapabilities } from './actions.ts'
-import { readAllPets, routePet, type PetEntry } from './registry.ts'
+import { readAllPets, type PetEntry } from './registry.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -77,11 +77,12 @@ export interface PetLastAction {
  *
  * Implementations must honor these semantics:
  * - {@link list} returns only pets whose control plane ANSWERS: a dead pid
- *   and a frozen publisher (listening socket, silent HTTP) are both skipped.
- * - {@link route} resolves the STATE carrier for a session: the named bound
- *   pet when alive, else the default pet (the first live entry — de facto
- *   "first started"). Interaction BROADCAST is not a route; see
- *   `notifyPets` in the registry module for the all-notify view.
+ *   and a frozen publisher (listening socket, silent HTTP) are both skipped,
+ *   in boot order (earliest `since` first).
+ * - Interaction BROADCAST is not a route: see `notifyPets` in the registry
+ *   module for the all-notify view, and `defaultPet` for unnamed targets.
+ *   State audiences are computed by the driver (bound pet alive → that pet,
+ *   otherwise every live pet).
  * - {@link snapshot} never throws on an unreachable pet — it resolves with
  *   `online: false`. Field-matrix differences stay here.
  * - {@link call} retries once through a fresh discovery pass, so a pet
@@ -93,12 +94,9 @@ export abstract class PetService extends Service {
     super(ctx, 'petService')
   }
 
-  /** Every live pet (registry entries plus legacy manifests folded under
-   * their pet ids). */
+  /** Every live pet in boot order (earliest `since` first — the default-pet
+   * rule is a discovery guarantee, not a listing accident). */
   abstract list(): Promise<PetEntry[]>
-
-  /** The STATE carrier: the bound pet when alive, else the default pet. */
-  abstract route(boundPetId?: string): Promise<PetEntry | undefined>
 
   /** The normalized mirror of one pet, or `online: false` when unreachable. */
   abstract snapshot(entry: PetEntry): Promise<PetSnapshot>
@@ -204,7 +202,7 @@ function normalizeLastAction(raw: Record<string, unknown>): PetLastAction | null
 
 /**
  * HTTP control-plane provider: talks to pet processes over the frozen wire
- * contract, folding legacy single-file manifests into the registry. A new
+ * contract, discovering pets through the whale598/pet-http.d/ registry. A new
  * pet implementation is adopted by publishing the same contract — this
  * class does not change for it.
  */
@@ -222,10 +220,6 @@ export class PetHttpService extends PetService {
 
   list(): Promise<PetEntry[]> {
     return readAllPets(this.home)
-  }
-
-  async route(boundPetId?: string): Promise<PetEntry | undefined> {
-    return routePet(await this.list(), boundPetId)
   }
 
   async snapshot(entry: PetEntry): Promise<PetSnapshot> {
@@ -261,6 +255,7 @@ export class PetHttpService extends PetService {
   async call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown> {
     const { timeoutMs, retry } = callBudget(path)
     const attempts = retry ? 2 : 1
+    const callerSignal = init?.signal ?? undefined
     for (let attempt = 0; attempt < attempts; attempt++) {
       const current = attempt === 0
         ? entry
@@ -268,27 +263,34 @@ export class PetHttpService extends PetService {
       if (current === undefined) {
         throw new Error(`pet "${entry.id}" is no longer running`)
       }
+      let response: Response
       try {
         // Every call carries its own deadline: an unbounded fetch inherits
         // undici's multi-minute default and a dead pet holds the turn for
         // minutes. The caller's own signal (whole-request cancellation)
         // stays honored alongside it.
         const timeout = AbortSignal.timeout(timeoutMs)
-        const callerSignal = init?.signal ?? undefined
         const signal = callerSignal !== undefined ? AbortSignal.any([callerSignal, timeout]) : timeout
-        const response = await fetch(`http://127.0.0.1:${String(current.port)}${path}`, { ...init, signal })
-        if (!response.ok) {
-          // The pet's own error body (e.g. the unknown-action menu from
-          // /action) is the useful half of the message — surface it instead
-          // of the bare status line.
-          const detail = await response.text().catch(() => '')
-          throw new Error(`pet control ${path} answered HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 300)}` : ''}`)
-        }
-        return await response.json()
+        response = await fetch(`http://127.0.0.1:${String(current.port)}${path}`, { ...init, signal })
       } catch (error: unknown) {
-        if (attempt === attempts - 1) throw error
-        // stale entry (pet swapped/restarted mid-call): retry once fresh
+        // TRANSPORT failure only — refused, timed out, aborted mid-flight: the
+        // pet never answered, so a fresh-discovery retry can legitimately find
+        // a swapped pet. The caller's own abort is final: retrying would just
+        // reject again on an already-aborted signal.
+        if (attempt === attempts - 1 || callerSignal?.aborted === true) throw error
+        continue
       }
+      // The pet ANSWERED — its status is the verdict, and a retry here would
+      // double the side effect (a 4xx says no, a 5xx says error; neither is
+      // "stale entry"). Surface the pet's own error body (e.g. the
+      // unknown-action menu from /action): the useful half of the message.
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '')
+        throw new Error(`pet control ${path} answered HTTP ${String(response.status)}${detail ? `: ${detail.slice(0, 300)}` : ''}`)
+      }
+      // A 200 with an unparseable body is equally final — the pet spoke, the
+      // wire is what it is (no retry can improve it).
+      return await response.json()
     }
     throw new Error('unreachable')
   }

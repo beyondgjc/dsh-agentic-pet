@@ -8,6 +8,22 @@
 
 ---
 
+## 0. 部署通道现状（2026-11-04 起以 npm 为主）
+
+桌面 profile（`~/.dsh/profiles/desktop/package.json`）已于 2026-11-03 被插件管理器切换为
+**npm 安装形态**（`"dsh-agentic-pet": "0.4.5"`，node_modules 变成真实目录，vendor 的
+symlink 被清除，vendor/dsh-pet-app 被清空）：
+
+- **日常迭代 = 发补丁版**：改码 → 本地构建（§3.2 的 tsc+tsdown）→
+  `node scripts/release.mjs 0.4.x` → 桌面端插件页更新。
+- **§3 的 vendor 部署流程**仅在 profile 改回 `file:vendor/dsh-pet-app` 时才需要——流程命令
+  保留备查；当前形态下向 vendor 拷贝是**无效写入**（运行时不读它）。
+- ⚠️ 教训：部署前先核实通道——`cat ~/.dsh/profiles/desktop/package.json` 看依赖是
+  `file:vendor/...` 还是版本号，node_modules/dsh-agentic-pet 是 symlink 还是真实目录。
+  否则会出现「部署成功但运行时无感」的假象（本次三修复曾因此全部落空半天）。
+
+---
+
 ## 1. 两个仓库的关系
 
 | 仓库 | 路径 | 角色 | 现状 |

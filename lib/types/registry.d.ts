@@ -1,13 +1,11 @@
 /**
- * The pet registry: a directory of per-pet control manifests, replacing the
- * last-writer-wins single files whose races caused repeated swap incidents
- * (a dying carrier's late write burying a live pet's registration). Each pet
- * implementation owns its own file under whale598/pet-http.d/ (legacy
- * pet-http.d/ still scanned) and re-asserts it on a
- * cadence; entries whose publisher pid is dead expire by omission. The
- * driver reads the whole table and routes per the multi-pet design: the
- * session's bound pet if alive, else the default pet (first alive entry),
- * plus an all-notify broadcast mode for interactions.
+ * The pet registry: a directory of per-pet control manifests. Each pet
+ * implementation owns its own file under whale598/pet-http.d/ (named by its
+ * pet id) and re-asserts it on a cadence; entries whose publisher pid is dead
+ * expire by omission. The driver reads the whole table and routes per the
+ * multi-pet design: a session's state rides its bound pet when that pet is
+ * alive and broadcasts to every live pet otherwise; interactions broadcast to
+ * all; the default pet (earliest-booted) resolves unnamed expression targets.
  * @module dsh-agentic-pet/registry
  */
 /** One pet's published control facts. */
@@ -30,21 +28,30 @@ export interface PetEntry {
  * HTTP probe catches the frozen-but-listening zombies.
  */
 export declare function probeControlPlane(port: number): Promise<boolean>;
-/** Read every live entry in the registry. Dead-pid entries are skipped —
- * they expire by omission the next time their file is rewritten — and so are
- * silent entries (pid alive, control plane unresponsive). */
-export declare function readLivePets(home: string): Promise<PetEntry[]>;
-/** Every live pet: registry entries plus legacy single-file manifests folded
- * under their pet ids (registry entries win on id collision). */
+/**
+ * The default-pet order: earliest booted first (`since` ascending). A missing
+ * or mistyped `since` (0) reads as "unknown boot time" and sorts LAST — it
+ * must never outrank a publisher that stated its boot time. This turns the
+ * multi-pet design's de-facto rule ("the default pet is the first STARTED")
+ * into an actual guarantee: discovery output IS boot order, so every
+ * `pets[0]` consumer (defaultPet, pet_state's defaultPet) reads the
+ * same pet. Stable sort: equal `since` values keep registry listing order.
+ */
+export declare function bootOrder(pets: PetEntry[]): PetEntry[];
+/** Every live pet in boot order. Dead-pid entries are skipped — they expire
+ * by omission the next time their file is rewritten — and so are silent
+ * entries (pid alive, control plane unresponsive). */
 export declare function readAllPets(home: string): Promise<PetEntry[]>;
 /**
- * Resolve the pet that should carry STATE for the given session, per the
- * multi-pet design: the session's bound pet when alive, else the default pet
- * (the first live entry — de facto "first started"). Single-pet deployments
- * degenerate correctly: one live entry is both bound and default.
+ * The default pet for UNNAMED targets: the earliest-booted live entry
+ * (`pets[0]` — discovery's bootOrder guarantees start order, not listing
+ * accident). State routing does NOT go through here anymore: an unbound
+ * (or bound-but-offline) session broadcasts its state to every live pet —
+ * the driver computes that audience itself. Used by the tools'
+ * resolveTarget when neither a named pet nor the owning session resolves.
  * @returns the entry, or undefined when no pet is alive.
  */
-export declare function routePet(pets: PetEntry[], boundPetId: string | undefined): PetEntry | undefined;
+export declare function defaultPet(pets: PetEntry[]): PetEntry | undefined;
 /** The pets that receive an INTERACTION (all-notify mode): every live pet,
  * the session-bound one included. The binding routes STATE — it must never
  * mute interactions: excluding the bound pet would silence the only body

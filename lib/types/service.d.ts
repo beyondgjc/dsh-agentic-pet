@@ -2,8 +2,8 @@
  * The `ctx.petService` capability seam — the dsh three-roles pattern applied
  * inside the process boundary. Pets are separate processes by design, so this
  * service is NOT the pet itself: it is the typed in-process seam over the
- * out-of-process HTTP control plane. Discovery (pet-http.d/ registry plus
- * legacy folding), liveness (pid + two-layer probe), retry policy, and the
+ * out-of-process HTTP control plane. Discovery (the whale598/pet-http.d/
+ * registry), liveness (pid + two-layer probe), retry policy, and the
  * /status field matrix (per-implementation extras) are normalized HERE —
  * consumers (the driver, the model tools, the settings page, the upcoming
  * proactivity scheduler) never see registry files, ports, or raw payloads.
@@ -77,11 +77,12 @@ export interface PetLastAction {
  *
  * Implementations must honor these semantics:
  * - {@link list} returns only pets whose control plane ANSWERS: a dead pid
- *   and a frozen publisher (listening socket, silent HTTP) are both skipped.
- * - {@link route} resolves the STATE carrier for a session: the named bound
- *   pet when alive, else the default pet (the first live entry — de facto
- *   "first started"). Interaction BROADCAST is not a route; see
- *   `notifyPets` in the registry module for the all-notify view.
+ *   and a frozen publisher (listening socket, silent HTTP) are both skipped,
+ *   in boot order (earliest `since` first).
+ * - Interaction BROADCAST is not a route: see `notifyPets` in the registry
+ *   module for the all-notify view, and `defaultPet` for unnamed targets.
+ *   State audiences are computed by the driver (bound pet alive → that pet,
+ *   otherwise every live pet).
  * - {@link snapshot} never throws on an unreachable pet — it resolves with
  *   `online: false`. Field-matrix differences stay here.
  * - {@link call} retries once through a fresh discovery pass, so a pet
@@ -90,11 +91,9 @@ export interface PetLastAction {
  */
 export declare abstract class PetService extends Service {
     constructor(ctx: Context);
-    /** Every live pet (registry entries plus legacy manifests folded under
-     * their pet ids). */
+    /** Every live pet in boot order (earliest `since` first — the default-pet
+     * rule is a discovery guarantee, not a listing accident). */
     abstract list(): Promise<PetEntry[]>;
-    /** The STATE carrier: the bound pet when alive, else the default pet. */
-    abstract route(boundPetId?: string): Promise<PetEntry | undefined>;
     /** The normalized mirror of one pet, or `online: false` when unreachable. */
     abstract snapshot(entry: PetEntry): Promise<PetSnapshot>;
     /** One JSON call to a pet endpoint, with a single fresh-discovery retry. */
@@ -112,7 +111,7 @@ export declare abstract class PetService extends Service {
 export declare function normalizeStatus(id: string, raw: Record<string, unknown>, online: boolean): PetSnapshot;
 /**
  * HTTP control-plane provider: talks to pet processes over the frozen wire
- * contract, folding legacy single-file manifests into the registry. A new
+ * contract, discovering pets through the whale598/pet-http.d/ registry. A new
  * pet implementation is adopted by publishing the same contract — this
  * class does not change for it.
  */
@@ -122,7 +121,6 @@ export declare class PetHttpService extends PetService {
     private static readonly CAPS_TTL_MS;
     constructor(ctx: Context, home?: string);
     list(): Promise<PetEntry[]>;
-    route(boundPetId?: string): Promise<PetEntry | undefined>;
     snapshot(entry: PetEntry): Promise<PetSnapshot>;
     capabilities(entry: PetEntry): Promise<PetCapabilities>;
     call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>;

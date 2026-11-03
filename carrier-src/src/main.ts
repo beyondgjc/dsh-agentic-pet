@@ -1001,13 +1001,12 @@ async function main(): Promise<void> {
     const address = control.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     console.log(`[pet] control interface on 127.0.0.1:${String(port)}`)
-    // Registry publish: one file per pet under pet-http.d/ — no shared name,
-    // no last-writer-wins race (the incident class that produced repeated
-    // swap blindness). The legacy single file keeps being written during the
-    // transition so pre-registry readers still see this carrier.
+    // Registry publish: one file per pet under whale598/pet-http.d/ — no
+    // shared name, no last-writer-wins race (the incident class that produced
+    // repeated swap blindness). The registry is the SINGLE discovery source:
+    // the legacy root pet-http.d/ and the single-file manifests are retired
+    // on both the write and the read side.
     const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: 'electron' })}\n`
-    // Namespaced under whale598/ (collision avoidance); the driver scans
-    // the legacy pet-http.d/ as a read fallback for older pet builds.
     const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d')
     try {
       mkdirSync(registryDir, { recursive: true })
@@ -1017,7 +1016,6 @@ async function main(): Promise<void> {
     const writeManifest = (): void => {
       void writeFile(join(registryDir, 'electron.json'), manifest, 'utf8')
         .catch((error: unknown) => { console.error('[pet] could not write the registry entry:', String(error)) })
-      // legacy 根镜像（pet-http-electron.json）停写：读侧双目录扫描已覆盖
     }
     writeManifest()
     // Re-assert on a cadence so a stale publisher cannot shadow a live pet.

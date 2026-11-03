@@ -9,9 +9,15 @@ kind: "package-bundle"
 
 ## 简介
 
-`dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`）——模型可以借宠物说话、做动作、感知被触摸。说话内容可通过 [BreezeBlue](https://breezeblue.ai) TTS 朗读——carrier 侧合成每条 `/say` 文本，语音就绪后与气泡同时下发；合成失败或超时静默降级为只显示（桌面设置页可配）。多只宠物实现可以并存：目录注册表（`~/.dsh/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
+`dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`）——模型可以借宠物说话、做动作、感知被触摸、给自己定作息。说话内容可通过 [BreezeBlue](https://breezeblue.ai) TTS 朗读——carrier 侧合成每条 `/say` 文本，语音就绪后与气泡同时下发；合成失败或超时静默降级为只显示（桌面设置页可配）。多只宠物实现可以并存：目录注册表（`~/.dsh/whale598/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
 
 宠物本身是零 DSH 知识的纯显示端。理解运行时的一切——事件收敛、交互瀑布、多宠路由、模型工具——都在插件的 driver 里，宠物只实现一个小型本地 HTTP 控制接口。任何讲同一 HTTP 契约的宠物实现都能被采纳，插件零改动。
+
+### 多宠会话路由（session ↔ 宠物）
+
+- **宠自己的内心戏会话**（每宠一个：boot greeting 自动创建，或设置页「指定会话」手动绑定）：driver 用 `voiceOwners` 映射表记录会话→宠物，模型在会话里的 `pet_say`/`pet_do` 不点名也自动落回这只宠；这些回合不画状态灯（呼吸不是工作状态）。
+- **工作会话**：有绑定宠时状态灯只亮在它身上（宠物在交互竞速里答过题即赢得绑定）；无绑定或绑定宠离线时，状态广播到全部在线宠。审批/问答永远全员广播。工作会话没有宠物工具，不涉及说话/动作的分发。
+- **手动在侧栏开的宠物模式会话**：driver 不认识它（不在映射表里），按普通工作会话对待——状态灯上身，表演类工具（`pet_say`/`pet_do`/定撤闹钟）直接拒答、不分发。这不是预期用法：想跟宠物说话，请用宠物表面的输入卡，直达她自己的会话。
 
 ## 仓库结构
 

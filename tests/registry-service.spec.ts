@@ -1,37 +1,46 @@
 /**
  * Pure-function coverage for the pet capability seam: registry routing
- * (routePet/notifyPets) and the service's /status field-matrix
+ * (bootOrder/defaultPet/notifyPets) and the service's /status field-matrix
  * normalization (normalizeStatus). These are the seams where multi-pet
  * drift hides — every implementation difference must die inside
  * normalizeStatus and never reach a consumer.
  */
 
 import { describe, expect, it } from 'vitest'
-import { notifyPets, routePet, type PetEntry } from '../src/registry.ts'
+import { bootOrder, defaultPet, notifyPets, type PetEntry } from '../src/registry.ts'
 import { normalizeStatus } from '../src/service.ts'
 
 const entry = (id: string, port = 10000, since = 0): PetEntry => ({ id, port, pid: 1, since })
 
-describe('registry routePet', () => {
-  it('prefers the bound pet when it is in the live list', () => {
-    const pets = [entry('electron'), entry('pure')]
-    expect(routePet(pets, 'pure')?.id).toBe('pure')
-  })
-
-  it('falls back to the default pet (first live entry) when the bound id is absent', () => {
-    const pets = [entry('electron'), entry('pure')]
-    expect(routePet(pets, 'missing')?.id).toBe('electron')
-    expect(routePet(pets, undefined)?.id).toBe('electron')
+describe('registry defaultPet (unnamed expression targets)', () => {
+  it('resolves the earliest-booted live pet (discovery delivers boot order)', () => {
+    // The composed pipeline is the guarantee: readAllPets sorts via bootOrder,
+    // so any pets[0] consumer sees the first STARTED pet.
+    const pets = [entry('electron', 10000, 3_000), entry('pure', 10001, 1_000)]
+    expect(defaultPet(bootOrder(pets))?.id).toBe('pure')
   })
 
   it('returns undefined when nothing is live', () => {
-    expect(routePet([], undefined)).toBeUndefined()
-    expect(routePet([], 'electron')).toBeUndefined()
+    expect(defaultPet([])).toBeUndefined()
+  })
+})
+
+describe('registry bootOrder (the default-pet rule is a discovery guarantee)', () => {
+  it('orders by since ascending — the default pet is the first STARTED, not the first file', () => {
+    const pets = [entry('electron', 10000, 3_000), entry('pure', 10001, 1_000), entry('fish', 10002, 2_000)]
+    expect(bootOrder(pets).map(pet => pet.id)).toEqual(['pure', 'fish', 'electron'])
   })
 
-  it('keeps registry order as the default-pet rule (first live entry)', () => {
-    const pets = [entry('pure'), entry('electron')]
-    expect(routePet(pets, undefined)?.id).toBe('pure')
+  it('an unknown since (0) never outranks a stated boot time', () => {
+    const pets = [entry('electron', 10000, 0), entry('pure', 10001, 1_000)]
+    expect(bootOrder(pets).map(pet => pet.id)).toEqual(['pure', 'electron'])
+  })
+
+  it('is stable for equal since values and does not mutate the input', () => {
+    const pets = [entry('electron', 10000, 5_000), entry('pure', 10001, 5_000)]
+    const snapshot = pets.map(pet => pet.id)
+    expect(bootOrder(pets).map(pet => pet.id)).toEqual(snapshot)
+    expect(pets.map(pet => pet.id)).toEqual(snapshot)
   })
 })
 

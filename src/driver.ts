@@ -35,7 +35,7 @@ import {
   type InnerVoiceStore,
   type WakePlan,
 } from './inner-voice.ts'
-import { notifyPets, routePet, type PetEntry } from './registry.ts'
+import { defaultPet, notifyPets, type PetEntry } from './registry.ts'
 import * as petdata from './petdata.ts'
 import type { PetService } from './service.ts'
 
@@ -587,34 +587,50 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
 
   const pushState = async (state: 'idle' | 'thinking' | 'working' | 'error'): Promise<void> => {
     currentState = state
-    const target = await pet.route(boundPetId)
-    if (target === undefined) return // no pet online: nothing recorded, the next event re-pushes
+    // The state's AUDIENCE: the session's bound pet when it is alive, every
+    // live pet otherwise. An unbound session has no single carrier, and a
+    // bound pet gone offline has no body to wear the light — either way the
+    // working/thinking fact broadcasts (work sessions have no pet tools, so
+    // state is the only thing they ever drive). Per-pet dedup keeps the
+    // broadcast cheap and each pet's boot-reset semantics intact; when the
+    // bound pet returns online the audience collapses back to just it.
+    const pets = await pet.list()
+    const bound = pets.filter(pet => pet.id === boundPetId)
+    const audience = bound.length > 0 ? bound : pets
+    if (audience.length === 0) return // no pet online: nothing recorded, the next event re-pushes
     const autonomy = await readAutonomy()
     const autonomyKey = JSON.stringify(autonomy)
-    const last = lastPushedByPet.get(target.id)
-    if (last !== undefined && last.state === state && last.since === target.since && last.autonomy === autonomyKey) return
-    lastPushedByPet.set(target.id, { state, since: target.since, autonomy: autonomyKey })
-    try {
-      const response = await fetch(`http://127.0.0.1:${String(target.port)}/state`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ state, autonomy }),
-      })
-      if (!response.ok) {
-        console.error(`pet-surface driver: /state answered HTTP ${String(response.status)}`)
-        lastPushedByPet.delete(target.id) // failed: the next event re-pushes
-      } else if (state === 'error') {
-        // The error flash is transient: a follow-up identical 'error' must
-        // flash again, so the dedup entry does not survive an error push.
+    await Promise.all(audience.map(async (target) => {
+      const last = lastPushedByPet.get(target.id)
+      if (last !== undefined && last.state === state && last.since === target.since && last.autonomy === autonomyKey) return
+      lastPushedByPet.set(target.id, { state, since: target.since, autonomy: autonomyKey })
+      try {
+        // One-shot loopback POST: the same 5s budget the seam's callBudget
+        // applies. A frozen pet (listening socket, silent HTTP) must not park
+        // this await on undici's multi-minute default — the dedup entry set
+        // below would then swallow every identical state push until it fires.
+        const response = await fetch(`http://127.0.0.1:${String(target.port)}/state`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ state, autonomy }),
+          signal: AbortSignal.timeout(5_000),
+        })
+        if (!response.ok) {
+          console.error(`pet-surface driver: /state answered HTTP ${String(response.status)}`)
+          lastPushedByPet.delete(target.id) // failed: the next event re-pushes
+        } else if (state === 'error') {
+          // The error flash is transient: a follow-up identical 'error' must
+          // flash again, so the dedup entry does not survive an error push.
+          lastPushedByPet.delete(target.id)
+        }
+      } catch {
+        // The port was stale (the pet was swapped or restarted): the entry is
+        // dropped so the next event re-pushes; pid + probe validation keeps
+        // dead and frozen entries out of the route.
+        console.error(`pet-surface driver: /state to ${target.id} failed`)
         lastPushedByPet.delete(target.id)
       }
-    } catch {
-      // The port was stale (the pet was swapped or restarted): the entry is
-      // dropped so the next event re-pushes; pid + probe validation keeps
-      // dead and frozen entries out of the route.
-      console.error(`pet-surface driver: /state to ${target.id} failed`)
-      lastPushedByPet.delete(target.id)
-    }
+    }))
   }
   events.on('api-session/status', (sessionId: string, running: boolean) => {
     // An inner-voice session never competes for the binding and never paints
@@ -625,7 +641,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     // resumes would otherwise pin the binding to an arbitrary old session.
     if (running || boundSessionId === undefined) {
       // The pet binding belongs to the SESSION: a new bound session has no
-      // pet of its own yet, so routing falls back to the default pet until
+      // pet of its own yet — its state broadcasts to every live pet until
       // some pet earns the binding by answering an interaction.
       if (sessionId !== boundSessionId) boundPetId = undefined
       boundSessionId = sessionId
@@ -1383,6 +1399,7 @@ ${text}`
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ action: 'celebrate' }),
+          signal: AbortSignal.timeout(5_000), // fire-and-forget must still die: no leaked multi-minute hangs
         }).catch(() => { /* the pet may be gone; the ledger still holds */ })
       }
     }
@@ -1529,9 +1546,20 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
       }
       const focus = await readFocus()
       const focused = focus !== undefined ? pets.find(entry => entry.id === focus) : undefined
-      const target = focused ?? routePet(pets, undefined)
+      const target = focused ?? defaultPet(pets)
       if (target === undefined) throw new Error('no pet is running')
       return target
+    }
+    // 表演的门卫（影子会话定案）：pet_say/pet_do（及定/撤闹钟）只属于拥有会话
+    // 的宠。侧栏手动开的宠物模式会话不在 voiceOwners 里——按用户拍板，它被当作
+    // 普通工作会话对待：普通会话根本没有这些工具，这里对齐其行为（拒答、不分发），
+    // 而不是让它落到 focus/默认宠身上表演。报错说明去路（宠物表面输入卡），模型
+    // 能向用户转述。无会话身份的调用（exec.agent 缺失）无法分类，保持放行。
+    const requireOwnedSession = (exec: { agent?: { id?: unknown } } | undefined): void => {
+      const sessionId = exec?.agent?.id
+      if (typeof sessionId === 'string' && !voiceOwners.has(sessionId)) {
+        throw new Error('本会话没有绑定宠物（不是宠物自己的内心戏会话），pet 工具不分发。想和宠物说话，请用宠物表面的输入卡。')
+      }
     }
     // Classified failures: the model must KNOW why nothing happened
     // (offline vs timeout vs remote rejection) — silent loss was an
@@ -1565,6 +1593,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        requireOwnedSession(exec)
         const text = String(args.text).slice(0, 200)
         console.log(`pet-surface driver: pet_say ${JSON.stringify(text).slice(0, 60)}`)
         try {
@@ -1601,6 +1630,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        requireOwnedSession(exec)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
           // The menu belongs to the pet, not the driver: validate against the
@@ -1854,6 +1884,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        requireOwnedSession(exec)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
           const id = typeof args.id === 'string' ? args.id.trim().slice(0, WAKE_PLAN_ID_MAX) : ''
@@ -1902,6 +1933,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+        requireOwnedSession(exec)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
           const list = voiceWakePlans.get(entry.id) ?? []
