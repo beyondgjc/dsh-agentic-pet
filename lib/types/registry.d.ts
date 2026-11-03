@@ -40,7 +40,9 @@ export declare function probeControlPlane(port: number): Promise<boolean>;
 export declare function bootOrder(pets: PetEntry[]): PetEntry[];
 /** Every live pet in boot order. Dead-pid entries are skipped — they expire
  * by omission the next time their file is rewritten — and so are silent
- * entries (pid alive, control plane unresponsive). */
+ * entries (pid alive, control plane unresponsive). Probes run CONCURRENTLY:
+ * wall time per pass is the slowest pet (≤800ms frozen budget), not the
+ * serial sum. */
 export declare function readAllPets(home: string): Promise<PetEntry[]>;
 /**
  * The default pet for UNNAMED targets: the earliest-booted live entry

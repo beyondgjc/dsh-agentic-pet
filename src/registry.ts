@@ -82,7 +82,9 @@ export function bootOrder(pets: PetEntry[]): PetEntry[] {
 
 /** Every live pet in boot order. Dead-pid entries are skipped — they expire
  * by omission the next time their file is rewritten — and so are silent
- * entries (pid alive, control plane unresponsive). */
+ * entries (pid alive, control plane unresponsive). Probes run CONCURRENTLY:
+ * wall time per pass is the slowest pet (≤800ms frozen budget), not the
+ * serial sum. */
 export async function readAllPets(home: string): Promise<PetEntry[]> {
   let names: string[] = []
   try {
@@ -90,10 +92,9 @@ export async function readAllPets(home: string): Promise<PetEntry[]> {
   } catch {
     return [] // directory absent: no pets have ever registered
   }
-  const live: PetEntry[] = []
-  for (const name of names) {
+  const probed = await Promise.all(names.map(async (name): Promise<PetEntry | null> => {
     const id = name.slice(0, -5)
-    if (id === '') continue
+    if (id === '') return null
     try {
       const raw = JSON.parse(await readFile(join(home, REGISTRY_DIR, name), 'utf8')) as {
         port?: unknown
@@ -102,24 +103,24 @@ export async function readAllPets(home: string): Promise<PetEntry[]> {
       }
       const port = typeof raw.port === 'number' ? raw.port : Number.NaN
       const pid = typeof raw.pid === 'number' ? raw.pid : Number.NaN
-      if (!Number.isFinite(port) || !Number.isFinite(pid)) continue
+      if (!Number.isFinite(port) || !Number.isFinite(pid)) return null
       try {
         process.kill(pid, 0)
       } catch {
-        continue // dead publisher: not a live pet
+        return null // dead publisher: not a live pet
       }
-      if (!await probeControlPlane(port)) continue // frozen publisher
-      live.push({
+      if (!await probeControlPlane(port)) return null // frozen publisher
+      return {
         id,
         port,
         pid,
         since: typeof raw.since === 'number' ? raw.since : 0,
-      })
+      }
     } catch {
-      // unreadable file: skip, its owner will rewrite it
+      return null // unreadable file: skip, its owner will rewrite it
     }
-  }
-  return bootOrder(live)
+  }))
+  return bootOrder(probed.filter((entry): entry is PetEntry => entry !== null))
 }
 
 /**

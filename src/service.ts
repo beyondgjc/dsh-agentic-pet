@@ -213,13 +213,29 @@ export class PetHttpService extends PetService {
   // celebrate-only for at most one TTL, never to a thrown tool error.
   private readonly capsCache = new Map<string, { at: number; caps: PetCapabilities }>()
   private static readonly CAPS_TTL_MS = 30_000
+  // Liveness cache (single-flight): EVERY consumer — state pushes, the 5s
+  // event supervisor, per-pet event loops, voice gates, wake sweep, tool
+  // targeting — shares one probe pass per TTL window. Probing is discovery's
+  // cost (loopback-fast for live pets, up to ~800ms for a frozen publisher),
+  // so the cache caps the whole system at one pass per second while keeping
+  // liveness freshness within a window no consumer can sense (long-poll arms
+  // tolerate 30s-scale staleness). The {at, flight} pair is both the TTL and
+  // the in-flight dedup: concurrent callers join the running pass.
+  private listCache: { at: number; flight: Promise<PetEntry[]> } | undefined
+  private static readonly LIST_TTL_MS = 1_000
 
   constructor(ctx: Context, readonly home: string = petHome()) {
     super(ctx)
   }
 
+  /** Every live pet in boot order, served from the 1s single-flight cache:
+   * concurrent callers share the running probe pass. */
   list(): Promise<PetEntry[]> {
-    return readAllPets(this.home)
+    const hit = this.listCache
+    if (hit !== undefined && Date.now() - hit.at < PetHttpService.LIST_TTL_MS) return hit.flight
+    const flight = readAllPets(this.home)
+    this.listCache = { at: Date.now(), flight }
+    return flight
   }
 
   async snapshot(entry: PetEntry): Promise<PetSnapshot> {
@@ -331,6 +347,7 @@ export function createUnregisteredPetHttp(home: string = petHome()): PetService 
   // capability callers (pet_do, pet_state {actions:true}) blew up. Every new
   // instance field on PetHttpService must be initialized HERE too.
   ;(instance as unknown as { capsCache: Map<string, { at: number; caps: PetCapabilities }> }).capsCache = new Map()
+  ;(instance as unknown as { listCache: { at: number; flight: Promise<PetEntry[]> } | undefined }).listCache = undefined
   return instance
 }
 

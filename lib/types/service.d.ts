@@ -119,7 +119,11 @@ export declare class PetHttpService extends PetService {
     readonly home: string;
     private readonly capsCache;
     private static readonly CAPS_TTL_MS;
+    private listCache;
+    private static readonly LIST_TTL_MS;
     constructor(ctx: Context, home?: string);
+    /** Every live pet in boot order, served from the 1s single-flight cache:
+     * concurrent callers share the running probe pass. */
     list(): Promise<PetEntry[]>;
     snapshot(entry: PetEntry): Promise<PetSnapshot>;
     capabilities(entry: PetEntry): Promise<PetCapabilities>;
