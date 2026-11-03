@@ -69,7 +69,7 @@ export async function probeControlPlane(port: number): Promise<boolean> {
  * must never outrank a publisher that stated its boot time. This turns the
  * multi-pet design's de-facto rule ("the default pet is the first STARTED")
  * into an actual guarantee: discovery output IS boot order, so every
- * `pets[0]` consumer (defaultPet, pet_state's defaultPet) reads the
+ * `pets[0]` consumer (the driver's unnamed-target fallback) reads the
  * same pet. Stable sort: equal `since` values keep registry listing order.
  */
 export function bootOrder(pets: PetEntry[]): PetEntry[] {
