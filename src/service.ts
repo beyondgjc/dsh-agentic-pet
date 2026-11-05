@@ -262,7 +262,13 @@ export class PetHttpService extends PetService {
       if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
       caps = normalizeCapabilities(await response.json())
     } catch {
-      caps = { contractVersion: null, actions: null }
+      caps = {
+        contractVersion: null,
+        actions: null,
+        actionCatalog: null,
+        actionTagVocabulary: [],
+        tagged: false,
+      }
     }
     this.capsCache.set(entry.id, { at: Date.now(), caps })
     return caps

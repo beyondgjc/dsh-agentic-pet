@@ -45,6 +45,38 @@ const CHARACTER = 'whale';
  * change. Failure degrades to an empty catalog — the pet then advertises
  * only the universal `celebrate` alias, i.e. yesterday's behavior.
  */
+async function readActionTags() {
+    const file = join(resolveAssetsRoot(), CHARACTER, 'actions.tags.json');
+    try {
+        const raw = JSON.parse(await readFile(file, 'utf8'));
+        const map = new Map();
+        for (const [id, value] of Object.entries(raw)) {
+            if (typeof value !== 'object' || value === null)
+                continue;
+            const record = value;
+            const tags = Array.isArray(record.tags)
+                ? record.tags.filter(tag => typeof tag === 'string' && tag !== '')
+                : [];
+            const energy = record.energy === 'low' || record.energy === 'mid' || record.energy === 'high'
+                ? record.energy
+                : undefined;
+            const durationHintMs = typeof record.durationHintMs === 'number' && Number.isFinite(record.durationHintMs)
+                ? record.durationHintMs
+                : undefined;
+            const textInFrame = typeof record.textInFrame === 'boolean' ? record.textInFrame : undefined;
+            map.set(id, {
+                tags,
+                ...(energy === undefined ? {} : { energy }),
+                ...(durationHintMs === undefined ? {} : { durationHintMs }),
+                ...(textInFrame === undefined ? {} : { textInFrame }),
+            });
+        }
+        return map;
+    }
+    catch {
+        return new Map();
+    }
+}
 async function scanActionCatalog() {
     const videosRoot = join(resolveAssetsRoot(), CHARACTER, 'videos');
     const entries = [];
@@ -74,7 +106,8 @@ async function scanActionCatalog() {
         if (category.isDirectory())
             await collect(join(videosRoot, category.name), category.name);
     }
-    return entries;
+    const tags = await readActionTags();
+    return entries.map(entry => ({ ...entry, ...(tags.get(entry.id) ?? {}) }));
 }
 /**
  * The window's one canonical size: creation and every drag setBounds pin it.
@@ -414,7 +447,9 @@ async function main() {
     // The advertised menu: the universal celebrate alias first, then every
     // clip id the media tree holds.
     const actionIds = ['celebrate', ...actionCatalog.map(entry => entry.id)];
-    console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)}`);
+    const actionTagVocabulary = [...new Set(actionCatalog.flatMap(entry => entry.tags ?? []))];
+    const tagged = actionCatalog.some(entry => (entry.tags?.length ?? 0) > 0);
+    console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)}`);
     let handle;
     const attachUrl = process.env.DSH_PET_URL ?? await readLocatorUrl();
     let authenticated;
@@ -845,11 +880,21 @@ async function main() {
             // carries endpoint existence, the event body's own `type` field
             // carries event-type tolerance (§6 revision record).
             send(200, {
-                contractVersion: 4,
+                // v5: body-owned action tags (actionCatalog/actionTagVocabulary).
+                contractVersion: 5,
                 states: ['idle', 'thinking', 'working', 'error'],
                 // The pet's own action menu, scanned from the media tree at boot —
                 // celebrate first (the universal alias), then every playable clip.
                 actions: actionIds,
+                actionCatalog: actionCatalog.map(entry => ({
+                    id: entry.id,
+                    tags: entry.tags ?? [],
+                    ...(entry.energy === undefined ? {} : { energy: entry.energy }),
+                    ...(entry.durationHintMs === undefined ? {} : { durationHintMs: entry.durationHintMs }),
+                    ...(entry.textInFrame === undefined ? {} : { textInFrame: entry.textInFrame }),
+                })),
+                actionTagVocabulary,
+                tagged,
                 interactions: ['approval', 'question'],
             });
             return;

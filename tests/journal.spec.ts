@@ -54,6 +54,24 @@ describe('journal format', () => {
     expect(parsed[0]?.text).toContain('桌面上的光')
     expect(parsed[0]?.source).toBe('imported')
   })
+
+  it('parses content before the first marker as an imported entry', () => {
+    const raw = `用户手写的前言\n\n${formatJournalEntry(entry(2000, 'marker body'))}`
+    const parsed = parseJournalEntries(raw, 1234)
+    expect(parsed).toHaveLength(2)
+    expect(parsed[0]).toMatchObject({ at: 1234, source: 'imported', text: '用户手写的前言' })
+    expect(parsed[1]?.text).toBe('marker body')
+  })
+
+  it('parses a plain hand-written file without headings as one entry', () => {
+    const parsed = parseJournalEntries('第一行\n第二行\n', 999)
+    expect(parsed).toEqual([{
+      at: 999,
+      source: 'imported',
+      sessionId: null,
+      text: '第一行\n第二行',
+    }])
+  })
 })
 
 describe('append/read', () => {
@@ -116,6 +134,16 @@ describe('append/read', () => {
     expect(entries.some(item => item.source === 'external-edit')).toBe(true)
     expect(entries.some(item => item.text.includes('删除或清空'))).toBe(true)
     expect((await readFile(path, 'utf8')).includes('external-edit')).toBe(true)
+  })
+
+  it('keeps a user-written prefix visible after an external edit trace', async () => {
+    const home = await makeHome()
+    await appendJournal(home, 'electron', entry(1000, 'old'), DEFAULT_JOURNAL_CONFIG)
+    const path = journalPath(home, 'electron')
+    await writeFile(path, '用户全新手写的内容\n\n', 'utf8')
+    const entries = await readJournal(home, 'electron', 10)
+    expect(entries.some(item => item.text.includes('用户全新手写的内容'))).toBe(true)
+    expect(entries.some(item => item.source === 'external-edit')).toBe(true)
   })
 
   it('rotates old entries into the archive when the cap is exceeded', async () => {

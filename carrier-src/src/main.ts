@@ -50,6 +50,44 @@ interface CatalogEntry {
   id: string
   dir: string
   file: string
+  tags?: string[]
+  energy?: 'low' | 'mid' | 'high'
+  durationHintMs?: number
+  textInFrame?: boolean
+}
+
+/** The body-owned tag file: keyed by clip id, authored next to the media. */
+type ActionTagMeta = Pick<CatalogEntry, 'tags' | 'energy' | 'durationHintMs' | 'textInFrame'>
+
+async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
+  const file = join(resolveAssetsRoot(), CHARACTER, 'actions.tags.json')
+  try {
+    const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+    const map = new Map<string, ActionTagMeta>()
+    for (const [id, value] of Object.entries(raw)) {
+      if (typeof value !== 'object' || value === null) continue
+      const record = value as Record<string, unknown>
+      const tags = Array.isArray(record.tags)
+        ? record.tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '')
+        : []
+      const energy = record.energy === 'low' || record.energy === 'mid' || record.energy === 'high'
+        ? record.energy
+        : undefined
+      const durationHintMs = typeof record.durationHintMs === 'number' && Number.isFinite(record.durationHintMs)
+        ? record.durationHintMs
+        : undefined
+      const textInFrame = typeof record.textInFrame === 'boolean' ? record.textInFrame : undefined
+      map.set(id, {
+        tags,
+        ...(energy === undefined ? {} : { energy }),
+        ...(durationHintMs === undefined ? {} : { durationHintMs }),
+        ...(textInFrame === undefined ? {} : { textInFrame }),
+      })
+    }
+    return map
+  } catch {
+    return new Map() // tags are optional: the id catalog still works
+  }
 }
 
 /**
@@ -84,7 +122,8 @@ async function scanActionCatalog(): Promise<CatalogEntry[]> {
   for (const category of categories) {
     if (category.isDirectory()) await collect(join(videosRoot, category.name), category.name)
   }
-  return entries
+  const tags = await readActionTags()
+  return entries.map(entry => ({ ...entry, ...(tags.get(entry.id) ?? {}) }))
 }
 
 /**
@@ -436,7 +475,9 @@ async function main(): Promise<void> {
   // The advertised menu: the universal celebrate alias first, then every
   // clip id the media tree holds.
   const actionIds = ['celebrate', ...actionCatalog.map(entry => entry.id)]
-  console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)}`)
+  const actionTagVocabulary = [...new Set(actionCatalog.flatMap(entry => entry.tags ?? []))]
+  const tagged = actionCatalog.some(entry => (entry.tags?.length ?? 0) > 0)
+  console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)}`)
 
   let handle: HostChildHandle | undefined
   const attachUrl = process.env.DSH_PET_URL ?? await readLocatorUrl()
@@ -853,11 +894,23 @@ async function main(): Promise<void> {
       // carries endpoint existence, the event body's own `type` field
       // carries event-type tolerance (§6 revision record).
       send(200, {
-        contractVersion: 4,
+        // v5: body-owned action tags (actionCatalog/actionTagVocabulary).
+        contractVersion: 5,
         states: ['idle', 'thinking', 'working', 'error'],
         // The pet's own action menu, scanned from the media tree at boot —
         // celebrate first (the universal alias), then every playable clip.
         actions: actionIds,
+        // Body-owned catalog: tags are whatever this body declares in
+        // characters/whale/actions.tags.json; no cross-body vocabulary.
+        actionCatalog: actionCatalog.map(entry => ({
+          id: entry.id,
+          tags: entry.tags ?? [],
+          ...(entry.energy === undefined ? {} : { energy: entry.energy }),
+          ...(entry.durationHintMs === undefined ? {} : { durationHintMs: entry.durationHintMs }),
+          ...(entry.textInFrame === undefined ? {} : { textInFrame: entry.textInFrame }),
+        })),
+        actionTagVocabulary,
+        tagged,
         interactions: ['approval', 'question'],
       })
       return

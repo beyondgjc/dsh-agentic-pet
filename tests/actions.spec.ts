@@ -8,31 +8,85 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { formatAvailableActions, normalizeCapabilities, resolveActionRequest } from '../src/actions.ts'
+import {
+  formatAvailableActions,
+  formatAvailableTags,
+  normalizeCapabilities,
+  resolveActionRequest,
+  resolveTagRequest,
+} from '../src/actions.ts'
 import { callBudget } from '../src/service.ts'
+
+const emptyCaps = {
+  contractVersion: null,
+  actions: null,
+  actionCatalog: null,
+  actionTagVocabulary: [],
+  tagged: false,
+}
 
 describe('normalizeCapabilities', () => {
   it('keeps a well-formed actions array with the contract version', () => {
     expect(normalizeCapabilities({ contractVersion: 4, actions: ['celebrate', '写福字'] }))
-      .toEqual({ contractVersion: 4, actions: ['celebrate', '写福字'] })
+      .toEqual({ ...emptyCaps, contractVersion: 4, actions: ['celebrate', '写福字'] })
   })
 
   it('folds malformed shapes into a null catalog and a null version', () => {
-    expect(normalizeCapabilities(undefined)).toEqual({ contractVersion: null, actions: null })
-    expect(normalizeCapabilities('nope')).toEqual({ contractVersion: null, actions: null })
-    expect(normalizeCapabilities({})).toEqual({ contractVersion: null, actions: null })
-    expect(normalizeCapabilities({ actions: 'celebrate' })).toEqual({ contractVersion: null, actions: null })
-    expect(normalizeCapabilities({ actions: [1, null, 'ok'] })).toEqual({ contractVersion: null, actions: ['ok'] })
+    expect(normalizeCapabilities(undefined)).toEqual(emptyCaps)
+    expect(normalizeCapabilities('nope')).toEqual(emptyCaps)
+    expect(normalizeCapabilities({})).toEqual(emptyCaps)
+    expect(normalizeCapabilities({ actions: 'celebrate' })).toEqual(emptyCaps)
+    expect(normalizeCapabilities({ actions: [1, null, 'ok'] }))
+      .toEqual({ ...emptyCaps, actions: ['ok'] })
     // a legacy v1 pet (version absent) is distinct from a mistyped version
     expect(normalizeCapabilities({ actions: ['celebrate'], endpoints: [] }))
-      .toEqual({ contractVersion: null, actions: ['celebrate'] })
+      .toEqual({ ...emptyCaps, actions: ['celebrate'] })
     expect(normalizeCapabilities({ contractVersion: '4', actions: [] }))
-      .toEqual({ contractVersion: null, actions: null })
+      .toEqual(emptyCaps)
   })
 
   it('folds an advertised-but-empty menu into null (no catalog published)', () => {
     expect(normalizeCapabilities({ contractVersion: 4, actions: [] }))
-      .toEqual({ contractVersion: 4, actions: null })
+      .toEqual({ ...emptyCaps, contractVersion: 4 })
+  })
+
+  it('normalizes a body-owned action catalog and derives the tag vocabulary', () => {
+    const caps = normalizeCapabilities({
+      contractVersion: 5,
+      actions: ['写代码', '庆祝'],
+      actionCatalog: [
+        { id: '写代码', tags: ['工作', '专注'], energy: 'mid', durationHintMs: 3000 },
+        { id: '庆祝', tags: ['庆祝'], energy: 'high', textInFrame: true },
+        { id: 'bad-energy', tags: ['日常'], energy: 'extreme' },
+        { id: '', tags: ['dropped'] },
+      ],
+      actionTagVocabulary: ['工作', '专注', '庆祝', '日常'],
+    })
+    expect(caps.actionCatalog).toEqual([
+      { id: '写代码', tags: ['工作', '专注'], energy: 'mid', durationHintMs: 3000 },
+      { id: '庆祝', tags: ['庆祝'], energy: 'high', textInFrame: true },
+      { id: 'bad-energy', tags: ['日常'] },
+    ])
+    expect(caps.actionTagVocabulary).toEqual(['工作', '专注', '庆祝', '日常'])
+    expect(caps.tagged).toBe(true)
+  })
+
+  it('derives the vocabulary from the catalog when the body omits it', () => {
+    const caps = normalizeCapabilities({
+      actions: ['a', 'b'],
+      actionCatalog: [
+        { id: 'a', tags: ['亲近', '撒娇'] },
+        { id: 'b', tags: ['亲近'] },
+      ],
+    })
+    expect(caps.actionTagVocabulary).toEqual(['亲近', '撒娇'])
+  })
+
+  it('a legacy body has no tags and is not tagged', () => {
+    const caps = normalizeCapabilities({ actions: ['celebrate'] })
+    expect(caps.actionCatalog).toBeNull()
+    expect(caps.actionTagVocabulary).toEqual([])
+    expect(caps.tagged).toBe(false)
   })
 })
 
@@ -68,6 +122,80 @@ describe('resolveActionRequest', () => {
   it('random on a legacy pet (or celebrate-only menu) falls back to celebrate', () => {
     expect(resolveActionRequest('random', null)).toEqual({ kind: 'ok', action: 'celebrate' })
     expect(resolveActionRequest('random', ['celebrate'])).toEqual({ kind: 'ok', action: 'celebrate' })
+  })
+})
+
+describe('resolveTagRequest', () => {
+  const caps = normalizeCapabilities({
+    contractVersion: 5,
+    actions: ['a', 'b', 'c', 'celebrate'],
+    actionCatalog: [
+      { id: 'a', tags: ['亲近', '撒娇'] },
+      { id: 'b', tags: ['亲近'] },
+      { id: 'c', tags: ['工作'] },
+      { id: 'celebrate', tags: ['庆祝'] },
+    ],
+    actionTagVocabulary: ['亲近', '撒娇', '工作', '庆祝'],
+  })
+
+  it('matches the current body tags and returns all candidates', () => {
+    const result = resolveTagRequest('亲近', caps)
+    expect(result.kind).toBe('ok')
+    if (result.kind === 'ok') {
+      expect(['a', 'b']).toContain(result.action)
+      expect(result.candidates).toEqual(['a', 'b'])
+    }
+    expect(resolveTagRequest('工作', caps)).toEqual({ kind: 'ok', action: 'c', candidates: ['c'] })
+  })
+
+  it('never draws the celebrate alias when another match exists', () => {
+    for (let i = 0; i < 50; i += 1) {
+      const result = resolveTagRequest('庆祝', caps)
+      expect(result.kind).toBe('ok')
+      if (result.kind === 'ok') expect(result.action).toBe('celebrate') // only match, explicit fallback
+    }
+    const withOther = normalizeCapabilities({
+      actions: ['celebrate', 'x'],
+      actionCatalog: [
+        { id: 'celebrate', tags: ['庆祝'] },
+        { id: 'x', tags: ['庆祝'] },
+      ],
+    })
+    for (let i = 0; i < 50; i += 1) {
+      const result = resolveTagRequest('庆祝', withOther)
+      if (result.kind === 'ok') expect(result.action).toBe('x')
+    }
+  })
+
+  it('an unknown tag names the body vocabulary and action fallback', () => {
+    expect(resolveTagRequest('不存在', caps)).toEqual({
+      kind: 'unknown',
+      availableTags: ['亲近', '撒娇', '工作', '庆祝'],
+      availableActions: ['a', 'b', 'c', 'celebrate'],
+    })
+  })
+
+  it('a legacy body has no tag vocabulary', () => {
+    expect(resolveTagRequest('亲近', null)).toEqual({
+      kind: 'unknown',
+      availableTags: [],
+      availableActions: ['celebrate'],
+    })
+  })
+})
+
+describe('formatAvailableTags', () => {
+  it('names the missing-vocabulary fallback explicitly', () => {
+    expect(formatAvailableTags([])).toContain('未提供语义标签')
+  })
+
+  it('previews a long vocabulary', () => {
+    const tags = Array.from({ length: 30 }, (_, i) => `标签${String(i)}`)
+    const text = formatAvailableTags(tags)
+    expect(text).toContain('标签0')
+    expect(text).toContain('标签23')
+    expect(text).not.toContain('标签24')
+    expect(text).toContain('+6 more')
   })
 })
 

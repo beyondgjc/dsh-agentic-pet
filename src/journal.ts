@@ -144,8 +144,32 @@ function parseMarker(record: unknown): JournalEntry | undefined {
   }
 }
 
-/** Markers are authoritative; a hand-written `##` file falls back to headings. */
-export function parseJournalEntries(raw: string): JournalEntry[] {
+/** Hand-written text: split on ATX headings; a file without headings is ONE
+ * entry (not silently dropped). `fallbackAt` is the file mtime when known. */
+function parseHeadingSections(raw: string, fallbackAt: number): JournalEntry[] {
+  const sections = raw.split(/^##\s+/m).slice(1)
+  if (sections.length === 0) {
+    const text = raw.trim()
+    return text === '' ? [] : [{ at: fallbackAt, source: 'imported', sessionId: null, text }]
+  }
+  return sections.map((section) => {
+    const newline = section.indexOf('\n')
+    const heading = newline === -1 ? section.trim() : section.slice(0, newline).trim()
+    const body = newline === -1 ? '' : section.slice(newline + 1).trim()
+    const date = /(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?/.exec(heading)
+    let at = fallbackAt
+    if (date !== null) {
+      const parsed = new Date(`${date[1]}T${date[2] ?? '12:00'}:00`)
+      if (!Number.isNaN(parsed.getTime())) at = parsed.getTime()
+    }
+    return { at, source: 'imported', sessionId: null, text: `${heading}\n${body}`.trim() }
+  }).filter(entry => entry.text !== '')
+}
+
+/** Markers are authoritative; a hand-written `##` file falls back to headings.
+ * Content BEFORE the first marker is still parsed as imported entries — a
+ * user note prepended to a marker file must not live in a blind spot. */
+export function parseJournalEntries(raw: string, fallbackAt = 0): JournalEntry[] {
   const matches: Array<{ start: number; end: number; json: string }> = []
   markerPattern.lastIndex = 0
   let match: RegExpExecArray | null
@@ -153,7 +177,9 @@ export function parseJournalEntries(raw: string): JournalEntry[] {
     matches.push({ start: match.index, end: match.index + match[0].length, json: match[1] ?? '' })
   }
   if (matches.length > 0) {
-    const entries: JournalEntry[] = []
+    const first = matches[0]
+    const prefix = first === undefined ? '' : raw.slice(0, first.start)
+    const entries: JournalEntry[] = [...parseHeadingSections(prefix, fallbackAt)]
     for (let i = 0; i < matches.length; i += 1) {
       const current = matches[i]
       if (current === undefined) continue
@@ -172,20 +198,7 @@ export function parseJournalEntries(raw: string): JournalEntry[] {
     }
     return entries
   }
-  // Hand-written fallback: split on ATX headings.
-  const sections = raw.split(/^##\s+/m).slice(1)
-  return sections.map((section) => {
-    const newline = section.indexOf('\n')
-    const heading = newline === -1 ? section.trim() : section.slice(0, newline).trim()
-    const body = newline === -1 ? '' : section.slice(newline + 1).trim()
-    const date = /(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?/.exec(heading)
-    let at = 0
-    if (date !== null) {
-      const parsed = new Date(`${date[1]}T${date[2] ?? '12:00'}:00`)
-      if (!Number.isNaN(parsed.getTime())) at = parsed.getTime()
-    }
-    return { at, source: 'imported', sessionId: null, text: `${heading}\n${body}`.trim() }
-  })
+  return parseHeadingSections(raw, fallbackAt)
 }
 
 async function appendTrace(home: string, petId: string, text: string): Promise<string> {
@@ -249,12 +262,13 @@ export async function readJournal(home: string, petId: string, limit = 3): Promi
     await ensureExternalEditTrace(home, petId)
     try {
       let raw = await readFile(path, 'utf8')
-      let entries = parseJournalEntries(raw)
+      const fallbackAt = await stat(path).then(info => info.mtimeMs).catch(() => 0)
+      let entries = parseJournalEntries(raw, fallbackAt)
       const meta = await readMeta(home, petId)
       if (!verifyChain(entries, meta)) {
         await appendTrace(home, petId, '检测到 journal 链断裂或被删改，已记录。')
         raw = await readFile(path, 'utf8')
-        entries = parseJournalEntries(raw)
+        entries = parseJournalEntries(raw, fallbackAt)
       }
       return entries.slice(-Math.max(1, Math.min(20, limit)))
     } catch {
@@ -334,7 +348,8 @@ async function rotate(home: string, petId: string): Promise<void> {
   const path = journalPath(home, petId)
   const raw = await readFile(path, 'utf8').catch(() => '')
   if (raw === '') return
-  const entries = parseJournalEntries(raw)
+  const fallbackAt = await stat(path).then(info => info.mtimeMs).catch(() => 0)
+  const entries = parseJournalEntries(raw, fallbackAt)
   const archive = journalArchivePath(home, petId)
   await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, 'utf8')
   const note = (prev: string): JournalEntry => chainEntry({
@@ -417,25 +432,7 @@ export async function importHandwrittenJournal(
   } catch {
     return 0
   }
-  const sections = raw.split(/^##\s+/m).slice(1)
-  if (sections.length === 0) return 0
-  const entries: JournalEntry[] = sections.map((section) => {
-    const newline = section.indexOf('\n')
-    const heading = newline === -1 ? section.trim() : section.slice(0, newline).trim()
-    const body = newline === -1 ? '' : section.slice(newline + 1).trim()
-    const date = /(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?/.exec(heading)
-    let at = mtime
-    if (date !== null) {
-      const parsed = new Date(`${date[1]}T${date[2] ?? '12:00'}:00`)
-      if (!Number.isNaN(parsed.getTime())) at = parsed.getTime()
-    }
-    return {
-      at,
-      source: 'imported',
-      sessionId: null,
-      text: `${heading}\n${body}`.trim(),
-    }
-  }).filter(entry => entry.text !== '')
+  const entries: JournalEntry[] = parseHeadingSections(raw, mtime)
   if (entries.length === 0) return 0
   await mkdir(dirname(target), { recursive: true })
   let prev = 'genesis'

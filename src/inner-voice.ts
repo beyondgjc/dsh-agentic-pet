@@ -9,6 +9,7 @@
 
 import { join } from 'node:path'
 import { WHALE_DIR, readGlobalJson, writeGlobalJson } from './petdata.ts'
+import { formatPresenceLine, type PresenceFacts } from './presence.ts'
 
 /** Durable petId → sessionId mapping for the inner-voice sessions. */
 export interface InnerVoiceStore {
@@ -484,18 +485,24 @@ export interface GreetPromptFacts {
   bondTier: string
   /** 用户起的名字（未起则内置默认）：自我介绍的依据，改名后第一天尤其重要。 */
   name: string
+  /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
+  presence?: PresenceFacts
 }
 
 /** The boot-greeting prompt: fired once per dsh start when the pet first
  * comes online — before the random-wake cadence takes over. Always speaks
  * (no probability gate on this one); the time context rides the preset. */
 export function buildGreetPrompt(facts: GreetPromptFacts): string {
-  return [
+  const lines = [
     '[启动问好]',
     `你的名字是「${facts.name}」。`,
     `用户刚打开 DeepSeek，你的世界刚亮起来（好感 ${String(facts.affection)}，${moodOf(facts.affection)}；羁绊 ${facts.bondTier}，一起过了 ${String(facts.bondDays)} 天）。`,
-    '主动打个招呼（pet_say）——按当下的时辰自然问好，一两句就好，别问问题等回答。',
-  ].join(' ')
+  ]
+  if (facts.presence !== undefined) {
+    lines.push(`[你不在的时候] ${formatPresenceLine(facts.presence)}`)
+  }
+  lines.push('主动打个招呼（pet_say）——按当下的时辰自然问好，一两句就好，别问问题等回答。')
+  return lines.join(' ')
 }
 
 /** B 层 · 羁绊档位：days-with-interaction → tier name. Only grows, never
@@ -558,6 +565,8 @@ export interface WakePromptFacts {
   quiet?: boolean
   /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */
   journal?: Array<{ at: number; source: string; text: string }>
+  /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
+  presence?: PresenceFacts
 }
 
 /** Local HH:mm for plan times: the model's clock talk is the USER's wall
@@ -621,6 +630,9 @@ export function buildWakePrompt(facts: WakePromptFacts): string {
   if (facts.quiet === true) {
     lines.push('现在是静默时段，用户可能已经睡了；若非必要，可以只是安静待着。')
   }
+  if (facts.presence !== undefined) {
+    lines.push(`[你不在的时候] ${formatPresenceLine(facts.presence)}`)
+  }
   const journal = facts.journal ?? []
   if (journal.length > 0) {
     lines.push(
@@ -649,6 +661,8 @@ export interface TouchPromptFacts {
   affection: number
   /** ±60s 内到期的自主计划：合并进这次回应，计划标记为已消费。 */
   mergedPlan?: MergedWakePlan
+  /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
+  presence?: PresenceFacts
 }
 
 export function buildTouchPrompt(facts: TouchPromptFacts): string {
@@ -656,9 +670,12 @@ export function buildTouchPrompt(facts: TouchPromptFacts): string {
   const merged = facts.mergedPlan === undefined
     ? ''
     : `你定的计划「${facts.mergedPlan.intent}」也正好到点，这次一并处理；`
+  const presence = facts.presence === undefined
+    ? ''
+    : ` [你不在的时候] ${formatPresenceLine(facts.presence)}`
   return [
     facts.mergedPlan === undefined ? '[被触摸]' : '[用户+自主唤醒]',
-    `用户刚摸了你的${wording}（今天第 ${String(facts.touchesToday)} 次，好感 ${String(facts.affection)}，${moodOf(facts.affection)}）。${merged}`,
+    `用户刚摸了你的${wording}（今天第 ${String(facts.touchesToday)} 次，好感 ${String(facts.affection)}，${moodOf(facts.affection)}）。${merged}${presence}`,
     '回应一句（pet_say）或做个反应（pet_do）。',
   ].join(' ')
 }
@@ -668,9 +685,16 @@ export function buildTouchPrompt(facts: TouchPromptFacts): string {
  * (and may pet_do); it is a conversation turn, not a touch reaction. Length
  * clamps to the contract's 2000-character ceiling. A plan inside the ±60s
  * merge window folds in: the tag becomes the union and the intent rides. */
-export function buildChatPrompt(text: string, mergedPlan?: MergedWakePlan): string {
+export function buildChatPrompt(
+  text: string,
+  mergedPlan?: MergedWakePlan,
+  presence?: PresenceFacts,
+): string {
   const merged = mergedPlan === undefined
     ? ''
     : `[用户+自主唤醒] 用户正在跟你说话，恰好也到了你定的计划点（${wakePlanClock(mergedPlan.at)}「${mergedPlan.intent}」），合并成这一次醒来。\n`
-  return `${merged}[用户对你说] ${text.slice(0, 2000)}`
+  const presenceLine = presence === undefined
+    ? ''
+    : `[你不在的时候] ${formatPresenceLine(presence)}\n`
+  return `${merged}${presenceLine}[用户对你说] ${text.slice(0, 2000)}`
 }

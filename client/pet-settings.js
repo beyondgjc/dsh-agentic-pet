@@ -201,6 +201,8 @@ window.__ModuleLoader__.load({
       var quietOn = !!rhythm.quiet
       var journal = settings.journal || {}
       var journalOn = journal.enabled !== false
+      var presenceSummary = settings.presenceSummary || {}
+      var presenceOn = presenceSummary.enabled === true
       var tts = settings.tts || {}
       var debug = settings.debug || {}
       var savedBinding = String((iv.boundSessions && iv.boundSessions.electron) || '')
@@ -582,6 +584,11 @@ window.__ModuleLoader__.load({
             onChange: function () { update({ journal: { allowUnboundAppend: journal.allowUnboundAppend !== true } }) },
           })) : null,
           h(Hint, null, '本子在 ~/.dsh/whale598/<petId>/journal.md：可读、可追加、不静默删改；手写本子已导入。默认只有宠物自己的会话可以追加。')),
+        h(Section, { title: '你不在的时候' },
+          h('div', { style: row }, '回来时给我一份摘要', h(Toggle, { value: presenceOn, onChange: function () {
+            update({ presenceSummary: { enabled: !presenceOn } })
+          } })),
+          h(Hint, null, '默认关闭；打开后，你回到桌面时她最多用三行说自己这段时间醒了几次、做了什么、有没有自排计划。')),
         h(Section, { title: h('span', null, '自由活动 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '逻辑驱动')) },
           h('div', { style: row }, '自由活动（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {
             update({ proactivity: { idleAnimation: !(pro.idleAnimation !== false) } })

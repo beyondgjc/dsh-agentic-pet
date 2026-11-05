@@ -37,8 +37,10 @@ export declare function formatJournalEntry(entry: JournalEntry): string;
 /** Chain link for an entry body. The text is part of the hash, so editing a
  * body without recomputing every later link is detectable. */
 export declare function hashJournalEntry(prev: string, entry: JournalEntry): string;
-/** Markers are authoritative; a hand-written `##` file falls back to headings. */
-export declare function parseJournalEntries(raw: string): JournalEntry[];
+/** Markers are authoritative; a hand-written `##` file falls back to headings.
+ * Content BEFORE the first marker is still parsed as imported entries — a
+ * user note prepended to a marker file must not live in a blind spot. */
+export declare function parseJournalEntries(raw: string, fallbackAt?: number): JournalEntry[];
 export declare function readJournal(home: string, petId: string, limit?: number): Promise<JournalEntry[]>;
 export declare function readJournalForInjection(home: string, petId: string, config: JournalConfig): Promise<JournalInjection[]>;
 export declare function appendJournal(home: string, petId: string, entry: {

@@ -106,11 +106,16 @@ interface JournalSettings {
   allowUnboundAppend?: boolean
 }
 
+interface PresenceSettings {
+  enabled?: boolean
+}
+
 interface PetSettings {
   proactivity?: ProactivitySettings
   innerVoice?: InnerVoiceSettings
   rhythm?: RhythmSettings
   journal?: JournalSettings
+  presenceSummary?: PresenceSettings
   tts?: TtsSettings
   debug?: DebugSettings
 }
@@ -143,6 +148,7 @@ const DEFAULT_SETTINGS: PetSettings = {
     maxFileBytes: 256 * 1024,
     allowUnboundAppend: false,
   },
+  presenceSummary: { enabled: false },
   tts: { enabled: false },
   debug: { cdp: false },
 }
@@ -208,6 +214,7 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
   const innerVoice = { ...DEFAULT_SETTINGS.innerVoice, ...current.innerVoice }
   const rhythm: RhythmSettings = { quiet: null, ...current.rhythm }
   const journal: JournalSettings = { ...DEFAULT_SETTINGS.journal, ...current.journal }
+  const presenceSummary: PresenceSettings = { enabled: false, ...current.presenceSummary }
   const debug = { ...DEFAULT_SETTINGS.debug, ...current.debug }
   const patchProactivity = patch.proactivity
   if (typeof patchProactivity === 'object' && patchProactivity !== null) {
@@ -309,6 +316,11 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
     if (bytes !== undefined) journal.maxFileBytes = bytes
     if (typeof j.allowUnboundAppend === 'boolean') journal.allowUnboundAppend = j.allowUnboundAppend
   }
+  const patchPresence = patch.presenceSummary
+  if (typeof patchPresence === 'object' && patchPresence !== null) {
+    const p = patchPresence as Record<string, unknown>
+    if (typeof p.enabled === 'boolean') presenceSummary.enabled = p.enabled
+  }
   const patchDebug = patch.debug
   if (typeof patchDebug === 'object' && patchDebug !== null) {
     const d = patchDebug as Record<string, unknown>
@@ -341,7 +353,7 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
   // pet-settings.json is SHARED with the carrier (its tuning/outfit/rev keys
   // live in the same file): preserve every key this page does not own, or one
   // save here silently wipes the carrier's half.
-  return { ...current, proactivity, innerVoice, rhythm, journal, tts, debug }
+  return { ...current, proactivity, innerVoice, rhythm, journal, presenceSummary, tts, debug }
 }
 
 function openPathInFileManager(path: string): void {

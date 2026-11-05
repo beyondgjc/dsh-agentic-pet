@@ -6,6 +6,7 @@
  * SessionController calls, and the per-pet pending locks.
  * @module dsh-agentic-pet/inner-voice
  */
+import { type PresenceFacts } from './presence.ts';
 /** Durable petId → sessionId mapping for the inner-voice sessions. */
 export interface InnerVoiceStore {
     readonly sessions: Record<string, {
@@ -187,6 +188,8 @@ export interface GreetPromptFacts {
     bondTier: string;
     /** 用户起的名字（未起则内置默认）：自我介绍的依据，改名后第一天尤其重要。 */
     name: string;
+    /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
+    presence?: PresenceFacts;
 }
 /** The boot-greeting prompt: fired once per dsh start when the pet first
  * comes online — before the random-wake cadence takes over. Always speaks
@@ -244,6 +247,8 @@ export interface WakePromptFacts {
         source: string;
         text: string;
     }>;
+    /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
+    presence?: PresenceFacts;
 }
 /** Local HH:mm for plan times: the model's clock talk is the USER's wall
  * clock (logStamp precedent), and plans are compared against it. */
@@ -269,6 +274,8 @@ export interface TouchPromptFacts {
     affection: number;
     /** ±60s 内到期的自主计划：合并进这次回应，计划标记为已消费。 */
     mergedPlan?: MergedWakePlan;
+    /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
+    presence?: PresenceFacts;
 }
 export declare function buildTouchPrompt(facts: TouchPromptFacts): string;
 /** The chat上行 prompt (§6 2026-10-31 revision): the user typed at the
@@ -276,4 +283,4 @@ export declare function buildTouchPrompt(facts: TouchPromptFacts): string;
  * (and may pet_do); it is a conversation turn, not a touch reaction. Length
  * clamps to the contract's 2000-character ceiling. A plan inside the ±60s
  * merge window folds in: the tag becomes the union and the intent rides. */
-export declare function buildChatPrompt(text: string, mergedPlan?: MergedWakePlan): string;
+export declare function buildChatPrompt(text: string, mergedPlan?: MergedWakePlan, presence?: PresenceFacts): string;
