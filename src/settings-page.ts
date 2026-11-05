@@ -17,6 +17,7 @@ import { rm } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
 import type { PetService } from './service.ts'
 
 /** The proactivity switches. `enabled`/`cooldownMinutes`/
@@ -383,6 +384,10 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
       if (totals.total > 0) touchTotals[id] = totals
     }
     writeJson(res, 200, { settings: composed, affection, windowPosition, pets: status.pets, touchTotals })
+  })
+
+  route('GET', '/api/pet-settings/electron-runtime', async (_req, res) => {
+    writeJson(res, 200, { ok: true, runtime: readElectronRuntimeStatus(home) ?? null })
   })
 
   route('POST', '/api/pet-settings/update', async (req, res) => {

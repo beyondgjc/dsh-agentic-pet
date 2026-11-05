@@ -17,6 +17,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
@@ -29,6 +30,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { installPetDriver } from './driver.ts'
+import { installLockStale, isProcessAlive, parseInstallLock } from './electron-lock.ts'
+import { writeElectronRuntimeStatus, type ElectronRuntimeStatus } from './electron-runtime-status.ts'
 import { installSettingsPage } from './settings-page.ts'
 import { installPetService, petHome } from './service.ts'
 
@@ -347,7 +350,6 @@ export function apply(ctx: Context): void {
       return existsSync(binary) ? binary : undefined
     } catch { return undefined }
   }
-  const INSTALL_LOCK_STALE_MS = 30 * 60_000
   const installLockPath = (pkgDir: string): string => join(pkgDir, '.dsh-pet-install.lock')
   const acquireInstallLock = (pkgDir: string): boolean => {
     const lock = installLockPath(pkgDir)
@@ -355,54 +357,130 @@ export function apply(ctx: Context): void {
     try {
       write()
       return true
+    } catch { /* the lock already exists; inspect its owner */ }
+    let raw: string | undefined
+    let mtimeMs = 0
+    try {
+      raw = readFileSync(lock, 'utf8')
+      mtimeMs = statSync(lock).mtimeMs
     } catch {
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > INSTALL_LOCK_STALE_MS) {
-          unlinkSync(lock)
-          write()
-          return true
-        }
-      } catch { /* lock inspection stays best-effort */ }
+      // The lock vanished between the failed create and this read: try to own it.
+      try { write(); return true } catch { return false }
+    }
+    const owner = raw === undefined ? undefined : parseInstallLock(raw)?.pid
+    const ownerPid = typeof owner === 'number' ? owner : undefined
+    if (!installLockStale(raw, mtimeMs, Date.now())) {
+      logCarrier(ownerPid === undefined
+        ? `electron install lock unreadable but fresh; waiting: ${lock}`
+        : `electron install lock held by pid ${String(ownerPid)} (alive); waiting: ${lock}`)
+      return false
+    }
+    const dead = ownerPid !== undefined && !isProcessAlive(ownerPid)
+    logCarrier(`electron install lock stale (${ownerPid === undefined ? 'unreadable' : `pid ${String(ownerPid)} ${dead ? 'dead' : 'expired'}`}); taking over: ${lock}`)
+    try { unlinkSync(lock) } catch { /* another activation removed it first */ }
+    try {
+      write()
+      return true
+    } catch {
       return false
     }
   }
   const releaseInstallLock = (pkgDir: string): void => {
-    try { unlinkSync(installLockPath(pkgDir)) } catch { /* already gone */ }
+    const lock = installLockPath(pkgDir)
+    try {
+      const owner = parseInstallLock(readFileSync(lock, 'utf8'))?.pid
+      // A takeover after the absolute cap may have replaced our lock; never
+      // delete the new owner's file on the way out.
+      if (typeof owner === 'number' && owner !== process.pid) return
+    } catch { /* unreadable or already gone: fall through to cleanup */ }
+    try { unlinkSync(lock) } catch { /* already gone */ }
   }
+  const NPMMIRROR_ELECTRON = 'https://npmmirror.com/mirrors/electron/'
+  const INSTALL_TIMEOUT_MS = 20 * 60_000
+  let activeInstallChild: ChildProcess | undefined
+
+  const writeRuntimeStatus = (status: ElectronRuntimeStatus): void => {
+    writeElectronRuntimeStatus(petHome(), status)
+  }
+
+  type ElectronInstallResult =
+    | { kind: 'installed'; binary: string }
+    | { kind: 'busy' }
+    | { kind: 'failed'; error: string }
+    | { kind: 'unavailable'; error: string }
+
   /**
    * Install the npm electron binary off the activation path. The package's
-   * lazy installer is a ~250 MB download; running it synchronously (which
+   * lazy installer is a large download; running it synchronously (which
    * `require('electron')` does) freezes the host, so it runs as a child with
-   * progress in the spawn log and a mirror hint on failure.
+   * progress in the spawn log. The lock is owner-liveness based: a host that
+   * dies mid-download never blocks the next activation.
    */
-  const installNpmElectron = async (pkgDir: string): Promise<string | undefined> => {
+  const installNpmElectron = async (pkgDir: string, attempt: number): Promise<ElectronInstallResult> => {
     const installer = join(pkgDir, 'install.js')
     if (!existsSync(installer)) {
       logCarrier(`electron binary missing and install.js not found: ${pkgDir}`)
-      return undefined
+      writeRuntimeStatus({ state: 'unavailable', updatedAt: Date.now(), error: `install.js not found in ${pkgDir}` })
+      return { kind: 'unavailable', error: `install.js not found in ${pkgDir}` }
     }
     if (!acquireInstallLock(pkgDir)) {
-      logCarrier(`electron install already in progress (lock present): ${pkgDir}`)
-      return undefined
+      writeRuntimeStatus({ state: 'busy', updatedAt: Date.now() })
+      return { kind: 'busy' }
     }
-    logCarrier(`electron binary missing; installing in background: ${pkgDir}`)
-    return await new Promise<string | undefined>((resolveInstall) => {
+    const explicitMirror = (process.env.ELECTRON_MIRROR ?? process.env.npm_config_electron_mirror ?? '').trim()
+    const mirror = explicitMirror !== ''
+      ? explicitMirror
+      : attempt % 2 === 0 ? NPMMIRROR_ELECTRON : undefined
+    const source = explicitMirror !== '' ? 'explicit' : mirror === undefined ? 'github' : 'npmmirror'
+    const startedAt = Date.now()
+    writeRuntimeStatus({ state: 'downloading', updatedAt: startedAt, startedAt, attempt: attempt + 1, source })
+    logCarrier(`electron binary missing; installing in background (attempt ${String(attempt + 1)}, source=${source}): ${pkgDir}`)
+    return await new Promise<ElectronInstallResult>((resolveInstall) => {
       let settled = false
-      const finish = (value: string | undefined): void => {
+      let timeout: NodeJS.Timeout | undefined
+      const finish = (result: ElectronInstallResult): void => {
         if (settled) return
         settled = true
+        if (timeout !== undefined) clearTimeout(timeout)
+        activeInstallChild = undefined
         releaseInstallLock(pkgDir)
-        resolveInstall(value)
+        if (result.kind === 'installed') {
+          writeRuntimeStatus({ state: 'ready', updatedAt: Date.now(), startedAt, finishedAt: Date.now(), attempt: attempt + 1, source })
+        } else if (result.kind === 'failed') {
+          writeRuntimeStatus({ state: 'failed', updatedAt: Date.now(), startedAt, attempt: attempt + 1, source, error: result.error })
+        }
+        resolveInstall(result)
       }
       let stderr = ''
       let stdout = ''
       let lastProgress = 0
-      const child = spawn(process.execPath, [installer], {
-        cwd: pkgDir,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
+      const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+      if (mirror === undefined) {
+        delete env.ELECTRON_MIRROR
+        delete env.npm_config_electron_mirror
+      } else {
+        env.ELECTRON_MIRROR = mirror
+      }
+      let child: ChildProcess
+      try {
+        child = spawn(process.execPath, [installer], {
+          cwd: pkgDir,
+          env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logCarrier(`electron install failed to start: ${message}`)
+        finish({ kind: 'failed', error: message })
+        return
+      }
+      activeInstallChild = child
+      timeout = setTimeout(() => {
+        logCarrier(`electron install timed out after ${String(INSTALL_TIMEOUT_MS / 60_000)} min (source=${source}); killing pid=${String(child.pid ?? 'unknown')}`)
+        child.kill()
+        finish({ kind: 'failed', error: `timed out after ${String(INSTALL_TIMEOUT_MS / 60_000)} min` })
+      }, INSTALL_TIMEOUT_MS)
       child.stdout?.setEncoding('utf8')
       child.stdout?.on('data', (chunk: string) => {
         stdout = `${stdout}${chunk}`.slice(-2_000)
@@ -417,22 +495,23 @@ export function apply(ctx: Context): void {
       child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-2_000) })
       child.on('error', (error: Error) => {
         logCarrier(`electron install failed to start: ${error.message}`)
-        finish(undefined)
+        finish({ kind: 'failed', error: error.message })
       })
       child.on('exit', (code: number | null) => {
         if (code !== 0) {
-          logCarrier(`electron install failed (exit ${String(code)}): ${stderr.trim() || 'no stderr'}. Set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ (or electron_mirror in .npmrc) and restart DSH; or run "node ${installer}" manually.`)
-          finish(undefined)
+          const detail = stderr.trim() || 'no stderr'
+          logCarrier(`electron install failed (exit ${String(code)}, source=${source}): ${detail}`)
+          finish({ kind: 'failed', error: `exit ${String(code)}: ${detail}` })
           return
         }
         const binary = npmElectronBinary(pkgDir)
         if (binary === undefined) {
           logCarrier(`electron install exited 0 but the binary is still missing: ${pkgDir}`)
-          finish(undefined)
+          finish({ kind: 'failed', error: 'binary still missing after a successful install' })
           return
         }
         logCarrier(`electron installed: ${binary}`)
-        finish(ensureElectronUsable(binary))
+        finish({ kind: 'installed', binary: ensureElectronUsable(binary) })
       })
     })
   }
@@ -520,18 +599,73 @@ export function apply(ctx: Context): void {
     child.unref()
     ctx.effect(() => () => { child.kill() }, 'pet-surface: carrier shutdown')
   }
+  const RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
+  let disposed = false
+  let carrierLaunched = false
+  let installInFlight = false
+  let installAttempt = 0
+  let retryTimer: NodeJS.Timeout | undefined
+
+  const launchOnce = (url: string, carrierDir: string, binary: string): void => {
+    if (disposed || carrierLaunched) return
+    carrierLaunched = true
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    }
+    launchCarrier(url, carrierDir, binary)
+  }
+
+  const ensureCarrier = async (url: string, carrierDir: string, pkgDir: string): Promise<void> => {
+    if (disposed || carrierLaunched) return
+    // Re-resolve on every attempt: another runtime may have finished the install.
+    const resolution = resolveElectron()
+    if (resolution.binary !== undefined) {
+      writeRuntimeStatus({ state: 'ready', updatedAt: Date.now() })
+      launchOnce(url, carrierDir, resolution.binary)
+      return
+    }
+    const nextPkgDir = resolution.npmPackageDir ?? pkgDir
+    if (installInFlight) return
+    installInFlight = true
+    const attempt = installAttempt
+    installAttempt += 1
+    const result = await installNpmElectron(nextPkgDir, attempt).catch((error: unknown): ElectronInstallResult => ({
+      kind: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    }))
+    installInFlight = false
+    if (disposed || carrierLaunched) return
+    if (result.kind === 'installed') {
+      launchOnce(url, carrierDir, result.binary)
+      return
+    }
+    if (result.kind === 'unavailable') {
+      logCarrier(`electron auto-install unavailable: ${result.error}`)
+      return
+    }
+    const reason = result.kind === 'busy' ? 'blocked by another activation' : `failed (${result.error})`
+    const delay = RETRY_DELAYS_MS[Math.min(installAttempt - 1, RETRY_DELAYS_MS.length - 1)]
+    logCarrier(`electron install ${reason}; retrying in ${String(delay / 1_000)}s`)
+    if (retryTimer !== undefined) clearTimeout(retryTimer)
+    retryTimer = setTimeout(() => { void ensureCarrier(url, carrierDir, nextPkgDir) }, delay)
+  }
+
   const spawnPetCarrier = (url: string): void => {
     const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
     if (process.env.DSH_PET_NO_SPAWN === '1' || !existsSync(join(carrierDir, 'package.json'))) return
     const resolution = resolveElectron()
     if (resolution.binary !== undefined) {
-      launchCarrier(url, carrierDir, resolution.binary)
+      writeRuntimeStatus({ state: 'ready', updatedAt: Date.now() })
+      launchOnce(url, carrierDir, resolution.binary)
       return
     }
-    if (resolution.npmPackageDir === undefined) return
-    void installNpmElectron(resolution.npmPackageDir)
-      .then((binary) => { if (binary !== undefined) launchCarrier(url, carrierDir, binary) })
-      .catch((error: unknown) => { logCarrier(`electron install failed: ${error instanceof Error ? error.message : String(error)}`) })
+    if (resolution.npmPackageDir === undefined) {
+      logCarrier('no electron binary and no npm electron package; cannot auto-install')
+      writeRuntimeStatus({ state: 'unavailable', updatedAt: Date.now(), error: 'electron package not installed' })
+      return
+    }
+    void ensureCarrier(url, carrierDir, resolution.npmPackageDir)
   }
   const settledReady = (): void => {
     const url = authenticatedRoot()
@@ -570,6 +704,14 @@ export function apply(ctx: Context): void {
   // tool catalog. The host-side glue above stays unconditional.
   // The desktop sidebar settings page's host half (client half: ./client/).
   installSettingsPage(ctx, home, pet)
+  // Stop the retry loop and our install child when this runtime unloads. If
+  // the process dies before the exit handler runs, the lock's owner liveness
+  // lets the next activation take over instead of waiting out a grace period.
+  ctx.effect(() => () => {
+    disposed = true
+    if (retryTimer !== undefined) clearTimeout(retryTimer)
+    activeInstallChild?.kill()
+  }, 'pet-surface: electron install cleanup')
   // Withdraw on dispose while still our own entry, so a shut-down runtime does
   // not shadow a live publisher's file.
   ctx.effect(() => () => {

@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
 
     var READ = '/api/pet-settings/read'
     var UPDATE = '/api/pet-settings/update'
+    var RUNTIME = '/api/pet-settings/electron-runtime'
 
     // Theme-neutral: inherit foreground, translucent borders — readable on
     // both the host's dark and light themes without a design system.
@@ -24,6 +25,9 @@ window.__ModuleLoader__.load({
     var row = { display: 'flex', alignItems: 'center', gap: 10, margin: '6px 0', fontSize: 13, flexWrap: 'wrap' }
     var muted = { color: 'rgba(127,127,127,.9)', fontSize: 12 }
     var inputStyle = { width: 64, padding: '2px 6px', border: '1px solid rgba(127,127,127,.4)', borderRadius: 6, background: 'transparent', color: 'inherit', font: 'inherit' }
+    var runtimeCard = { border: '1px solid rgba(124,108,240,.45)', borderRadius: 10, padding: '10px 14px 12px', margin: '10px 0', background: 'rgba(124,108,240,.06)' }
+    var runtimeTrack = { position: 'relative', height: 4, borderRadius: 2, background: 'rgba(127,127,127,.18)', overflow: 'hidden', marginTop: 8 }
+    var runtimeBar = { position: 'absolute', top: 0, left: '-35%', width: '35%', height: '100%', borderRadius: 2, background: 'rgba(124,108,240,.85)', animation: 'petRuntimeSlide 1.15s ease-in-out infinite' }
     function btnStyle(variant) {
       var base = { border: '1px solid rgba(127,127,127,.4)', borderRadius: 6, cursor: 'pointer', font: 'inherit', fontSize: 12, padding: '3px 12px', background: 'transparent', color: 'inherit' }
       if (variant === 'primary') return Object.assign(base, { fontWeight: 700, borderColor: 'rgba(124,108,240,.6)' })
@@ -50,6 +54,28 @@ window.__ModuleLoader__.load({
     function Hint(props) {
       return h('div', { style: Object.assign({ margin: '6px 0 2px' }, muted) }, props.children)
     }
+    // First-install visibility: the settings page is open while the runtime is
+    // still downloading, so the only honest progress is phase + elapsed time.
+    function RuntimeBanner(props) {
+      var r = props.runtime
+      if (!r || r.state === 'ready') return null
+      var active = r.state === 'downloading' || r.state === 'preparing'
+      var elapsed = r.startedAt ? Math.max(0, Math.floor((Date.now() - r.startedAt) / 1000)) : 0
+      var sourceLabel = r.source === 'npmmirror' ? '镜像源 npmmirror' : r.source === 'github' ? 'GitHub' : r.source === 'explicit' ? '自定义镜像' : ''
+      var text
+      if (r.state === 'busy') text = '另一个 DSH 窗口正在准备 Electron 运行时，完成后宠物会自动出现。'
+      else if (r.state === 'unavailable') text = '插件缺少 electron 安装器，无法自动下载。请重新安装 dsh-agentic-pet。'
+      else if (r.state === 'failed') text = '运行时安装失败：' + String(r.error || '未知错误').slice(0, 160) + '，后台会自动重试。'
+      else text = '首次安装正在准备 Electron 运行时（约 158 MB），完成后宠物会自动出现。' + (elapsed > 0 ? ' 已等待 ' + elapsed + ' 秒。' : '')
+      return h('div', { style: runtimeCard },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('span', { style: { fontWeight: 700, fontSize: 13 } }, 'Electron 运行时'),
+          r.attempt ? h('span', { style: muted }, '第 ' + r.attempt + ' 次尝试') : null,
+          sourceLabel ? h('span', { style: muted }, sourceLabel) : null),
+        h('div', { style: Object.assign({ margin: '4px 0 0' }, muted) }, text),
+        active ? h('div', { style: runtimeTrack }, h('div', { style: runtimeBar })) : null,
+        active ? h('style', null, '@keyframes petRuntimeSlide { 0% { left: -35% } 100% { left: 100% } }') : null)
+    }
 
     function PetSettingsPage() {
       var state = useState(null)
@@ -65,6 +91,9 @@ window.__ModuleLoader__.load({
       var voiceState = useState(null)
       var voice = voiceState[0]
       var setVoice = voiceState[1]
+      var runtimeState = useState(null)
+      var runtime = runtimeState[0]
+      var setRuntime = runtimeState[1]
       var previewAudioRef = useRef(null)
       var keyInputRef = useRef(null)
 
@@ -75,6 +104,35 @@ window.__ModuleLoader__.load({
           .catch(function (e) { setMsg('读取失败: ' + (e && e.message)) })
       }, [])
       useEffect(function () { refresh() }, [refresh])
+      // While the first install downloads Electron, poll the runtime status
+      // until it is ready. A ready/absent status ends the loop; a failed one
+      // keeps polling because the host retries on its own.
+      useEffect(function () {
+        var alive = true
+        var timer = null
+        var emptyTries = 0
+        function load() {
+          fetch(RUNTIME, { credentials: 'same-origin' })
+            .then(function (r) { return r.json() })
+            .then(function (d) {
+              if (!alive) return
+              var next = (d && d.runtime) || null
+              setRuntime(next)
+              if (next && (next.state === 'downloading' || next.state === 'preparing' || next.state === 'busy' || next.state === 'failed')) {
+                emptyTries = 0
+                timer = setTimeout(load, 2000)
+              } else if (!next && emptyTries < 5) {
+                // The first activation may still be writing its status when the
+                // page mounts; give it a few seconds instead of hiding forever.
+                emptyTries += 1
+                timer = setTimeout(load, 3000)
+              }
+            })
+            .catch(function () { if (alive) timer = setTimeout(load, 5000) })
+        }
+        load()
+        return function () { alive = false; if (timer) clearTimeout(timer) }
+      }, [])
 
       var act = useCallback(function (path, body, doneMessage) {
         setBusy(true)
@@ -179,6 +237,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { flex: 1 } }),
           h(SButton, { onClick: refresh, disabled: busy }, '刷新')),
         msg ? h('div', { style: { fontSize: 12, margin: '0 0 6px', color: msg.indexOf('失败') >= 0 ? '#ff7369' : 'inherit' } }, msg) : null,
+        h(RuntimeBanner, { runtime: runtime }),
 
         // ── 状态（每宠一行） ──
         h(Section, { title: '宠物' },

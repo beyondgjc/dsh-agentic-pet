@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "dsh-agentic-pet-assets": "^0.1.0",
-    "electron": "^44.7.0"
+    "electron": "44.10.2"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5"
