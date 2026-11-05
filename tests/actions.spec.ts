@@ -52,7 +52,7 @@ describe('normalizeCapabilities', () => {
 
   it('normalizes a body-owned action catalog and derives the tag vocabulary', () => {
     const caps = normalizeCapabilities({
-      contractVersion: 5,
+      contractVersion: 4,
       actions: ['写代码', '庆祝'],
       actionCatalog: [
         { id: '写代码', tags: ['工作', '专注'], energy: 'mid', durationHintMs: 3000 },
@@ -127,7 +127,7 @@ describe('resolveActionRequest', () => {
 
 describe('resolveTagRequest', () => {
   const caps = normalizeCapabilities({
-    contractVersion: 5,
+    contractVersion: 4,
     actions: ['a', 'b', 'c', 'celebrate'],
     actionCatalog: [
       { id: 'a', tags: ['亲近', '撒娇'] },

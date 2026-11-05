@@ -893,9 +893,10 @@ async function main(): Promise<void> {
       // v4: the endpoints/events word-lists retired — the version field
       // carries endpoint existence, the event body's own `type` field
       // carries event-type tolerance (§6 revision record).
+      // 2026-11-06: actionCatalog/actionTagVocabulary/tagged are additive —
+      // per §6, added fields do not bump the contract version.
       send(200, {
-        // v5: body-owned action tags (actionCatalog/actionTagVocabulary).
-        contractVersion: 5,
+        contractVersion: 4,
         states: ['idle', 'thinking', 'working', 'error'],
         // The pet's own action menu, scanned from the media tree at boot —
         // celebrate first (the universal alias), then every playable clip.
