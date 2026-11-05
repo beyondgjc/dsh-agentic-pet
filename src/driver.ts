@@ -15,6 +15,20 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { formatAvailableActions, resolveActionRequest } from './actions.ts'
 import {
+  classifyAttachFailure,
+  isPetPreset,
+  isPetWorkspace,
+  type AgentPresetFace,
+  type SessionHeaderInfo,
+  type SessionPersistenceFace,
+  type SessionProjectionCacheFace,
+  type SessionStoreFace,
+  type VoiceAttachState,
+  type VoiceBindingFailure,
+  type VoiceBindingSnapshot,
+  type VoiceBindingView,
+} from './binding.ts'
+import {
   bondTier,
   buildChatPrompt,
   buildCrossPetPrompt,
@@ -60,6 +74,22 @@ declare module '@deepseek-ai/cordis' {
     // The settings page writes pet-settings.json; a change re-pushes the
     // current state so an updated autonomy payload rides along immediately.
     'pet-settings/changed'(): void
+    // Binding lifecycle facts (observability; no push channel required).
+    'pet-binding/failed'(payload: {
+      petId: string
+      sessionId: string
+      errorCode: string
+      expectedCwd: string
+      actualCwd: string | null
+      at: number
+    }): void
+    'pet-binding/armed'(payload: { petId: string; sessionId: string; at: number }): void
+    'pet-binding/rebound'(payload: {
+      petId: string
+      fromSessionId: string
+      toSessionId: string | null
+      at: number
+    }): void
     // Interaction waterfalls, locally declared for the same face-isolation
     // reason (authoritative: dsh-user-approval / dsh-user-questions types).
     'approval/request'(
@@ -286,16 +316,12 @@ interface SessionControllerFace {
 }
 
 /**
- * Structural face of the host's workspace-controller service (the archive
- * authority on CURRENT monorepo builds): `follow()` streams a baseline plus
- * ordered increments whose `archived`/`replace`/`baseline` frames carry the
- * complete archived Session set. WARNING: the INSTALLED desktop host
- * (0.2.1-rc.3) predates that contract — its follow produces no archive
- * frames, so on today's runtime this subscription is inert and the
- * host archive sweep is the only
- * working dead-session channel. The subscription stays: a host upgrade
- * lights it up with zero changes here. Declared locally for the same
- * face-isolation reason as SessionControllerFace.
+ * Structural face of the host's workspace-controller service: `follow()`
+ * streams a baseline plus ordered increments whose `archived`/`replace`/
+ * `baseline` frames carry the complete archived Session set. The installed
+ * desktop host (0.2.2-rc.1 at the time of the 0.4.9 audit) DOES emit those
+ * frames — the old 0.2.1-rc.3 warning is retired. Declared locally for the
+ * same face-isolation reason as SessionControllerFace.
  */
 interface WorkspaceControllerFace {
   follow(signal: AbortSignal): AsyncIterable<unknown>
@@ -303,15 +329,15 @@ interface WorkspaceControllerFace {
 
 /**
  * Structural face of the host's workspace REGISTRY — the storage-level
- * service BEHIND the workspace controller, present in the INSTALLED host
- * (same bridge shape the qqbot bundle uses, duck-typed fail-soft). This is
- * the antidote to the "new session black hole": a session that belongs to NO
- * workspace is invisible in the user's sidebar AND gets swept into the
- * archive by the host — attachSession is what makes her visible and
- * permanent.
+ * service BEHIND the workspace controller (same bridge shape the qqbot
+ * bundle uses, duck-typed fail-soft). `list()` and `archivedSessionIds` are
+ * present on the installed 0.2.2-rc.1 host; both are optional here so an
+ * older host degrades to attach-only behavior.
  */
 interface WorkspaceRegistryFace {
   create(cwd: string): Promise<{ attachSession?(sessionId: string): Promise<void> } | undefined>
+  list?(): Array<{ path: string; title: string; sessionIds: readonly string[] }>
+  readonly archivedSessionIds?: readonly string[]
 }
 
 /** The archived Session id set carried by one follow frame; undefined for
@@ -434,6 +460,89 @@ let voiceController: SessionControllerFace | undefined
 // as the maps: triggerWake reads it from outside installPetDriver's closure.
 let voiceUserActivityAt: number | undefined
 
+/** Last reconciled binding facts per pet. `voiceOwners` still owns the
+ * authority (armed); this map owns the WHY (configured vs effective, preset,
+ * attach result) so pet_state and the settings page can explain it. */
+interface VoiceBindingInternal {
+  configuredSessionId?: string
+  effectiveSessionId?: string
+  storeSessionId?: string
+  source: 'boundSessions' | 'innerVoiceStore' | 'none'
+  usable: boolean
+  fallback?: boolean
+  preset?: string
+  cwd?: string
+  armedAt?: number
+  attach: VoiceAttachState | null
+  lastError?: string
+}
+const voiceBindingStates = new Map<string, VoiceBindingInternal>()
+const voiceBindingFailures: VoiceBindingFailure[] = []
+let voiceBindingsReady: Promise<void> = Promise.resolve()
+
+function allKnownPetIds(): string[] {
+  return [...new Set([
+    'electron',
+    'pure',
+    ...Object.keys(voiceStore.sessions),
+    ...Object.keys(voiceBoundSessions),
+    ...voiceOwners.values(),
+  ])]
+}
+
+function voiceBindingView(petId: string): VoiceBindingView {
+  const state = voiceBindingStates.get(petId)
+  const owners = [...voiceOwners.entries()]
+    .filter(([, owner]) => owner === petId)
+    .map(([sessionId]) => sessionId)
+  const configured = state?.configuredSessionId ?? voiceBoundSessions.get(petId) ?? null
+  const storeSessionId = state?.storeSessionId ?? voiceStore.sessions[petId]?.sessionId ?? null
+  const effective = state?.effectiveSessionId ?? owners[0] ?? null
+  const expected = configured ?? effective
+  const source: VoiceBindingView['source'] = state?.source
+    ?? (configured !== null ? 'boundSessions' : effective !== null ? 'innerVoiceStore' : 'none')
+  return {
+    source,
+    configuredSessionId: configured,
+    expectedSessionId: expected,
+    effectiveSessionId: effective,
+    storeSessionId,
+    usable: state?.usable ?? true,
+    preset: state?.preset ?? null,
+    presetWarning: state?.preset !== undefined && !isPetPreset(state.preset),
+    cwd: state?.cwd ?? null,
+    lastError: state?.lastError ?? null,
+    armed: effective !== null && voiceOwners.has(effective),
+    armedAt: state?.armedAt ?? null,
+    attach: state?.attach ?? null,
+    owners,
+    staleOwners: owners.filter(sessionId => sessionId !== effective),
+  }
+}
+
+/** Export for the settings page: the live snapshot, no file round-trip. */
+export function voiceBindingSnapshot(): VoiceBindingSnapshot {
+  const pets: Record<string, VoiceBindingView> = {}
+  for (const petId of allKnownPetIds()) pets[petId] = voiceBindingView(petId)
+  return { updatedAt: Date.now(), pets, failures: [...voiceBindingFailures] }
+}
+
+function persistVoiceBindingStatus(home: string): void {
+  const snapshot = voiceBindingSnapshot()
+  void petdata.writeGlobalJson(
+    home,
+    'pet-binding-status.json',
+    snapshot as unknown as Record<string, unknown>,
+  ).catch(() => { /* diagnostics are best-effort */ })
+}
+
+function recordVoiceBindingFailure(entry: VoiceBindingFailure): void {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
+  voiceBindingFailures.unshift(entry)
+  const kept = voiceBindingFailures.filter(item => item.at >= cutoff).slice(0, 20)
+  voiceBindingFailures.splice(0, voiceBindingFailures.length, ...kept)
+}
+
 const isVoiceSession = (sessionId: string): boolean => voiceOwners.has(sessionId)
 
 /** pet_say arrival hook: a spoken bubble is both the pending-lock release and
@@ -448,7 +557,17 @@ function markVoiceSpoke(petId: string): boolean {
   return hadPending
 }
 
-export function installPetDriver(ctx: Context, home: string, pet: PetService): void {
+export interface PetDriverControl {
+  bindingSnapshot(): VoiceBindingSnapshot
+  testBinding(petId: string): Promise<{
+    ok: boolean
+    petId: string
+    sessionId: string | null
+    binding: VoiceBindingView
+  }>
+}
+
+export function installPetDriver(ctx: Context, home: string, pet: PetService): PetDriverControl {
   driverLog(home, 'installPetDriver entered')
   // Global state files consolidated under whale598/ — rename legacy copies
   // once (best-effort; the read fallback covers a failed rename).
@@ -470,6 +589,9 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   voiceNames.clear()
   voiceLastPrompt.clear()
   voiceBoundSessions.clear()
+  voiceBindingStates.clear()
+  voiceBindingFailures.length = 0
+  voiceBindingsReady = Promise.resolve()
   // generations live in the STORE (persisted): a reboot AND a plugin
   // reinstall both re-read them from disk, so minted ids never collide with
   // archived ones across restarts.
@@ -479,6 +601,34 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   voiceController = ctx.get('sessionController') as SessionControllerFace | undefined
   if (voiceController === undefined) {
     console.error('pet-surface driver: sessionController absent — the inner voice stays off')
+  }
+  // Live Session store: only used to read header facts (cwd/agentPreset).
+  // Absent on an older host — preset validation then degrades to "unknown".
+  const sessionStore = (ctx as { get(name: string): unknown }).get('sessions') as SessionStoreFace | undefined
+  if (sessionStore === undefined) {
+    driverLog(home, 'VOICE session store absent — binding preset validation is skipped')
+  }
+  // `sessions.get()` only answers LIVE sessions. A manually bound session is
+  // usually stored-but-not-open after a restart, so the persisted headers are
+  // the authoritative fallback for cwd/agentPreset validation.
+  const sessionPersistence = (ctx as { get(name: string): unknown }).get('sessionPersistence') as SessionPersistenceFace | undefined
+  const agentPresets = (ctx as { get(name: string): unknown }).get('agentPresets') as AgentPresetFace | undefined
+  const sessionProjectionCache = (ctx as { get(name: string): unknown }).get('sessionProjectionCache') as SessionProjectionCacheFace | undefined
+  const storedHeaders = new Map<string, SessionHeaderInfo>()
+  let storedHeadersChecked = false
+  const refreshStoredHeaders = async (): Promise<void> => {
+    storedHeaders.clear()
+    storedHeadersChecked = false
+    if (sessionPersistence === undefined) return
+    try {
+      for (const snapshot of await sessionPersistence.list()) {
+        const header = snapshot.header
+        if (header?.id !== undefined) storedHeaders.set(header.id, header)
+      }
+      storedHeadersChecked = true
+    } catch {
+      // Persistence listing is advisory; a live header still answers.
+    }
   }
   // Archive → fresh start: this platform has NO session delete, archive IS
   // how a session ends — a user archiving the inner-voice session is asking
@@ -519,8 +669,11 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
       const generation = (voiceStore.generations[petId] ?? 0) + 1
       voiceStore.generations[petId] = generation
       Reflect.deleteProperty(voiceStore.sessions, petId)
-      const ownerEntry = [...voiceOwners.entries()].find(([, owner]) => owner === petId)
-      if (ownerEntry !== undefined) voiceOwners.delete(ownerEntry[0])
+      // All owners of this pet, not just the first: a rebind can leave more
+      // than one entry and the old `.find()` deleted only one of them.
+      for (const [sessionId, owner] of [...voiceOwners]) {
+        if (owner === petId) voiceOwners.delete(sessionId)
+      }
       voicePendingUntil.delete(petId)
       lastRetired.set(petId, { sessionId: entry.sessionId, createdAt: entry.createdAt })
       void saveInnerVoiceStore(home, voiceStore)
@@ -544,29 +697,120 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   // Attach a freshly created (or hand-bound) voice session to its workspace:
   // unattached sessions are invisible in the user's sidebar AND get swept
   // into the archive by the host — the "new session black hole". Duck-typed
-  // on the workspace registry, fail-soft; once per session id.
+  // on the workspace registry, fail-soft. Success-only memoization: an early
+  // return used to mark the session attached forever (the registry-missing
+  // black hole). Failures get a per-session retry backoff instead of a
+  // permanent latch, and the result is recorded for the status surfaces.
+  const events = ctx.root
   const attachedSessions = new Set<string>()
+  const attachRetryAfter = new Map<string, number>()
+  const attachResults = new Map<string, VoiceAttachState>()
   // The pet sessions' project directory (workspace): OUTSIDE ~/.dsh so the
   // attach gate accepts it, and the sidebar shows the sessions grouped under
   // a real 项目 instead of 未分组 orphans.
   const petWorkspaceDir = (): string => join(homedir(), 'whale598')
-  const attachVoiceSession = async (sessionId: string): Promise<void> => {
-    if (attachedSessions.has(sessionId)) return
-    attachedSessions.add(sessionId)
+  const recordBindingFailure = (petId: string | undefined, sessionId: string, result: VoiceAttachState): void => {
+    if (petId === undefined) return
+    recordVoiceBindingFailure({
+      at: result.at,
+      petId,
+      sessionId,
+      errorCode: result.errorCode,
+      error: result.error ?? '',
+      expectedCwd: result.expectedCwd,
+      actualCwd: result.actualCwd,
+    })
+    events.emit('pet-binding/failed', {
+      petId,
+      sessionId,
+      errorCode: result.errorCode,
+      expectedCwd: result.expectedCwd,
+      actualCwd: result.actualCwd,
+      at: result.at,
+    })
+    persistVoiceBindingStatus(home)
+  }
+  const attachVoiceSession = async (sessionId: string, petId?: string): Promise<VoiceAttachState> => {
+    const expectedCwd = petWorkspaceDir()
+    const cached = attachResults.get(sessionId)
+    if (attachedSessions.has(sessionId)) {
+      return cached ?? { ok: true, errorCode: 'none', error: null, expectedCwd, actualCwd: null, at: Date.now() }
+    }
+    const retryAt = attachRetryAfter.get(sessionId)
+    if (retryAt !== undefined && retryAt > Date.now()) {
+      return cached ?? {
+        ok: false,
+        errorCode: 'attach-failed',
+        error: 'attach retry backoff',
+        expectedCwd,
+        actualCwd: null,
+        at: Date.now(),
+      }
+    }
+    const registry = (ctx as { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryFace | undefined
+    if (registry === undefined) {
+      const result: VoiceAttachState = {
+        ok: false,
+        errorCode: 'registry-missing',
+        error: 'workspaceRegistry unavailable',
+        expectedCwd,
+        actualCwd: null,
+        at: Date.now(),
+      }
+      attachResults.set(sessionId, result)
+      attachRetryAfter.set(sessionId, Date.now() + 30_000)
+      recordBindingFailure(petId, sessionId, result)
+      driverLog(home, `VOICE workspace attach skipped (workspaceRegistry unavailable) session=${sessionId}`)
+      return result
+    }
     try {
-      const registry = (ctx as { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryFace | undefined
-      if (registry === undefined) return
       // cwd must be an ORDINARY user directory: the host re-resolves ~/.dsh
       // paths to the active profile and refuses the attach. The directory
       // must exist (realpath) — existing sessions retry here before any
       // create has made it.
-      await mkdir(petWorkspaceDir(), { recursive: true })
-      const workspace = await registry.create(petWorkspaceDir())
+      await mkdir(expectedCwd, { recursive: true })
+      const workspace = await registry.create(expectedCwd)
       await workspace?.attachSession?.(sessionId)
+      const result: VoiceAttachState = {
+        ok: true,
+        errorCode: 'none',
+        error: null,
+        expectedCwd,
+        actualCwd: null,
+        at: Date.now(),
+      }
+      attachedSessions.add(sessionId)
+      attachRetryAfter.delete(sessionId)
+      attachResults.set(sessionId, result)
+      if (petId !== undefined) {
+        const binding = voiceBindingStates.get(petId)
+        if (binding !== undefined) binding.attach = result
+      }
       driverLog(home, `VOICE session attached to workspace (${sessionId})`)
+      return result
     } catch (error) {
-      attachedSessions.delete(sessionId) // allow a retry on the next trigger
-      driverLog(home, `VOICE workspace attach skipped (${error instanceof Error ? error.message : String(error)})`)
+      const message = error instanceof Error ? error.message : String(error)
+      const classified = classifyAttachFailure(message)
+      const result: VoiceAttachState = {
+        ok: false,
+        errorCode: classified.errorCode,
+        error: message,
+        expectedCwd,
+        actualCwd: classified.actualCwd,
+        at: Date.now(),
+      }
+      attachResults.set(sessionId, result)
+      attachRetryAfter.set(
+        sessionId,
+        Date.now() + (classified.errorCode === 'cwd-mismatch' ? 24 * 60 * 60_000 : 60_000),
+      )
+      // A cwd mismatch is an expected cross-project binding, not a failure:
+      // no failure entry, no retry storm. The status still shows the skip.
+      if (classified.errorCode !== 'cwd-mismatch') {
+        recordBindingFailure(petId, sessionId, result)
+      }
+      driverLog(home, `VOICE workspace attach skipped (${message}) session=${sessionId} code=${classified.errorCode}`)
+      return result
     }
   }
   const workspaceFace = ctx.get('workspaceController') as WorkspaceControllerFace | undefined
@@ -586,13 +830,13 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     })()
     ctx.effect(() => () => followAbort.abort(), 'pet-surface: workspace archive watch')
   }
-  void loadInnerVoiceStore(home).then((store) => {
+  const storeReady = loadInnerVoiceStore(home).then((store) => {
     voiceStore = store
     for (const [petId, entry] of Object.entries(store.sessions)) {
       voiceOwners.set(entry.sessionId, petId)
       // Existing sessions were born before the attach bridge — make them
       // visible (and orphan-proof) too. Idempotent per session id.
-      void attachVoiceSession(entry.sessionId)
+      void attachVoiceSession(entry.sessionId, petId)
     }
     driverLog(home, `VOICE store loaded: ${String(Object.keys(store.sessions).length)} session(s)`)
     // Startup reconciliation: the baseline frame may have arrived before the
@@ -630,7 +874,6 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   // a leaf, and events dispatched from sibling plugin fibers (the session
   // controller's api-session/* emits travel the root's hook table) never
   // reach a leaf-registered hook — verified by a bare-cordis reproduction.
-  const events = ctx.root
   driverLog(home, 'listeners registering on root')
   let boundSessionId: string | undefined
   // Multi-pet state routing: which pet id is carrying the bound session.
@@ -822,14 +1065,213 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
   }
   void refreshNames()
 
+  const readSessionHeader = (
+    sessionId: string,
+  ): { header: SessionHeaderInfo | undefined; checked: boolean } => {
+    try {
+      const live = sessionStore?.get(sessionId)?.header
+      if (live !== undefined) return { header: live, checked: true }
+    } catch {
+      // Fall through to the persisted header.
+    }
+    // A failed/absent persistence listing means "unknown", not "missing":
+    // an unchecked binding must not be silently downgraded to a store session.
+    if (storedHeadersChecked) return { header: storedHeaders.get(sessionId), checked: true }
+    return { header: undefined, checked: false }
+  }
+
+  /** Current preset, not the immutable creation-time header field: live
+   * sessions answer through the preset registry; stored sessions through the
+   * projection cache. Unknown stays undefined (no false warning). */
+  const readCurrentPreset = (
+    sessionId: string,
+    header: SessionHeaderInfo | undefined,
+  ): string | undefined => {
+    try {
+      const session = sessionStore?.get(sessionId)
+      if (session !== undefined) {
+        const preset = agentPresets?.presetForSession(session)
+        if (typeof preset === 'string' && preset !== '') return preset
+      }
+    } catch {
+      // Fall through to the projection cache.
+    }
+    if (header !== undefined) {
+      try {
+        const preset = sessionProjectionCache?.cachedSnapshot(header)?.values?.agentPreset
+        if (typeof preset === 'string' && preset !== '') return preset
+      } catch {
+        // Unknown preset is not an error.
+      }
+    }
+    return undefined
+  }
+
   const refreshBoundSessions = async (): Promise<void> => {
+    await refreshStoredHeaders()
     const config = await readInnerVoiceConfig(home)
     voiceBoundSessions.clear()
     for (const [petId, sessionId] of Object.entries(config.boundSessions)) {
       voiceBoundSessions.set(petId, sessionId)
     }
+    const registry = (ctx as { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryFace | undefined
+    const archived = new Set<string>([
+      ...(registry?.archivedSessionIds ?? []),
+      ...latestArchived,
+    ])
+    const petIds = new Set<string>([
+      ...Object.keys(config.boundSessions),
+      ...Object.keys(voiceStore.sessions),
+      ...[...voiceOwners.values()],
+    ])
+    for (const petId of petIds) {
+      const previousOwners = [...voiceOwners.entries()]
+        .filter(([, owner]) => owner === petId)
+        .map(([sessionId]) => sessionId)
+      const configured = config.boundSessions[petId]
+      const storeSessionId = voiceStore.sessions[petId]?.sessionId
+      // A newly configured session must be probed immediately, even if an
+      // earlier attempt on the same id was rate-limited.
+      if (configured !== undefined && configured !== voiceBindingStates.get(petId)?.configuredSessionId) {
+        attachRetryAfter.delete(configured)
+        attachResults.delete(configured)
+      }
+      const state: VoiceBindingInternal = {
+        configuredSessionId: configured,
+        storeSessionId,
+        source: 'none',
+        usable: true,
+        attach: null,
+      }
+      let effective: string | undefined
+      let attach: VoiceAttachState | null = null
+      if (configured !== undefined) {
+        const lookup = readSessionHeader(configured)
+        const header = lookup.header
+        if (header !== undefined) {
+          state.cwd = header.cwd
+        }
+        state.preset = readCurrentPreset(configured, header)
+        if (lookup.checked && header === undefined) {
+          state.usable = false
+          state.lastError = 'session-missing'
+          attach = {
+            ok: false,
+            errorCode: 'session-missing',
+            error: 'session not found (live or persisted)',
+            expectedCwd: petWorkspaceDir(),
+            actualCwd: null,
+            at: Date.now(),
+          }
+        } else if (archived.has(configured)) {
+          state.usable = false
+          state.lastError = 'session-archived'
+          attach = {
+            ok: false,
+            errorCode: 'session-archived',
+            error: 'session is archived',
+            expectedCwd: petWorkspaceDir(),
+            actualCwd: null,
+            at: Date.now(),
+          }
+        } else {
+          // Preset is deliberately NOT validated here: the session header's
+          // agentPreset is creation-time metadata, while the user may have
+          // switched modes later. Manual binding always wins; the settings
+          // copy explains that a non-pet session gives text-only expression.
+          effective = configured
+        }
+      }
+      if (effective === undefined && storeSessionId !== undefined && !archived.has(storeSessionId)) {
+        effective = storeSessionId
+        state.source = 'innerVoiceStore'
+        state.fallback = configured !== undefined
+        if (configured === undefined) {
+          state.usable = true
+          const header = readSessionHeader(storeSessionId).header
+          if (header !== undefined) {
+            state.cwd = header.cwd
+          }
+          state.preset = readCurrentPreset(storeSessionId, header)
+        }
+      } else if (effective !== undefined) {
+        state.source = 'boundSessions'
+      } else {
+        state.source = configured !== undefined ? 'boundSessions' : 'none'
+      }
+      // The effective session is a working fallback (store) even when the
+      // configured binding is missing/archived: the page and test must read
+      // as usable, with `fallback` explaining the substitution.
+      if (effective !== undefined && effective !== configured) {
+        state.usable = true
+        state.lastError = undefined
+        state.fallback = configured !== undefined
+      }
+      state.effectiveSessionId = effective
+      // Reconcile the owner map: exactly the effective session survives.
+      for (const owner of previousOwners) {
+        if (owner !== effective) voiceOwners.delete(owner)
+      }
+      if (effective !== undefined) {
+        if (!voiceOwners.has(effective)) {
+          voiceOwners.set(effective, petId)
+          state.armedAt = Date.now()
+          events.emit('pet-binding/armed', { petId, sessionId: effective, at: state.armedAt })
+        } else if (state.armedAt === undefined) {
+          state.armedAt = Date.now()
+        }
+        if (state.cwd !== undefined && !isPetWorkspace(state.cwd, petWorkspaceDir())) {
+          // The session lives in another project. That is the user's choice:
+          // skip the workspace attach silently (no failure, no retry storm),
+          // keep the binding effective, and leave the session where it is.
+          state.attach = {
+            ok: false,
+            errorCode: 'cwd-mismatch',
+            error: `session is in another project (${state.cwd}); workspace attach skipped`,
+            expectedCwd: petWorkspaceDir(),
+            actualCwd: state.cwd,
+            at: Date.now(),
+          }
+          driverLog(home, `VOICE session left in its own project (${state.cwd}); attach skipped session=${effective}`)
+        } else {
+          state.attach = await attachVoiceSession(effective, petId)
+        }
+      } else {
+        state.attach = attach
+      }
+      const changedFrom = previousOwners.find(owner => owner !== effective)
+      if (changedFrom !== undefined) {
+        events.emit('pet-binding/rebound', {
+          petId,
+          fromSessionId: changedFrom,
+          toSessionId: effective ?? null,
+          at: Date.now(),
+        })
+      }
+      if (state.attach !== null && !state.attach.ok && state.lastError === undefined) {
+        state.lastError = state.attach.errorCode
+      }
+      voiceBindingStates.set(petId, state)
+    }
+    // Drop diagnostics for pets that no longer have any binding, store
+    // session, or owner — a stale entry would keep reporting an old failure.
+    for (const petId of [...voiceBindingStates.keys()]) {
+      if (!petIds.has(petId)) voiceBindingStates.delete(petId)
+    }
+    persistVoiceBindingStatus(home)
+    driverLog(home, `VOICE bindings refreshed: ${String(Object.keys(config.boundSessions).length)} configured, ${String(voiceBindingStates.size)} tracked`)
   }
-  void refreshBoundSessions()
+
+  // The store load MUST land before the first binding reconciliation: a
+  // manual binding is validated against the store's sessions and must win
+  // over the store's default before the boot greeting fires.
+  voiceBindingsReady = storeReady
+    .catch(() => undefined)
+    .then(() => refreshBoundSessions())
+    .catch((error: unknown) => {
+      driverLog(home, `VOICE binding refresh failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  void voiceBindingsReady
 
   events.on('pet-settings/changed', () => {
     // The autonomy payload rides on /state pushes: a settings change
@@ -843,7 +1285,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     const prevNames = new Map(voiceNames)
     void (async () => {
       await refreshNames()
-      void refreshBoundSessions()
+      await refreshBoundSessions()
       const changedPets = new Set<string>([...prevNames.keys(), ...voiceNames.keys()])
       for (const petId of changedPets) {
         if (prevNames.get(petId) === voiceNames.get(petId)) continue
@@ -1075,20 +1517,46 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     return run
   }
   const ensureVoiceSessionUnlocked = async (petId: string): Promise<string | undefined> => {
-    // 1. Manual binding wins outright: the user's own session, used AS-IS —
-    //    no creation, no rename, no store entry, and the stall path never
-    //    retires it (its fate is the user's). voiceOwners is (re)armed here
-    //    so api-session events for this id keep the inner-voice exemptions
-    //    even after a re-install (the store does not know this id).
+    // Bindings are reconciled once at boot (and on every settings change).
+    // Await that pass: the boot greeting is the first ensure and must not
+    // race the store's default session against a configured manual binding.
+    await voiceBindingsReady
+    // 1. Manual binding wins when the session is usable (exists and is not
+    //    archived). Preset is deliberately NOT part of usability: the
+    //    settings page rejects non-pet presets on save, but hand-edited
+    //    pet-settings.json bypasses that check. The driver still honors the
+    //    explicit binding (the user's choice); pet_state/settings expose
+    //    presetWarning so a text-only binding is visible instead of silent.
+    //    Missing/archived sessions fall through to the store/mint fallback.
+    const binding = voiceBindingStates.get(petId)
     const bound = voiceBoundSessions.get(petId)
-    if (bound !== undefined) {
+    if (bound !== undefined && binding?.usable !== false) {
       voiceOwners.set(bound, petId)
-      void attachVoiceSession(bound)
+      const attach = await attachVoiceSession(bound, petId)
+      if (binding !== undefined) {
+        binding.attach = attach
+        binding.effectiveSessionId = bound
+        binding.source = 'boundSessions'
+        binding.armedAt ??= Date.now()
+      }
       return bound
+    }
+    if (bound !== undefined) {
+      driverLog(home, `VOICE binding unusable pet=${petId} session=${bound} reason=${binding?.lastError ?? 'unknown'} — falling back`)
     }
     const known = voiceStore.sessions[petId]
     if (known !== undefined) {
-      void attachVoiceSession(known.sessionId) // idempotent retry of a failed attach
+      voiceOwners.set(known.sessionId, petId)
+      const attach = await attachVoiceSession(known.sessionId, petId) // idempotent retry
+      if (binding !== undefined) {
+        binding.usable = true
+        binding.lastError = undefined
+        binding.attach = attach
+        binding.effectiveSessionId = known.sessionId
+        binding.source = 'innerVoiceStore'
+        binding.fallback = bound !== undefined
+        binding.armedAt ??= Date.now()
+      }
       return known.sessionId
     }
     if (voiceController === undefined) return undefined
@@ -1110,13 +1578,15 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
       driverLog(home, `VOICE mint skipped ${String(minted.hops)} archived id(s) pet=${petId} → ${minted.sessionId}`)
     }
     const sessionId = minted.sessionId
+    let createdPreset = config.preset
     try {
       await mkdir(petWorkspaceDir(), { recursive: true })
-      await voiceController.create({ sessionId, agentPreset: config.preset, cwd: petWorkspaceDir() })
+      await voiceController.create({ sessionId, agentPreset: createdPreset, cwd: petWorkspaceDir() })
     } catch (firstError) {
       driverLog(home, `VOICE preset "${config.preset}" rejected for pet=${petId}: ${firstError instanceof Error ? firstError.message : String(firstError)}; falling back`)
       try {
         await voiceController.create({ sessionId, agentPreset: 'whale598', cwd: petWorkspaceDir() })
+        createdPreset = 'whale598'
       } catch (secondError) {
         driverLog(home, `VOICE session create failed for pet=${petId}: ${secondError instanceof Error ? secondError.message : String(secondError)}`)
         return undefined
@@ -1133,8 +1603,24 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): v
     voiceOwners.set(sessionId, petId)
     // Visible-or-orphan: unattached sessions land in the host's archive
     // sweep (the black hole) — attach her to the workspace immediately.
-    void attachVoiceSession(sessionId)
-    driverLog(home, `VOICE session created pet=${petId} session=${sessionId} preset=${config.preset}`)
+    const attach = await attachVoiceSession(sessionId, petId)
+    const mintedBinding: VoiceBindingInternal = voiceBindingStates.get(petId) ?? {
+      configuredSessionId: bound,
+      source: 'innerVoiceStore',
+      usable: true,
+      attach: null,
+    }
+    mintedBinding.usable = true
+    mintedBinding.lastError = undefined
+    mintedBinding.preset = readCurrentPreset(sessionId, undefined) ?? createdPreset
+    mintedBinding.effectiveSessionId = sessionId
+    mintedBinding.storeSessionId = sessionId
+    mintedBinding.source = 'innerVoiceStore'
+    mintedBinding.attach = attach
+    mintedBinding.fallback = bound !== undefined
+    mintedBinding.armedAt ??= Date.now()
+    voiceBindingStates.set(petId, mintedBinding)
+    driverLog(home, `VOICE session created pet=${petId} session=${sessionId} preset=${createdPreset}`)
     return sessionId
   }
 
@@ -1450,6 +1936,9 @@ ${text}`
    * went due while dsh or the pet was offline catch up on the first sweep
    * that sees the pet online, merged into ONE wake. */
   const wakeSweep = async (): Promise<void> => {
+    // The first sweep is the boot greeting's trigger: never let the store's
+    // default session win the race against a configured manual binding.
+    await voiceBindingsReady
     const config = await readInnerVoiceConfig(home)
     if (!config.enabled) return
     const now = Date.now()
@@ -1624,6 +2113,31 @@ ${text}`
   // any /state (autonomy config included) until the next session event.
   // One idle push fills that gap; real session events override it.
   if (currentState === undefined) void pushState('idle')
+
+  // Control surface for the settings page: live binding status and a
+  // one-click "ensure + attach" test that never sends a visible prompt.
+  return {
+    bindingSnapshot: voiceBindingSnapshot,
+    async testBinding(petId: string) {
+      await voiceBindingsReady
+      // Explicit user action: bypass any backoff from an earlier failure.
+      const configured = voiceBoundSessions.get(petId)
+      if (configured !== undefined) {
+        attachRetryAfter.delete(configured)
+        attachResults.delete(configured)
+      }
+      const sessionId = await ensureVoiceSession(petId)
+      const binding = voiceBindingView(petId)
+      return {
+        // A cross-project session is still a usable binding; attach is only
+        // the sidebar grouping and must not fail the test.
+        ok: binding.usable,
+        petId,
+        sessionId: sessionId ?? null,
+        binding,
+      }
+    },
+  }
 }
 
 /**
@@ -1708,7 +2222,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     const requireOwnedSession = (exec: { agent?: { id?: unknown } } | undefined): void => {
       const sessionId = exec?.agent?.id
       if (typeof sessionId === 'string' && !voiceOwners.has(sessionId)) {
-        throw new Error('本会话没有绑定宠物（不是宠物自己的内心戏会话），pet 工具不分发。想和宠物说话，请用宠物表面的输入卡。')
+        throw new Error('本会话没有绑定宠物（发生了什么）。普通工作会话不拥有表演权（为什么）。想和宠物说话，请用宠物表面的输入卡；想检查绑定，请在设置页看「指定会话」的状态（下一步）。')
       }
     }
     // Classified failures: the model must KNOW why nothing happened
@@ -1881,7 +2395,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_do',
-      description: 'Make the desktop pet perform a one-shot animation. Use sparingly to punctuate moments (e.g. celebrate when a task the user cared about succeeds). The action is an id from the PET\'S OWN catalog — each pet advertises what it can perform ("celebrate" always works; "random" lets the pet pick; full menus via pet_state with actions:true). Multiple pets may be running: see pet_state for their ids.',
+      description: 'Make the desktop pet perform a one-shot animation. Use sparingly to punctuate moments (e.g. celebrate when a task the user cared about succeeds). The action is an id from the PET\'S OWN catalog — each pet advertises what it can perform ("celebrate" always works; "random" lets the pet pick; full menus via pet_state with actions:true). `performed: true` means the pet ACCEPTED the request, not that the clip finished. Omit `wait` for fire-and-forget (the result carries mode:"no-wait" and note:"fire-and-forget"); `wait:true` reports durationMs/completedAt when available, or an explicit waitLost/waitTimedOut. Multiple pets may be running: see pet_state for their ids.',
       parameters: {
         action: { type: 'string', required: true, description: 'The animation to perform: an id from the pet\'s own action catalog (pet_state {actions:true}), or "celebrate" (universal), or "random" (pet picks).' },
         pet: { type: 'string', description: 'Which pet performs: its id from pet_state. Omit for the default pet.' },
@@ -1902,7 +2416,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const caps = await pet.capabilities(entry)
           const resolution = resolveActionRequest(requested, caps?.actions ?? null)
           if (resolution.kind === 'unknown') {
-            throw new Error(`unknown action "${requested}" for pet "${entry.id}". Available: ${formatAvailableActions(resolution.available)}`)
+            throw new Error(`unknown action "${requested}" for pet "${entry.id}" (发生了什么). 该身体没有这个动作（为什么）. Available: ${formatAvailableActions(resolution.available)} — 从列表里选一个再试（下一步）。`)
           }
           const action = resolution.action
           // Observability of the model's own expressiveness: whether pet_do is
@@ -1913,8 +2427,15 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ action }),
           }) as { requestId?: unknown }
+          const requestedField = action === requested ? {} : { requested }
           if (args.wait !== true) {
-            return JSON.stringify({ performed: true, action, ...(action === requested ? {} : { requested }) })
+            return JSON.stringify({
+              performed: true,
+              action,
+              ...requestedField,
+              mode: 'no-wait',
+              note: 'fire-and-forget',
+            })
           }
           // The renderer reports one-shot completion (clip end) through the
           // control plane, correlated by the requestId the pet assigned to
@@ -1923,13 +2444,25 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           // waitLost instead of hanging.
           const requestId = typeof response?.requestId === 'string' ? response.requestId : undefined
           if (requestId === undefined) {
-            return JSON.stringify({ performed: true, action, waitLost: 'this pet does not report action completion' })
+            return JSON.stringify({
+              performed: true,
+              action,
+              ...requestedField,
+              mode: 'wait',
+              waitLost: 'this pet does not report action completion',
+            })
           }
           for (let waited = 0; waited < 20_000; waited += 250) {
             await sleep(250)
             const snap = await pet.snapshot(entry)
             if (snap.online === false) {
-              return JSON.stringify({ performed: true, action, waitLost: 'pet went offline before finishing' })
+              return JSON.stringify({
+                performed: true,
+                action,
+                ...requestedField,
+                mode: 'wait',
+                waitLost: 'pet went offline before finishing',
+              })
             }
             // The v3 single witness object: `id` matches THIS /action's
             // requestId, `endedAt`/`durationMs` backfill in place on
@@ -1937,10 +2470,24 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             // action's record.
             const done = snap.lastAction
             if (done != null && done.id === requestId) {
-              return JSON.stringify({ performed: true, action, durationMs: done.durationMs })
+              return JSON.stringify({
+                performed: true,
+                action,
+                ...requestedField,
+                mode: 'wait',
+                durationMs: done.durationMs,
+                ...(done.endedAt === null ? {} : { completedAt: done.endedAt }),
+                ...(done.durationMs === null ? { note: 'duration-unavailable' } : {}),
+              })
             }
           }
-          return JSON.stringify({ performed: true, action, waitTimedOut: true })
+          return JSON.stringify({
+            performed: true,
+            action,
+            ...requestedField,
+            mode: 'wait',
+            waitTimedOut: true,
+          })
         } catch (error: unknown) {
           throw classify(error)
         }
@@ -2310,7 +2857,14 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const actions = actionsById.get(state.id)
           const base = actions === undefined ? state : { ...state, actions }
           // The model addresses pets by id, but should SEE the user's naming.
-          return { ...base, name: voiceNames.get(state.id) ?? DEFAULT_PET_NAME[state.id] ?? state.id }
+          // voiceBinding is the WHY behind selfPetId: configured vs effective
+          // session, preset, and the last attach result (no full cwd here —
+          // the local status file owns that).
+          return {
+            ...base,
+            name: voiceNames.get(state.id) ?? DEFAULT_PET_NAME[state.id] ?? state.id,
+            voiceBinding: voiceBindingView(state.id),
+          }
         })
         // selfPetId: who the CALLER is. A pet's own inner-voice session (or a
         // manually bound one) resolves through voiceOwners; work sessions and
@@ -2321,7 +2875,12 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         // logic, not something the model needs to know.
         const selfSession = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
         const selfPetId = (selfSession !== undefined ? voiceOwners.get(selfSession) : undefined) ?? null
-        return JSON.stringify({ selfPetId, pets: petsOut, affection: ledgers, wakePlans })
+        const caller = {
+          sessionId: selfSession ?? null,
+          petId: selfPetId,
+          armed: selfPetId !== null,
+        }
+        return JSON.stringify({ selfPetId, caller, pets: petsOut, affection: ledgers, wakePlans })
       },
     }))
   })

@@ -17,6 +17,16 @@ import { rm } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import {
+  isPetPreset,
+  patchTouchesElectronBinding,
+  type AgentPresetFace,
+  type SessionHeaderInfo,
+  type SessionPersistenceFace,
+  type SessionProjectionCacheFace,
+  type SessionStoreFace,
+} from './binding.ts'
+import { voiceBindingSnapshot, type PetDriverControl } from './driver.ts'
 import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
 import type { PetService } from './service.ts'
 
@@ -286,7 +296,12 @@ function openPathInFileManager(path: string): void {
  * @param ctx - plugin context inside the runtime.
  * @param home - the dsh home holding the settings/ledger/manifest files.
  */
-export function installSettingsPage(ctx: Context, home: string, pet: PetService): void {
+export function installSettingsPage(
+  ctx: Context,
+  home: string,
+  pet: PetService,
+  control?: PetDriverControl,
+): void {
   // Pet visibility flows through the capability seam: discovery, liveness,
   // and the /status field matrix are the service's job — this page only
   // renders.
@@ -306,6 +321,54 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     // readGlobalJson: whale598/ → legacy root → {} (mergeSettings folds defaults)
     const parsed = await petdata.readGlobalJson(home, 'pet-settings.json') as PetSettings
     return mergeSettings(parsed, {})
+  }
+
+  /** Live header first, persisted header second. `checked:false` means the
+   * host exposed neither source — never turn that into a "missing session".
+   * `currentPreset` comes from the preset registry / projection cache, NOT
+   * from the immutable creation-time header field. */
+  const findSessionHeader = async (
+    sessionId: string,
+  ): Promise<{
+    header: SessionHeaderInfo | undefined
+    checked: boolean
+    currentPreset: string | undefined
+  }> => {
+    const getService = (name: string): unknown => (ctx as { get(name: string): unknown }).get(name)
+    const sessions = getService('sessions') as SessionStoreFace | undefined
+    const agentPresets = getService('agentPresets') as AgentPresetFace | undefined
+    const live = sessions?.get(sessionId)
+    if (live?.header !== undefined) {
+      let currentPreset: string | undefined
+      try {
+        const preset = agentPresets?.presetForSession(live)
+        if (typeof preset === 'string' && preset !== '') currentPreset = preset
+      } catch {
+        // Unknown preset is not an error.
+      }
+      return { header: live.header, checked: true, currentPreset }
+    }
+    const persistence = getService('sessionPersistence') as SessionPersistenceFace | undefined
+    if (persistence === undefined) {
+      return { header: undefined, checked: sessions !== undefined, currentPreset: undefined }
+    }
+    try {
+      const snapshots = await persistence.list()
+      const header = snapshots.find(snapshot => snapshot.header?.id === sessionId)?.header
+      let currentPreset: string | undefined
+      if (header !== undefined) {
+        const cache = getService('sessionProjectionCache') as SessionProjectionCacheFace | undefined
+        try {
+          const preset = cache?.cachedSnapshot(header)?.values?.agentPreset
+          if (typeof preset === 'string' && preset !== '') currentPreset = preset
+        } catch {
+          // Unknown preset is not an error.
+        }
+      }
+      return { header, checked: true, currentPreset }
+    } catch {
+      return { header: undefined, checked: false, currentPreset: undefined }
+    }
   }
 
   const routeByPath = new Map<string, Map<string, (req: IncomingMessage, res: ServerResponse) => Promise<void>>>()
@@ -343,6 +406,21 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     }
     handlers.set(method, handler)
   }
+
+  route('GET', '/api/pet-settings/binding-status', async (_req, res) => {
+    writeJson(res, 200, { status: voiceBindingSnapshot() })
+  })
+
+  route('POST', '/api/pet-settings/binding-test', async (req, res) => {
+    if (control === undefined) {
+      writeJson(res, 503, { error: 'driver control unavailable' })
+      return
+    }
+    const body = await readJsonBody(req)
+    const petId = typeof body?.petId === 'string' && body.petId !== '' ? body.petId : 'electron'
+    const result = await control.testBinding(petId)
+    writeJson(res, 200, result)
+  })
 
   route('GET', '/api/pet-settings/read', async (_req, res) => {
     const [settings, windowPosition, status] = await Promise.all([
@@ -409,12 +487,41 @@ export function installSettingsPage(ctx: Context, home: string, pet: PetService)
     }
     const current = await readSettings()
     const next = mergeSettings(current, patch as Record<string, unknown>)
+    // Binding validation is patch-aware: only a save that actually edits the
+    // electron binding is hard-blocked. An EXISTING binding that later became
+    // non-pet (the user switched modes, or hand-edited JSON) must not turn
+    // every unrelated settings save into a 400 — that reads as "settings page
+    // broken". Existing invalid bindings degrade to a warning.
+    const warnings: string[] = []
+    const patchTouchesBinding = patchTouchesElectronBinding(patch as Record<string, unknown>)
+    const bound = next.innerVoice?.boundSessions?.electron
+    if (typeof bound === 'string' && bound !== '') {
+      const found = await findSessionHeader(bound)
+      if (found.checked && found.header === undefined) {
+        warnings.push(`会话 ${bound} 不存在`)
+      } else {
+        if (found.currentPreset !== undefined && !isPetPreset(found.currentPreset)) {
+          if (patchTouchesBinding) {
+            writeJson(res, 400, {
+              error: `这个会话的当前模式是「${found.currentPreset}」，没有 pet_say/pet_do。`
+                + '请改用宠物模式（「精简（仅表达）」或「普通（含工作工具）」）的会话，'
+                + '或新建一个宠物模式会话后再绑定。',
+            })
+            return
+          }
+          warnings.push('当前已保存的绑定会话不是宠物模式；本次保存已生效，但绑定不会有气泡回应。')
+        }
+        if (found.currentPreset === undefined && found.header !== undefined) {
+          warnings.push('无法确认这个会话的当前模式；如果它不是宠物模式，绑定后不会有气泡回应。')
+        }
+      }
+    }
     await petdata.writeGlobalJson(home, 'pet-settings.json', next as Record<string, unknown>)
     // The driver re-pushes the autonomy payload to the pets on this event —
     // a changed switch reaches the renderer without waiting for the next
     // session state transition.
     ctx.emit('pet-settings/changed')
-    writeJson(res, 200, { ok: true, settings: next })
+    writeJson(res, 200, { ok: true, settings: next, warnings })
   })
 
   route('POST', '/api/pet-settings/reset-affection', async (_req, res) => {

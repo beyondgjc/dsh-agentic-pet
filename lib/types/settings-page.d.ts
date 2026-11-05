@@ -11,6 +11,7 @@
  * @module dsh-agentic-pet/settings-page
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { type PetDriverControl } from './driver.ts';
 import type { PetService } from './service.ts';
 /**
  * Register the settings page's routes. One registration per exact path with
@@ -18,4 +19,4 @@ import type { PetService } from './service.ts';
  * @param ctx - plugin context inside the runtime.
  * @param home - the dsh home holding the settings/ledger/manifest files.
  */
-export declare function installSettingsPage(ctx: Context, home: string, pet: PetService): void;
+export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl): void;

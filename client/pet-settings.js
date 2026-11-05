@@ -94,6 +94,24 @@ window.__ModuleLoader__.load({
       var runtimeState = useState(null)
       var runtime = runtimeState[0]
       var setRuntime = runtimeState[1]
+      var bindingState = useState(null)
+      var bindingData = bindingState[0]
+      var setBindingData = bindingState[1]
+      var bindingBusyState = useState(false)
+      var bindingBusy = bindingBusyState[0]
+      var setBindingBusy = bindingBusyState[1]
+      var warnState = useState('')
+      var warnings = warnState[0]
+      var setWarnings = warnState[1]
+      var bindingMsgState = useState('')
+      var bindingMsg = bindingMsgState[0]
+      var setBindingMsg = bindingMsgState[1]
+      var bindingDraftState = useState(null)
+      var bindingDraft = bindingDraftState[0]
+      var setBindingDraft = bindingDraftState[1]
+      var bindingAttemptState = useState(null)
+      var bindingAttempt = bindingAttemptState[0]
+      var setBindingAttempt = bindingAttemptState[1]
       var previewAudioRef = useRef(null)
       var keyInputRef = useRef(null)
 
@@ -134,7 +152,18 @@ window.__ModuleLoader__.load({
         return function () { alive = false; if (timer) clearTimeout(timer) }
       }, [])
 
+      var loadBinding = useCallback(function () {
+        fetch('/api/pet-settings/binding-status', { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) { setBindingData((d && d.status) || null) })
+          .catch(function () { /* binding status is optional */ })
+      }, [])
+      useEffect(function () { loadBinding() }, [loadBinding])
+
       var act = useCallback(function (path, body, doneMessage) {
+        // Binding edits own their message under the binding row; the global
+        // banner at the top stays for the rest of the settings page.
+        var isBinding = !!(body && body.patch && body.patch.innerVoice && body.patch.innerVoice.boundSessions)
         setBusy(true)
         setMsg('')
         fetch(path, {
@@ -145,19 +174,31 @@ window.__ModuleLoader__.load({
         })
           .then(function (r) { return r.json() })
           .then(function (d) {
-            if (d && d.error) setMsg('失败: ' + d.error)
+            if (isBinding) {
+              if (d && d.error) setBindingMsg('失败: ' + d.error)
+              else {
+                setBindingMsg(doneMessage || '绑定已保存')
+                setBindingAttempt(null)
+              }
+            } else if (d && d.error) setMsg('失败: ' + d.error)
             else setMsg(doneMessage || '完成')
+            setWarnings(d && d.warnings && d.warnings.length ? d.warnings.join('；') : '')
             refresh()
+            loadBinding()
           })
-          .catch(function (e) { setMsg('请求失败: ' + (e && e.message)) })
+          .catch(function (e) {
+            if (isBinding) setBindingMsg('请求失败: ' + (e && e.message))
+            else setMsg('请求失败: ' + (e && e.message))
+          })
           .finally(function () { setBusy(false) })
-      }, [refresh])
+      }, [refresh, loadBinding])
 
       var settings = (data && data.settings) || {}
       var pro = settings.proactivity || {}
       var iv = settings.innerVoice || {}
       var tts = settings.tts || {}
       var debug = settings.debug || {}
+      var savedBinding = String((iv.boundSessions && iv.boundSessions.electron) || '')
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
@@ -191,6 +232,64 @@ window.__ModuleLoader__.load({
       }
 
       function update(patch, doneMessage) { act(UPDATE, { patch: patch }, doneMessage) }
+
+      // Binding is commit-on-blur/Enter, like the name field: a per-keystroke
+      // save would persist a partial session id before validation runs.
+      function commitBinding() {
+        var v = (bindingDraft !== null ? bindingDraft : savedBinding).trim()
+        if (v === savedBinding) {
+          setBindingDraft(null)
+          setBindingAttempt(null)
+          setBindingMsg('')
+          return
+        }
+        // A blur repeats on every focus loss; do not resend the exact value
+        // that already failed (the visible error would flash on each retry).
+        if (v === bindingAttempt) return
+        setBindingAttempt(v)
+        var next = Object.assign({}, iv.boundSessions || {})
+        if (v !== '') next.electron = v
+        else delete next.electron
+        update({ innerVoice: { boundSessions: next } }, '绑定已保存')
+      }
+
+      // ensure + attach + status, no visible prompt: the one-click way to
+      // finish the "binding is saved but not loaded" step.
+      function testBinding() {
+        if (bindingDraft !== null && bindingDraft.trim() !== savedBinding) {
+          setBindingMsg('请先保存绑定：点一下输入框外面或按回车')
+          return
+        }
+        setBindingBusy(true)
+        setMsg('')
+        setBindingMsg('')
+        fetch('/api/pet-settings/binding-test', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ petId: 'electron' }),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (d && d.error) { setBindingMsg('失败: ' + d.error); return }
+            if (d && d.ok) {
+              var notes = []
+              if (d.binding && d.binding.presetWarning) notes.push('当前模式不是宠物模式，不会有气泡回应')
+              if (d.binding && d.binding.attach && d.binding.attach.errorCode === 'cwd-mismatch') {
+                notes.push('会话在另一个项目，不会归到 whale598 项目下')
+              }
+              setBindingMsg(notes.length ? '绑定可用；' + notes.join('；') : '绑定测试通过')
+            } else {
+              var b = d && d.binding
+              var reason = (b && (b.lastError || (b.attach && b.attach.errorCode))) || '未知原因'
+              setBindingMsg('绑定测试未通过：' + reason)
+            }
+            if (d && d.binding) {
+              setBindingData({ updatedAt: Date.now(), pets: { electron: d.binding }, failures: (bindingData && bindingData.failures) || [] })
+            }
+          })
+          .catch(function (e) { setBindingMsg('请求失败: ' + (e && e.message)) })
+          .finally(function () { setBindingBusy(false); loadBinding() })
+      }
 
       // ── 语音朗读（BreezeBlue TTS）的取声/试听 ──
       // 列表走宿主代理路由（浏览器直连 api.breeze.blue 会被 CORS 拦下，
@@ -376,14 +475,52 @@ window.__ModuleLoader__.load({
                 } }, '普通（含工作工具）'))
             })()),
           h('div', { style: row }, '指定会话（高级）',
-            h('input', { style: Object.assign({}, inputStyle, { width: 340, flex: '1 1 260px' }), value: String((iv.boundSessions && iv.boundSessions.electron) || ''), placeholder: '会话 id，留空 = 自动管理', onChange: function (e) {
-              var v = e.target.value.trim()
-              var next = Object.assign({}, iv.boundSessions || {})
-              if (v !== '') next.electron = v
-              else delete next.electron
-              update({ innerVoice: { boundSessions: next } })
-            } })),
-          h(Hint, null, '宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。醒来有两个来源：世界时钟是环境节拍，按上面的间隔和唤醒概率随机轻拍她，用户忙于会话或宠物表达未完成时不会打扰；自主唤醒是她用 pet_schedule_wake 给自己定的闹钟，到点带着当初的打算醒来，不受这个概率影响（上面的「自主唤醒遇用户忙」决定你正忙时她是否照醒，默认到点必醒）。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。指定会话立即生效——下一次对话就用新绑定的会话；清空后自动回落到她之前的会话（那条若已被归档，会自动创建新的）。')),
+            h('input', {
+              style: Object.assign({}, inputStyle, { width: 340, flex: '1 1 260px' }),
+              value: bindingDraft !== null ? bindingDraft : savedBinding,
+              placeholder: '会话 id，留空 = 自动管理',
+              onChange: function (e) { setBindingDraft(e.target.value) },
+              onBlur: commitBinding,
+              onKeyDown: function (e) { if (e.key === 'Enter') commitBinding() },
+            }),
+            h(SButton, {
+              onClick: testBinding,
+              disabled: bindingBusy || (bindingDraft !== null && bindingDraft.trim() !== savedBinding),
+            }, bindingBusy ? '测试中…' : '测试')),
+          (function () {
+            var petBinding = bindingData && bindingData.pets && bindingData.pets.electron
+            if (!petBinding) return null
+            var bad = !petBinding.usable
+            var color = bad ? '#ff7369' : (petBinding.presetWarning || !petBinding.armed ? '#f0b429' : '#3ddc84')
+            var parts = []
+            parts.push('配置会话 ' + (petBinding.configuredSessionId || '自动管理'))
+            parts.push('生效会话 ' + (petBinding.effectiveSessionId || '无'))
+            parts.push(petBinding.armed ? '已装载' : '未装载')
+            if (petBinding.preset) parts.push('当前模式 ' + petBinding.preset)
+            if (petBinding.cwd) parts.push(petBinding.cwd)
+            if (petBinding.attach) {
+              parts.push(petBinding.attach.ok
+                ? 'attach ok'
+                : (petBinding.attach.errorCode === 'cwd-mismatch'
+                  ? '另一项目（未归组）'
+                  : 'attach ' + petBinding.attach.errorCode))
+            }
+            if (petBinding.presetWarning) parts.push('不是宠物模式，没有气泡')
+            if (petBinding.fallback) parts.push('已回退到内部会话')
+            if (petBinding.staleOwners && petBinding.staleOwners.length) parts.push('旧 owner ' + petBinding.staleOwners.join(','))
+            return h('div', { style: { color: color, fontSize: 12, margin: '2px 0 4px', wordBreak: 'break-all' } }, parts.join(' · '))
+          })(),
+          warnings ? h('div', { style: { color: '#f0b429', fontSize: 12, margin: '2px 0 4px' } }, '提示：' + warnings) : null,
+          bindingMsg ? h('div', {
+            style: {
+              fontSize: 12,
+              margin: '2px 0 4px',
+              color: /失败|未通过/.test(bindingMsg)
+                ? '#ff7369'
+                : (/通过|可用|已保存/.test(bindingMsg) ? '#3ddc84' : 'rgba(127,127,127,.9)'),
+            },
+          }, bindingMsg) : null,
+          h(Hint, null, '指定会话会校验当前模式：标准模式（没有 pet_say/pet_do）会被拒绝，请使用「精简（仅表达）」或「普通（含工作工具）」的宠物模式会话。会话在别的项目也没关系，唤醒和气泡照常，只是不会归到 whale598 项目下。保存后状态显示「已装载/未装载/失败」，点「测试」可立即验证；清空后回落到她之前的会话。宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。醒来有两个来源：世界时钟是环境节拍，按上面的间隔和唤醒概率随机轻拍她，用户忙于会话或宠物表达未完成时不会打扰；自主唤醒是她用 pet_schedule_wake 给自己定的闹钟，到点带着当初的打算醒来，不受这个概率影响（上面的「自主唤醒遇用户忙」决定你正忙时她是否照醒，默认到点必醒）。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。')),
 
         h(Section, { title: h('span', null, '自由活动 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '逻辑驱动')) },
           h('div', { style: row }, '自由活动（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {

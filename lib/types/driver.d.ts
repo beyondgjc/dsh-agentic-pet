@@ -7,6 +7,7 @@
  * @module dsh-agentic-pet/driver
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { type VoiceBindingSnapshot, type VoiceBindingView } from './binding.ts';
 import type { PetService } from './service.ts';
 declare module '@deepseek-ai/cordis' {
     interface Events {
@@ -15,6 +16,25 @@ declare module '@deepseek-ai/cordis' {
         'api-session/error'(sessionId: string, message: string): void;
         'api-session/removed'(sessionId: string): void;
         'pet-settings/changed'(): void;
+        'pet-binding/failed'(payload: {
+            petId: string;
+            sessionId: string;
+            errorCode: string;
+            expectedCwd: string;
+            actualCwd: string | null;
+            at: number;
+        }): void;
+        'pet-binding/armed'(payload: {
+            petId: string;
+            sessionId: string;
+            at: number;
+        }): void;
+        'pet-binding/rebound'(payload: {
+            petId: string;
+            fromSessionId: string;
+            toSessionId: string | null;
+            at: number;
+        }): void;
         'approval/request'(request: {
             toolName?: string;
             reason?: string;
@@ -53,7 +73,18 @@ declare module '@deepseek-ai/cordis' {
  * tool, so timestamps show the USER's wall clock, not UTC (toISOString's Z
  * form read 8h off and cost a confusion round). Sortable, zero-padded. */
 export declare const logStamp: () => string;
-export declare function installPetDriver(ctx: Context, home: string, pet: PetService): void;
+/** Export for the settings page: the live snapshot, no file round-trip. */
+export declare function voiceBindingSnapshot(): VoiceBindingSnapshot;
+export interface PetDriverControl {
+    bindingSnapshot(): VoiceBindingSnapshot;
+    testBinding(petId: string): Promise<{
+        ok: boolean;
+        petId: string;
+        sessionId: string | null;
+        binding: VoiceBindingView;
+    }>;
+}
+export declare function installPetDriver(ctx: Context, home: string, pet: PetService): PetDriverControl;
 /**
  * The model-expression layer: three thin tools over the pet's control
  * interface (§6 — accurate state stays program-driven; these carry only the
