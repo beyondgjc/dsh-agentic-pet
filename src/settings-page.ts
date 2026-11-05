@@ -28,6 +28,7 @@ import {
 } from './binding.ts'
 import { voiceBindingSnapshot, type PetDriverControl } from './driver.ts'
 import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
+import { parseClock } from './rhythm.ts'
 import type { PetService } from './service.ts'
 
 /** The proactivity switches. `enabled`/`cooldownMinutes`/
@@ -87,9 +88,29 @@ interface TtsSettings {
   volume?: number
 }
 
+interface QuietSettings {
+  from?: string
+  to?: string
+  allowTouchReply?: boolean
+}
+
+interface RhythmSettings {
+  quiet?: QuietSettings | null
+}
+
+interface JournalSettings {
+  enabled?: boolean
+  injectRecent?: number
+  maxEntryChars?: number
+  maxFileBytes?: number
+  allowUnboundAppend?: boolean
+}
+
 interface PetSettings {
   proactivity?: ProactivitySettings
   innerVoice?: InnerVoiceSettings
+  rhythm?: RhythmSettings
+  journal?: JournalSettings
   tts?: TtsSettings
   debug?: DebugSettings
 }
@@ -113,6 +134,14 @@ const DEFAULT_SETTINGS: PetSettings = {
     petToPetDelivery: 'queue',
     petMessageLimits: { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 },
     boundSessions: {},
+  },
+  rhythm: { quiet: null },
+  journal: {
+    enabled: true,
+    injectRecent: 3,
+    maxEntryChars: 120,
+    maxFileBytes: 256 * 1024,
+    allowUnboundAppend: false,
   },
   tts: { enabled: false },
   debug: { cdp: false },
@@ -177,6 +206,8 @@ function clampNumber(value: unknown, min: number, max: number): number | undefin
 function mergeSettings(current: PetSettings, patch: Record<string, unknown>): PetSettings {
   const proactivity = { ...DEFAULT_SETTINGS.proactivity, ...current.proactivity }
   const innerVoice = { ...DEFAULT_SETTINGS.innerVoice, ...current.innerVoice }
+  const rhythm: RhythmSettings = { quiet: null, ...current.rhythm }
+  const journal: JournalSettings = { ...DEFAULT_SETTINGS.journal, ...current.journal }
   const debug = { ...DEFAULT_SETTINGS.debug, ...current.debug }
   const patchProactivity = patch.proactivity
   if (typeof patchProactivity === 'object' && patchProactivity !== null) {
@@ -246,6 +277,38 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
       innerVoice.boundSessions = record
     }
   }
+  const patchRhythm = patch.rhythm
+  if (typeof patchRhythm === 'object' && patchRhythm !== null) {
+    const r = patchRhythm as Record<string, unknown>
+    if (r.quiet === null) {
+      rhythm.quiet = null
+    } else if (typeof r.quiet === 'object' && r.quiet !== null) {
+      const q = r.quiet as Record<string, unknown>
+      const currentQuiet = current.rhythm?.quiet ?? undefined
+      const from = typeof q.from === 'string' && parseClock(q.from) !== undefined
+        ? q.from
+        : (currentQuiet?.from ?? '01:00')
+      const to = typeof q.to === 'string' && parseClock(q.to) !== undefined
+        ? q.to
+        : (currentQuiet?.to ?? '09:00')
+      const allow = typeof q.allowTouchReply === 'boolean'
+        ? q.allowTouchReply
+        : (currentQuiet?.allowTouchReply ?? true)
+      rhythm.quiet = { from, to, allowTouchReply: allow }
+    }
+  }
+  const patchJournal = patch.journal
+  if (typeof patchJournal === 'object' && patchJournal !== null) {
+    const j = patchJournal as Record<string, unknown>
+    if (typeof j.enabled === 'boolean') journal.enabled = j.enabled
+    const inject = clampNumber(j.injectRecent, 1, 20)
+    if (inject !== undefined) journal.injectRecent = inject
+    const chars = clampNumber(j.maxEntryChars, 40, 1000)
+    if (chars !== undefined) journal.maxEntryChars = chars
+    const bytes = clampNumber(j.maxFileBytes, 4096, 4 * 1024 * 1024)
+    if (bytes !== undefined) journal.maxFileBytes = bytes
+    if (typeof j.allowUnboundAppend === 'boolean') journal.allowUnboundAppend = j.allowUnboundAppend
+  }
   const patchDebug = patch.debug
   if (typeof patchDebug === 'object' && patchDebug !== null) {
     const d = patchDebug as Record<string, unknown>
@@ -278,7 +341,7 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
   // pet-settings.json is SHARED with the carrier (its tuning/outfit/rev keys
   // live in the same file): preserve every key this page does not own, or one
   // save here silently wipes the carrier's half.
-  return { ...current, proactivity, innerVoice, tts, debug }
+  return { ...current, proactivity, innerVoice, rhythm, journal, tts, debug }
 }
 
 function openPathInFileManager(path: string): void {

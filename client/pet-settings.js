@@ -196,6 +196,11 @@ window.__ModuleLoader__.load({
       var settings = (data && data.settings) || {}
       var pro = settings.proactivity || {}
       var iv = settings.innerVoice || {}
+      var rhythm = settings.rhythm || {}
+      var quiet = rhythm.quiet || {}
+      var quietOn = !!rhythm.quiet
+      var journal = settings.journal || {}
+      var journalOn = journal.enabled !== false
       var tts = settings.tts || {}
       var debug = settings.debug || {}
       var savedBinding = String((iv.boundSessions && iv.boundSessions.electron) || '')
@@ -522,6 +527,61 @@ window.__ModuleLoader__.load({
           }, bindingMsg) : null,
           h(Hint, null, '指定会话会校验当前模式：标准模式（没有 pet_say/pet_do）会被拒绝，请使用「精简（仅表达）」或「普通（含工作工具）」的宠物模式会话。会话在别的项目也没关系，唤醒和气泡照常，只是不会归到 whale598 项目下。保存后状态显示「已装载/未装载/失败」，点「测试」可立即验证；清空后回落到她之前的会话。宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。醒来有两个来源：世界时钟是环境节拍，按上面的间隔和唤醒概率随机轻拍她，用户忙于会话或宠物表达未完成时不会打扰；自主唤醒是她用 pet_schedule_wake 给自己定的闹钟，到点带着当初的打算醒来，不受这个概率影响（上面的「自主唤醒遇用户忙」决定你正忙时她是否照醒，默认到点必醒）。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。')),
 
+        h(Section, { title: '静默时段' },
+          h('div', { style: row }, '启用静默', h(Toggle, { value: quietOn, onChange: function () {
+            if (quietOn) update({ rhythm: { quiet: null } })
+            else update({ rhythm: { quiet: { from: '01:00', to: '09:00', allowTouchReply: true } } })
+          } })),
+          quietOn ? h('div', { style: row },
+            '从', h('input', {
+              type: 'time',
+              style: Object.assign({}, inputStyle, { width: 92 }),
+              value: quiet.from || '01:00',
+              onChange: function (e) {
+                update({ rhythm: { quiet: {
+                  from: e.target.value,
+                  to: quiet.to || '09:00',
+                  allowTouchReply: quiet.allowTouchReply !== false,
+                } } })
+              },
+            }),
+            '到', h('input', {
+              type: 'time',
+              style: Object.assign({}, inputStyle, { width: 92 }),
+              value: quiet.to || '09:00',
+              onChange: function (e) {
+                update({ rhythm: { quiet: {
+                  from: quiet.from || '01:00',
+                  to: e.target.value,
+                  allowTouchReply: quiet.allowTouchReply !== false,
+                } } })
+              },
+            })) : null,
+          quietOn ? h('div', { style: row }, '静默时仍回应触摸', h(Toggle, {
+            value: quiet.allowTouchReply !== false,
+            onChange: function () {
+              update({ rhythm: { quiet: {
+                from: quiet.from || '01:00',
+                to: quiet.to || '09:00',
+                allowTouchReply: quiet.allowTouchReply === false,
+              } } })
+            },
+          })) : null,
+          h(Hint, null, '静默只压世界时钟；自主唤醒照常，只会在 prompt 里提示“用户可能已睡”；启动问好不变。')),
+        h(Section, { title: '连续性本子' },
+          h('div', { style: row }, '启用', h(Toggle, { value: journalOn, onChange: function () {
+            update({ journal: { enabled: !journalOn } })
+          } })),
+          journalOn ? h('div', { style: row }, '每次唤醒注入最近',
+            h('input', { style: inputStyle, value: String(journal.injectRecent ?? 3), onChange: function (e) {
+              var v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v)) update({ journal: { injectRecent: Math.min(20, Math.max(1, v)) } })
+            } }), '条') : null,
+          journalOn ? h('div', { style: row }, '允许无绑定会话追加', h(Toggle, {
+            value: journal.allowUnboundAppend === true,
+            onChange: function () { update({ journal: { allowUnboundAppend: journal.allowUnboundAppend !== true } }) },
+          })) : null,
+          h(Hint, null, '本子在 ~/.dsh/whale598/<petId>/journal.md：可读、可追加、不静默删改；手写本子已导入。默认只有宠物自己的会话可以追加。')),
         h(Section, { title: h('span', null, '自由活动 ', h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '逻辑驱动')) },
           h('div', { style: row }, '自由活动（宠物自娱）', h(Toggle, { value: pro.idleAnimation !== false, onChange: function () {
             update({ proactivity: { idleAnimation: !(pro.idleAnimation !== false) } })

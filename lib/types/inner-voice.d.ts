@@ -236,10 +236,20 @@ export interface WakePromptFacts {
         fromName: string;
         count: number;
     }>;
+    /** 静默时段：只压制世界时钟；自主唤醒仍触发，prompt 说明用户可能已睡。 */
+    quiet?: boolean;
+    /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */
+    journal?: Array<{
+        at: number;
+        source: string;
+        text: string;
+    }>;
 }
 /** Local HH:mm for plan times: the model's clock talk is the USER's wall
  * clock (logStamp precedent), and plans are compared against it. */
 export declare const wakePlanClock: (at: number) => string;
+/** Date + local time for journal entries (imported entries may be days old). */
+export declare const journalClock: (at: number) => string;
 /** The wake prompt. Time context is injected by the preset's time-context
  * row; the leading tag doubles as the durable trigger marker in the log —
  * and now names the SOURCE: [世界时钟] (the environment's tick), [自主唤醒]

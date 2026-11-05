@@ -1,0 +1,451 @@
+/**
+ * The pet's continuity journal: one human-readable markdown file per pet.
+ * Entries carry a machine marker (timestamp/source/session) plus a human
+ * heading. Writes are append-only; the only rewrite is bounded rotation into
+ * `journal.archive.md`. The settings page's direct file edits are detected
+ * through a sidecar digest and leave an `external-edit` trace.
+ * @module dsh-agentic-pet/journal
+ */
+
+import { createHash } from 'node:crypto'
+import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { petDataDir, readGlobalJson } from './petdata.ts'
+
+export interface JournalConfig {
+  enabled: boolean
+  injectRecent: number
+  maxEntryChars: number
+  maxFileBytes: number
+  allowUnboundAppend: boolean
+}
+
+export interface JournalEntry {
+  at: number
+  source: string
+  sessionId: string | null
+  text: string
+  /** Hash chain: previous entry's hash ('genesis' for the first chained entry). */
+  prev?: string
+  /** sha256(prev + canonical entry). Present on entries written by this module. */
+  hash?: string
+}
+
+export interface JournalInjection {
+  at: number
+  source: string
+  text: string
+}
+
+export const DEFAULT_JOURNAL_CONFIG: JournalConfig = {
+  enabled: true,
+  injectRecent: 3,
+  maxEntryChars: 120,
+  maxFileBytes: 256 * 1024,
+  allowUnboundAppend: false,
+}
+
+const MAX_ENTRY_CHARS = 2000
+
+export function journalPath(home: string, petId: string): string {
+  return join(petDataDir(home, petId), 'journal.md')
+}
+
+export function journalArchivePath(home: string, petId: string): string {
+  return join(petDataDir(home, petId), 'journal.archive.md')
+}
+
+export function journalMetaPath(home: string, petId: string): string {
+  return join(petDataDir(home, petId), 'journal.meta.json')
+}
+
+function clamp(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(max, Math.max(min, Math.round(value)))
+    : fallback
+}
+
+export async function readJournalConfig(home: string): Promise<JournalConfig> {
+  try {
+    const raw = await readGlobalJson(home, 'pet-settings.json')
+    const journal = raw.journal
+    if (typeof journal !== 'object' || journal === null) return { ...DEFAULT_JOURNAL_CONFIG }
+    const record = journal as Record<string, unknown>
+    return {
+      enabled: record.enabled !== false,
+      injectRecent: clamp(record.injectRecent, DEFAULT_JOURNAL_CONFIG.injectRecent, 1, 20),
+      maxEntryChars: clamp(record.maxEntryChars, DEFAULT_JOURNAL_CONFIG.maxEntryChars, 40, 1000),
+      maxFileBytes: clamp(record.maxFileBytes, DEFAULT_JOURNAL_CONFIG.maxFileBytes, 4096, 4 * 1024 * 1024),
+      allowUnboundAppend: record.allowUnboundAppend === true,
+    }
+  } catch {
+    return { ...DEFAULT_JOURNAL_CONFIG }
+  }
+}
+
+const localStamp = (at: number): string => {
+  const d = new Date(at)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+const sourceLabel = (source: string): string => {
+  switch (source) {
+    case 'user': return '用户'
+    case 'system': return '系统'
+    case 'imported': return '导入'
+    case 'external-edit': return '外部编辑'
+    case 'wake': return '醒来'
+    case 'touch': return '被摸'
+    case 'chat': return '对话'
+    case 'pet': return '自述'
+    default: return source
+  }
+}
+
+export function formatJournalEntry(entry: JournalEntry): string {
+  const meta = JSON.stringify({
+    at: entry.at,
+    source: entry.source,
+    sessionId: entry.sessionId,
+    ...(entry.prev === undefined ? {} : { prev: entry.prev }),
+    ...(entry.hash === undefined ? {} : { hash: entry.hash }),
+  })
+  return `<!-- journal ${meta} -->\n## ${localStamp(entry.at)} · ${sourceLabel(entry.source)}\n\n${entry.text.trim()}\n\n`
+}
+
+/** Chain link for an entry body. The text is part of the hash, so editing a
+ * body without recomputing every later link is detectable. */
+export function hashJournalEntry(prev: string, entry: JournalEntry): string {
+  return createHash('sha256')
+    .update(`${prev}\n${entry.at}\n${entry.source}\n${entry.sessionId ?? ''}\n${entry.text.trim()}`)
+    .digest('hex')
+}
+
+function chainEntry(entry: JournalEntry, prev: string): JournalEntry {
+  const hash = hashJournalEntry(prev, entry)
+  return { ...entry, prev, hash }
+}
+
+const markerPattern = /<!--\s*journal\s+(\{.*?\})\s*-->/g
+
+function parseMarker(record: unknown): JournalEntry | undefined {
+  if (typeof record !== 'object' || record === null) return undefined
+  const r = record as Record<string, unknown>
+  if (typeof r.at !== 'number' || !Number.isFinite(r.at)) return undefined
+  if (typeof r.source !== 'string' || r.source === '') return undefined
+  return {
+    at: r.at,
+    source: r.source,
+    sessionId: typeof r.sessionId === 'string' ? r.sessionId : null,
+    text: '',
+    ...(typeof r.prev === 'string' ? { prev: r.prev } : {}),
+    ...(typeof r.hash === 'string' ? { hash: r.hash } : {}),
+  }
+}
+
+/** Markers are authoritative; a hand-written `##` file falls back to headings. */
+export function parseJournalEntries(raw: string): JournalEntry[] {
+  const matches: Array<{ start: number; end: number; json: string }> = []
+  markerPattern.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = markerPattern.exec(raw)) !== null) {
+    matches.push({ start: match.index, end: match.index + match[0].length, json: match[1] ?? '' })
+  }
+  if (matches.length > 0) {
+    const entries: JournalEntry[] = []
+    for (let i = 0; i < matches.length; i += 1) {
+      const current = matches[i]
+      if (current === undefined) continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(current.json)
+      } catch {
+        continue
+      }
+      const entry = parseMarker(parsed)
+      if (entry === undefined) continue
+      const next = matches[i + 1]
+      const body = raw.slice(current.end, next?.start ?? raw.length)
+      entry.text = body.replace(/^\s*##[^\n]*\n?/, '').trim()
+      entries.push(entry)
+    }
+    return entries
+  }
+  // Hand-written fallback: split on ATX headings.
+  const sections = raw.split(/^##\s+/m).slice(1)
+  return sections.map((section) => {
+    const newline = section.indexOf('\n')
+    const heading = newline === -1 ? section.trim() : section.slice(0, newline).trim()
+    const body = newline === -1 ? '' : section.slice(newline + 1).trim()
+    const date = /(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?/.exec(heading)
+    let at = 0
+    if (date !== null) {
+      const parsed = new Date(`${date[1]}T${date[2] ?? '12:00'}:00`)
+      if (!Number.isNaN(parsed.getTime())) at = parsed.getTime()
+    }
+    return { at, source: 'imported', sessionId: null, text: `${heading}\n${body}`.trim() }
+  })
+}
+
+async function appendTrace(home: string, petId: string, text: string): Promise<string> {
+  const path = journalPath(home, petId)
+  const raw = await readFile(path, 'utf8').catch(() => '')
+  const entries = parseJournalEntries(raw)
+  const prev = entries.at(-1)?.hash ?? 'genesis'
+  const trace = chainEntry({ at: Date.now(), source: 'external-edit', sessionId: null, text }, prev)
+  await appendFile(path, formatJournalEntry(trace), 'utf8')
+  await writeMeta(home, petId, await readFile(path, 'utf8'))
+  return trace.hash ?? prev
+}
+
+/** Detect edits made outside `appendJournal` (a manual editor, or a session
+ * using generic file tools), including deletion/truncation. A trace entry is
+ * a chain reset point: entries before it are not re-verified. */
+async function ensureExternalEditTrace(home: string, petId: string): Promise<void> {
+  const path = journalPath(home, petId)
+  const raw = await readFile(path, 'utf8').catch(() => '')
+  const meta = await readMeta(home, petId)
+  if (raw.trim() === '') {
+    if (meta !== undefined && meta.bytes > 0) {
+      await appendTrace(home, petId, '文件被外部删除或清空，已记录并重新开始。')
+    } else if (meta === undefined) {
+      await writeMeta(home, petId, raw)
+    }
+    return
+  }
+  if (meta === undefined) {
+    await writeMeta(home, petId, raw)
+    return
+  }
+  if (meta.hash === digest(raw)) return
+  await appendTrace(home, petId, '文件在本次读取前被外部修改过。')
+}
+
+/** Verify the current chain segment (after the last trace). Legacy entries
+ * without hashes are ignored; a length/lastHash/link mismatch is tampering. */
+function verifyChain(entries: JournalEntry[], meta: JournalMeta | undefined): boolean {
+  if (meta === undefined || meta.lastHash === undefined) return true
+  let lastTrace = -1
+  for (let i = 0; i < entries.length; i += 1) {
+    if (entries[i]?.source === 'external-edit') lastTrace = i
+  }
+  const segment = entries.slice(lastTrace === -1 ? 0 : lastTrace)
+  const chained = segment.filter(entry => entry.hash !== undefined)
+  if (chained.length !== (meta.chainLength ?? 0)) return false
+  if (chained.at(-1)?.hash !== meta.lastHash) return false
+  for (let i = 0; i < chained.length; i += 1) {
+    const entry = chained[i]
+    if (entry === undefined || entry.prev === undefined || entry.hash === undefined) return false
+    if (entry.hash !== hashJournalEntry(entry.prev, entry)) return false
+    if (i > 0 && entry.prev !== chained[i - 1]?.hash) return false
+  }
+  return true
+}
+
+export async function readJournal(home: string, petId: string, limit = 3): Promise<JournalEntry[]> {
+  const path = journalPath(home, petId)
+  return withJournalLock(path, async () => {
+    await ensureExternalEditTrace(home, petId)
+    try {
+      let raw = await readFile(path, 'utf8')
+      let entries = parseJournalEntries(raw)
+      const meta = await readMeta(home, petId)
+      if (!verifyChain(entries, meta)) {
+        await appendTrace(home, petId, '检测到 journal 链断裂或被删改，已记录。')
+        raw = await readFile(path, 'utf8')
+        entries = parseJournalEntries(raw)
+      }
+      return entries.slice(-Math.max(1, Math.min(20, limit)))
+    } catch {
+      return []
+    }
+  })
+}
+
+export async function readJournalForInjection(
+  home: string,
+  petId: string,
+  config: JournalConfig,
+): Promise<JournalInjection[]> {
+  const entries = await readJournal(home, petId, config.injectRecent)
+  return entries.map(entry => ({
+    at: entry.at,
+    source: entry.source,
+    text: entry.text.slice(0, config.maxEntryChars).replace(/</g, '‹').replace(/>/g, '›'),
+  }))
+}
+
+const queues = new Map<string, Promise<unknown>>()
+
+/** Serialize writes per file inside this process. `appendFile` keeps the
+ * cross-process write itself atomic. */
+function withJournalLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = queues.get(key) ?? Promise.resolve()
+  const run = previous.then(fn, fn)
+  queues.set(key, run.then(() => undefined, () => undefined))
+  return run
+}
+
+const digest = (raw: string): string => createHash('sha256').update(raw).digest('hex')
+
+interface JournalMeta {
+  bytes: number
+  hash: string
+  updatedAt: number
+  /** Last chained entry hash in the current segment (after the last trace). */
+  lastHash?: string
+  /** Number of chained entries in the current segment. */
+  chainLength?: number
+}
+
+async function readMeta(home: string, petId: string): Promise<JournalMeta | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(journalMetaPath(home, petId), 'utf8')) as JournalMeta
+    if (typeof parsed.hash === 'string' && typeof parsed.bytes === 'number') return parsed
+  } catch {
+    // No meta yet.
+  }
+  return undefined
+}
+
+async function writeMeta(home: string, petId: string, raw: string): Promise<void> {
+  const entries = parseJournalEntries(raw)
+  // A trace entry is a reset point: entries before the last trace are known
+  // compromised and are not re-verified; the chain segment starts there.
+  let lastTrace = -1
+  for (let i = 0; i < entries.length; i += 1) {
+    if (entries[i]?.source === 'external-edit') lastTrace = i
+  }
+  const segment = entries.slice(lastTrace === -1 ? 0 : lastTrace)
+  const chained = segment.filter(entry => entry.hash !== undefined)
+  const lastHash = chained.at(-1)?.hash
+  const meta: JournalMeta = {
+    bytes: Buffer.byteLength(raw, 'utf8'),
+    hash: digest(raw),
+    updatedAt: Date.now(),
+    ...(lastHash === undefined ? {} : { lastHash }),
+    chainLength: chained.length,
+  }
+  await writeFile(journalMetaPath(home, petId), `${JSON.stringify(meta)}\n`, 'utf8')
+}
+
+async function rotate(home: string, petId: string): Promise<void> {
+  const path = journalPath(home, petId)
+  const raw = await readFile(path, 'utf8').catch(() => '')
+  if (raw === '') return
+  const entries = parseJournalEntries(raw)
+  const archive = journalArchivePath(home, petId)
+  await appendFile(archive, raw.endsWith('\n') ? raw : `${raw}\n`, 'utf8')
+  const note = (prev: string): JournalEntry => chainEntry({
+    at: Date.now(),
+    source: 'system',
+    sessionId: null,
+    text: '旧记录已归档到 journal.archive.md。',
+  }, prev)
+  if (entries.length <= 1) {
+    await writeFile(path, formatJournalEntry(note(entries.at(-1)?.hash ?? 'genesis')), 'utf8')
+    return
+  }
+  // Archive keeps the complete raw file; the current file keeps the newest
+  // entries plus a pointer note, so wake injection stays cheap.
+  const keep = entries.slice(-Math.min(20, entries.length - 1))
+  const rebuilt = [...keep, note(keep.at(-1)?.hash ?? 'genesis')].map(formatJournalEntry).join('')
+  await writeFile(path, rebuilt, 'utf8')
+}
+
+export async function appendJournal(
+  home: string,
+  petId: string,
+  entry: { at: number; source: string; sessionId: string | null; text: string },
+  config: JournalConfig,
+): Promise<{ path: string; at: number; rotated: boolean }> {
+  const text = entry.text.trim().slice(0, MAX_ENTRY_CHARS)
+  if (text === '') throw new Error('journal 追加内容不能为空')
+  const path = journalPath(home, petId)
+  return withJournalLock(path, async () => {
+    await mkdir(dirname(path), { recursive: true })
+    const existing = await readFile(path, 'utf8').catch(() => '')
+    const meta = await readMeta(home, petId)
+    const existingEntries = parseJournalEntries(existing)
+    let prev = existingEntries.at(-1)?.hash ?? 'genesis'
+    const chunks: string[] = []
+    if (existing.trim() !== '' && meta !== undefined && meta.hash !== digest(existing)) {
+      const trace = chainEntry({
+        at: Date.now(),
+        source: 'external-edit',
+        sessionId: null,
+        text: '文件在本次追加前被外部修改过。',
+      }, prev)
+      chunks.push(formatJournalEntry(trace))
+      prev = trace.hash ?? prev
+    }
+    const nextEntry = chainEntry({ at: entry.at, source: entry.source, sessionId: entry.sessionId, text }, prev)
+    chunks.push(formatJournalEntry(nextEntry))
+    await appendFile(path, chunks.join(''), 'utf8')
+    let current = await readFile(path, 'utf8')
+    let rotated = false
+    if (Buffer.byteLength(current, 'utf8') > config.maxFileBytes) {
+      await rotate(home, petId)
+      current = await readFile(path, 'utf8')
+      rotated = true
+    }
+    await writeMeta(home, petId, current)
+    return { path, at: entry.at, rotated }
+  })
+}
+
+/** One-time import of the user's hand-written notebook. The source is never
+ * modified; the target is created only when absent. Returns entries imported. */
+export async function importHandwrittenJournal(
+  home: string,
+  petId: string,
+  sourcePath: string,
+): Promise<number> {
+  const target = journalPath(home, petId)
+  try {
+    await readFile(target, 'utf8')
+    return 0 // already imported / in use
+  } catch {
+    // Absent: import below.
+  }
+  let raw: string
+  let mtime = Date.now()
+  try {
+    raw = await readFile(sourcePath, 'utf8')
+    mtime = (await stat(sourcePath)).mtimeMs
+  } catch {
+    return 0
+  }
+  const sections = raw.split(/^##\s+/m).slice(1)
+  if (sections.length === 0) return 0
+  const entries: JournalEntry[] = sections.map((section) => {
+    const newline = section.indexOf('\n')
+    const heading = newline === -1 ? section.trim() : section.slice(0, newline).trim()
+    const body = newline === -1 ? '' : section.slice(newline + 1).trim()
+    const date = /(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?/.exec(heading)
+    let at = mtime
+    if (date !== null) {
+      const parsed = new Date(`${date[1]}T${date[2] ?? '12:00'}:00`)
+      if (!Number.isNaN(parsed.getTime())) at = parsed.getTime()
+    }
+    return {
+      at,
+      source: 'imported',
+      sessionId: null,
+      text: `${heading}\n${body}`.trim(),
+    }
+  }).filter(entry => entry.text !== '')
+  if (entries.length === 0) return 0
+  await mkdir(dirname(target), { recursive: true })
+  let prev = 'genesis'
+  const chained = entries.map((item) => {
+    const next = chainEntry(item, prev)
+    prev = next.hash ?? prev
+    return next
+  })
+  const content = chained.map(formatJournalEntry).join('')
+  await writeFile(target, content, 'utf8')
+  await writeMeta(home, petId, content)
+  return entries.length
+}
