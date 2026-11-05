@@ -44,7 +44,7 @@ export declare function parseJournalEntries(raw: string, fallbackAt?: number): J
 export declare function readJournal(home: string, petId: string, limit?: number): Promise<JournalEntry[]>;
 export declare function readJournalForInjection(home: string, petId: string, config: JournalConfig): Promise<JournalInjection[]>;
 export declare function appendJournal(home: string, petId: string, entry: {
-    at: number;
+    at?: number;
     source: string;
     sessionId: string | null;
     text: string;

@@ -116,7 +116,8 @@ for (const relative of REQUIRED_ARTIFACTS) {
     fail(`missing release artifact ${relative} - build, then run scripts\\sync-from-monorepo.cmd`)
   }
 }
-const chunks = readdirSync(join(ROOT, 'lib')).filter(entry => /^service-.*\.js$/.test(entry))
+const entryFiles = new Set(['index.js', 'tools.js'])
+const chunks = readdirSync(join(ROOT, 'lib')).filter(entry => entry.endsWith('.js') && !entryFiles.has(entry))
 if (chunks.length !== 1) {
   fail(`lib/ must carry exactly one bundle chunk, found ${String(chunks.length)} (${chunks.join(', ') || 'none'}) - tsdown clean:false leaves stale chunks behind; delete lib/*.js and rebuild`)
 }

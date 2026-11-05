@@ -57,6 +57,7 @@ const React = {
     return callbacks[i]
   },
   useEffect: () => {},
+  useRef: (init) => ({ current: init }),
 }
 
 let factory

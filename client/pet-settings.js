@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
     var row = { display: 'flex', alignItems: 'center', gap: 10, margin: '6px 0', fontSize: 13, flexWrap: 'wrap' }
     var muted = { color: 'rgba(127,127,127,.9)', fontSize: 12 }
     var inputStyle = { width: 64, padding: '2px 6px', border: '1px solid rgba(127,127,127,.4)', borderRadius: 6, background: 'transparent', color: 'inherit', font: 'inherit' }
+    var eyeButton = { border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 2, display: 'inline-flex', alignItems: 'center', opacity: .65 }
     var runtimeCard = { border: '1px solid rgba(124,108,240,.45)', borderRadius: 10, padding: '10px 14px 12px', margin: '10px 0', background: 'rgba(124,108,240,.06)' }
     var runtimeTrack = { position: 'relative', height: 4, borderRadius: 2, background: 'rgba(127,127,127,.18)', overflow: 'hidden', marginTop: 8 }
     var runtimeBar = { position: 'absolute', top: 0, left: '-35%', width: '35%', height: '100%', borderRadius: 2, background: 'rgba(124,108,240,.85)', animation: 'petRuntimeSlide 1.15s ease-in-out infinite' }
@@ -47,6 +48,15 @@ window.__ModuleLoader__.load({
           background: props.value ? 'rgba(31,158,79,.12)' : 'transparent',
         },
       }, props.value ? '已开启' : '已关闭')
+    }
+    function EyeIcon(props) {
+      return h('svg', {
+        width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+        strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
+      },
+        h('path', { d: 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z' }),
+        h('circle', { cx: 12, cy: 12, r: 3 }),
+        props.off ? h('path', { d: 'M3 3l18 18' }) : null)
     }
     function Section(props) {
       return h('div', { style: card }, h('div', { style: cardTitle }, props.title), props.children)
@@ -114,6 +124,10 @@ window.__ModuleLoader__.load({
       var setBindingAttempt = bindingAttemptState[1]
       var previewAudioRef = useRef(null)
       var keyInputRef = useRef(null)
+      // 好感度默认盖住：密码式的星星遮罩，眼睛按钮按宠物单独揭示。
+      var affectionRevealState = useState({})
+      var affectionReveal = affectionRevealState[0]
+      var setAffectionReveal = affectionRevealState[1]
 
       var refresh = useCallback(function () {
         fetch(READ, { credentials: 'same-origin' })
@@ -378,11 +392,28 @@ window.__ModuleLoader__.load({
             return ids.map(function (id) {
               var book = (affection && affection[id]) || { affection: 0, total: 0 }
               var name = petName(id)
+              var revealed = !!affectionReveal[id]
+              var bondDays = book.bond ? (book.bond.value ?? book.bond.days ?? 0) : 0
               return h('div', { key: id, style: row },
                 h('span', { style: { fontWeight: 700 } }, name),
-                h('span', { style: { fontSize: 18, fontWeight: 700 } }, String(book.affection ?? 0)),
-                h('span', { style: muted }, '/ 100 · ' + moodOf(book.affection ?? 0) + ' · 羁绊：' + bondTier(book.bond ? (book.bond.value ?? book.bond.days ?? 0) : 0) + '（' + String(book.bond ? (book.bond.value ?? book.bond.days ?? 0) : 0) + ' 天）'),
-                h('span', { style: muted }, '累计 ' + String(book.total ?? 0) + ' 次'))
+                h('span', { style: revealed ? { fontSize: 18, fontWeight: 700 } : { fontSize: 16, letterSpacing: 4, color: 'rgba(127,127,127,.95)' } },
+                  revealed ? String(book.affection ?? 0) : '★★★★★★'),
+                revealed ? h('span', { style: muted }, '/ 100 · ' + moodOf(book.affection ?? 0) + ' · 羁绊：' + bondTier(bondDays) + '（' + String(bondDays) + ' 天）') : null,
+                revealed ? h('span', { style: muted }, '累计 ' + String(book.total ?? 0) + ' 次') : null,
+                h('button', {
+                  type: 'button',
+                  title: revealed ? '隐藏好感度' : '显示好感度',
+                  'aria-label': revealed ? '隐藏好感度' : '显示好感度',
+                  'aria-pressed': revealed,
+                  onClick: function () {
+                    setAffectionReveal(function (prev) {
+                      var next = Object.assign({}, prev)
+                      next[id] = !prev[id]
+                      return next
+                    })
+                  },
+                  style: eyeButton,
+                }, h(EyeIcon, { off: revealed })))
             })
           })(),
           h('div', { style: row }, h(SButton, { variant: 'danger', disabled: busy, onClick: function () {

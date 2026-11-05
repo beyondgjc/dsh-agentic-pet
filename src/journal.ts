@@ -372,7 +372,7 @@ async function rotate(home: string, petId: string): Promise<void> {
 export async function appendJournal(
   home: string,
   petId: string,
-  entry: { at: number; source: string; sessionId: string | null; text: string },
+  entry: { at?: number; source: string; sessionId: string | null; text: string },
   config: JournalConfig,
 ): Promise<{ path: string; at: number; rotated: boolean }> {
   const text = entry.text.trim().slice(0, MAX_ENTRY_CHARS)
@@ -395,7 +395,10 @@ export async function appendJournal(
       chunks.push(formatJournalEntry(trace))
       prev = trace.hash ?? prev
     }
-    const nextEntry = chainEntry({ at: entry.at, source: entry.source, sessionId: entry.sessionId, text }, prev)
+    // Stamp inside the lock: a queued append must record when it actually
+    // wrote, not when its tool call started.
+    const at = entry.at ?? Date.now()
+    const nextEntry = chainEntry({ at, source: entry.source, sessionId: entry.sessionId, text }, prev)
     chunks.push(formatJournalEntry(nextEntry))
     await appendFile(path, chunks.join(''), 'utf8')
     let current = await readFile(path, 'utf8')
@@ -406,7 +409,7 @@ export async function appendJournal(
       rotated = true
     }
     await writeMeta(home, petId, current)
-    return { path, at: entry.at, rotated }
+    return { path, at, rotated }
   })
 }
 

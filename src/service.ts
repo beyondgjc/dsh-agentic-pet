@@ -69,6 +69,16 @@ export interface PetLastAction {
   readonly endedAt: number | null
 }
 
+/** Completion requires BOTH the id match and the backfilled `endedAt`: the
+ * acceptance record carries the same id with `endedAt: null`, so matching on
+ * id alone would report "finished" the instant the action is accepted. */
+export function isActionComplete(
+  record: PetLastAction | null | undefined,
+  requestId: string,
+): record is PetLastAction & { endedAt: number } {
+  return record != null && record.id === requestId && record.endedAt !== null
+}
+
 /**
  * Abstract pet capability seam. Subclass, implement the abstract methods,
  * and load the subclass as a plugin — it registers as `ctx.petService`

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildWakePrompt } from '../src/inner-voice.ts'
 import {
   appendJournal,
@@ -84,6 +84,24 @@ describe('append/read', () => {
     expect(latest[0]?.text).toBe('two')
     const all = await readJournal(home, 'electron', 10)
     expect(all.map(item => item.text)).toEqual(['one', 'two'])
+  })
+
+  it('stamps an omitted at at the actual append, not the caller start', async () => {
+    const home = await makeHome()
+    const at = 1_800_000_000_000
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(at)
+    try {
+      const result = await appendJournal(home, 'electron', {
+        source: 'pet',
+        sessionId: 'session-1',
+        text: 'now',
+      }, DEFAULT_JOURNAL_CONFIG)
+      expect(result.at).toBe(at)
+      const entries = await readJournal(home, 'electron', 1)
+      expect(entries[0]?.at).toBe(at)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('leaves an external-edit trace when the file changed outside the tool', async () => {

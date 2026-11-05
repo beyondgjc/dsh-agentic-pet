@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { bootOrder, defaultPet, notifyPets, type PetEntry } from '../src/registry.ts'
-import { normalizeStatus } from '../src/service.ts'
+import { isActionComplete, normalizeStatus, type PetLastAction } from '../src/service.ts'
 
 const entry = (id: string, port = 10000, since = 0): PetEntry => ({ id, port, pid: 1, since })
 
@@ -165,5 +165,39 @@ describe('service normalizeStatus (the /status field matrix)', () => {
     expect(snap.lastAction).toBeNull()
     expect(snap.location).toBeUndefined()
     expect(snap.pid).toBeUndefined()
+  })
+})
+
+describe('isActionComplete (wait must not mistake acceptance for completion)', () => {
+  const accepted: PetLastAction = {
+    id: 'req-1',
+    action: 'celebrate.webm',
+    requestedBy: 'tool',
+    startedAt: 1_000,
+    durationMs: null,
+    endedAt: null,
+  }
+  const completed: PetLastAction = {
+    ...accepted,
+    durationMs: 10_042,
+    endedAt: 11_042,
+  }
+
+  it('rejects the acceptance record even though the id already matches', () => {
+    expect(isActionComplete(accepted, 'req-1')).toBe(false)
+  })
+
+  it('accepts the backfilled completion record', () => {
+    expect(isActionComplete(completed, 'req-1')).toBe(true)
+  })
+
+  it('rejects another request id and missing records', () => {
+    expect(isActionComplete(completed, 'req-2')).toBe(false)
+    expect(isActionComplete(null, 'req-1')).toBe(false)
+    expect(isActionComplete(undefined, 'req-1')).toBe(false)
+  })
+
+  it('a completed record with unknown duration still counts as complete', () => {
+    expect(isActionComplete({ ...completed, durationMs: null }, 'req-1')).toBe(true)
   })
 })

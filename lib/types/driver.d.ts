@@ -8,7 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type VoiceBindingSnapshot, type VoiceBindingView } from './binding.ts';
-import type { PetService } from './service.ts';
+import { type PetService } from './service.ts';
 declare module '@deepseek-ai/cordis' {
     interface Events {
         'api-session/status'(sessionId: string, running: boolean): void;
