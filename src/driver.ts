@@ -2625,7 +2625,8 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
                 setTimeout(() => {
                   if (deliverer === undefined) {
                     // driver 重装窗口：降级入队，消息不丢
-                    voicePetMessages.set(to.id, queuePetMessage(voicePetMessages.get(to.id) ?? [], { from: entry.id, text, at: Date.now() }))
+                    const queued = queuePetMessage(voicePetMessages.get(to.id) ?? [], { from: entry.id, text, at: Date.now() })
+                    voicePetMessages.set(to.id, queued)
                     persistPetMessages(home)
                     void recordPetFact(to.id, entry.id)
                     return
@@ -2643,13 +2644,15 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
                 audienceOut = { pet: target.id, delivered: 'immediate' }
               } else {
                 // driver 未就绪：降级排队，不丢消息
-                voicePetMessages.set(target.id, queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() }))
+                const queued = queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() })
+                voicePetMessages.set(target.id, queued)
                 persistPetMessages(home)
                 void recordPetFact(target.id, entry.id)
                 audienceOut = { pet: target.id, delivered: 'queued', note: 'immediate 不可用，已降级排队' }
               }
             } else {
-              voicePetMessages.set(target.id, queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() }))
+              const queued = queuePetMessage(voicePetMessages.get(target.id) ?? [], { from: entry.id, text, at: Date.now() })
+              voicePetMessages.set(target.id, queued)
               persistPetMessages(home)
               void recordPetFact(target.id, entry.id)
               audienceOut = { pet: target.id, delivered: 'queued' }
@@ -3532,13 +3535,13 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const base = actions === undefined
             ? (body === undefined ? state : { ...state, body })
             : {
-                ...state,
-                actions,
-                actionCatalog: catalog?.actionCatalog ?? null,
-                actionTagVocabulary: catalog?.actionTagVocabulary ?? [],
-                tagged: catalog?.tagged ?? false,
-                ...(body === undefined ? {} : { body }),
-              }
+              ...state,
+              actions,
+              actionCatalog: catalog?.actionCatalog ?? null,
+              actionTagVocabulary: catalog?.actionTagVocabulary ?? [],
+              tagged: catalog?.tagged ?? false,
+              ...(body === undefined ? {} : { body }),
+            }
           // The model addresses pets by id, but should SEE the user's naming.
           // voiceBinding is the WHY behind selfPetId: configured vs effective
           // session, preset, and the last attach result (no full cwd here —

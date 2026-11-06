@@ -50,7 +50,6 @@ const escapeAngle = (text: string): string => text.replace(/</g, '‹').replace(
 const CJK_RUN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+/g
 const CJK_CHAR = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/
 const ASCII_WORD = /[0-9a-z][0-9a-z'’-]*/g
-const ASCII_CHARS = /[0-9a-z'’-]/
 
 /** Terms for indexing: every CJK bigram (single-char runs keep a unigram)
  * plus every ASCII word. Query side uses the same function. */
@@ -63,7 +62,7 @@ export function tokenize(text: string): string[] {
       terms.add(run[0])
       continue
     }
-    for (let i = 0; i + 1 < chars.length; i += 1) terms.add(chars[i]! + chars[i + 1]!)
+    for (let i = 0; i + 1 < chars.length; i += 1) terms.add(chars.slice(i, i + 2).join(''))
   }
   for (const word of lowered.matchAll(ASCII_WORD)) terms.add(word[0])
   return [...terms]
@@ -77,12 +76,13 @@ function wordTerms(word: string): { terms: string[]; substring: boolean } {
   if (chars.length === 1) {
     return CJK_CHAR.test(lowered) ? { terms: [], substring: true } : { terms: [lowered], substring: false }
   }
-  if (CJK_CHAR.test(chars[0]!)) {
+  const head = chars[0]
+  if (head !== undefined && CJK_CHAR.test(head)) {
     const terms: string[] = []
-    for (let i = 0; i + 1 < chars.length; i += 1) terms.push(chars[i]! + chars[i + 1]!)
+    for (let i = 0; i + 1 < chars.length; i += 1) terms.push(chars.slice(i, i + 2).join(''))
     return { terms, substring: false }
   }
-  return ASCII_CHARS.test(lowered) ? { terms: [lowered], substring: false } : { terms: [lowered], substring: false }
+  return { terms: [lowered], substring: false }
 }
 
 // ─── Collected view: entries from the three files, deduped by id, annotated
@@ -253,7 +253,10 @@ function buildIndex(memory: CollectedMemory, rebuiltAt: number): JournalIndex {
     }
   }
   const sortedTerms: Record<string, string[]> = {}
-  for (const key of [...terms.keys()].sort()) sortedTerms[key] = terms.get(key)!
+  for (const key of [...terms.keys()].sort()) {
+    const posting = terms.get(key)
+    if (posting !== undefined) sortedTerms[key] = posting
+  }
   return {
     version: INDEX_VERSION,
     rebuiltAt,
@@ -315,7 +318,8 @@ export async function updateIndexAfterAppend(home: string, petId: string, append
       await persistIndex(home, petId, buildIndex(memory, Date.now()))
       return
     }
-    const appended = fresh[0]!
+    const appended = fresh[0]
+    if (appended === undefined) return
     for (const term of entrySearchTerms(appended)) {
       const posting = existing.terms[term]
       if (posting === undefined) existing.terms[term] = [appended.id]
@@ -423,7 +427,14 @@ function scoreLexical(memory: MemoryEntry, context: ScoreContext): { matchedWord
   return { matchedWords, missing, score: totalSum > 0 ? Math.min(1, matchedSum / totalSum) : 0 }
 }
 
-function scoreEntry(memory: MemoryEntry, context: ScoreContext): { matchedWords: number; missing: string[]; tagHitsCount: number; parts: ScoreParts } {
+interface ScoreEntryResult {
+  matchedWords: number
+  missing: string[]
+  tagHitsCount: number
+  parts: ScoreParts
+}
+
+function scoreEntry(memory: MemoryEntry, context: ScoreContext): ScoreEntryResult {
   const lexical = scoreLexical(memory, context)
   const tagHitsCount = tagHits(memory, context.queryClues)
   const recency = Math.exp(-Math.max(0, context.now - memory.at) / (30 * DAY_MS))
@@ -559,7 +570,9 @@ export async function recallJournal(home: string, petId: string, params: RecallP
   const to = parseTimeBound(params.to, 'to', true)
   // A dimension is any filter the caller actually named — scope counts, so
   // "把归档里的东西列出来看看" (scope alone) is a legal query.
-  if (params.scope === undefined && words.length === 0 && queryTags.length === 0 && queryEntities.length === 0 && from === undefined && to === undefined) {
+  const hasDimension = params.scope !== undefined || words.length > 0 || queryTags.length > 0
+    || queryEntities.length > 0 || from !== undefined || to !== undefined
+  if (!hasDimension) {
     throw new Error('至少给一个检索维度：query / tags / entities / from+to / scope')
   }
   // Browse mode: no keywords, no clues — scope and/or date window only.
@@ -606,8 +619,12 @@ export async function recallJournal(home: string, petId: string, params: RecallP
     eligible.push({ memory: entry })
   }
 
-  const evaluate = (minMatch: number): { found: Array<{ memory: MemoryEntry; parts: ScoreParts; missing: string[]; tagHitsCount: number; matchedWords: number }>; rejectedThisLevel: RejectedEntry[] } => {
-    const found: Array<{ memory: MemoryEntry; parts: ScoreParts; missing: string[]; tagHitsCount: number; matchedWords: number }> = []
+  interface EvaluateResult {
+    found: Array<{ memory: MemoryEntry; parts: ScoreParts; missing: string[]; tagHitsCount: number; matchedWords: number }>
+    rejectedThisLevel: RejectedEntry[]
+  }
+  const evaluate = (minMatch: number): EvaluateResult => {
+    const found: EvaluateResult['found'] = []
     const rejectedThisLevel: RejectedEntry[] = []
     for (const { memory: entry } of eligible) {
       const { matchedWords, missing, tagHitsCount, parts } = scoreEntry(entry, context)
@@ -728,7 +745,13 @@ export async function recallJournal(home: string, petId: string, params: RecallP
       includeBookkeeping: params.includeBookkeeping === true,
     },
     totalMatched: candidates.length,
-    hits: hits.map(hit => ({ id: hit.id, score: hit.score, parts: hit.parts, origin: hit.origin, ...(hit.missing === undefined ? {} : { missing: hit.missing }) })),
+    hits: hits.map(hit => ({
+      id: hit.id,
+      score: hit.score,
+      parts: hit.parts,
+      origin: hit.origin,
+      ...(hit.missing === undefined ? {} : { missing: hit.missing }),
+    })),
     excluded: excludedAll.slice(0, 50),
     belowThreshold,
     truncated,
@@ -1077,7 +1100,10 @@ export async function buildJournalInjection(
   const take = Math.min(config.injectPinnedMax, pinnedList.length)
   const cursor = meta?.pinCursor ?? 0
   const rotated: MemoryEntry[] = []
-  for (let i = 0; i < take; i += 1) rotated.push(pinnedList[(cursor + i) % pinnedList.length]!)
+  for (let i = 0; i < take; i += 1) {
+    const picked = pinnedList[(cursor + i) % pinnedList.length]
+    if (picked !== undefined) rotated.push(picked)
+  }
   if (pinnedList.length > take) {
     await mutateJournalMeta(home, petId, () => ({ pinCursor: (cursor + take) % pinnedList.length }))
   }
@@ -1094,8 +1120,11 @@ export async function buildJournalInjection(
     pinned: pinnedOut,
     recent: recentOut,
     epochLines: epochIndexLines(epochs, journalStartAt === Number.MAX_SAFE_INTEGER ? Date.now() : journalStartAt, config.injectEpochLines),
-    ...(recent.length === 0 && config.injectEpochFallback && epochs.length > 0
-      ? { epochFallback: renderInjection([...epochs].sort((a, b) => a.at - b.at).at(-1)!, config, '阶段摘要') }
+    ...(recent.length === 0 && config.injectEpochFallback
+      ? (() => {
+        const newestEpoch = [...epochs].sort((a, b) => a.at - b.at).at(-1)
+        return newestEpoch === undefined ? {} : { epochFallback: renderInjection(newestEpoch, config, '阶段摘要') }
+      })()
       : {}),
   }
   const budgeted = budgetWake(parts, config.injectMaxChars)
