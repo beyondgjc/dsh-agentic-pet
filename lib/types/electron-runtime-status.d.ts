@@ -18,3 +18,4 @@ export interface ElectronRuntimeStatus {
 export declare function electronRuntimeStatusPath(home: string): string;
 export declare function readElectronRuntimeStatus(home: string): ElectronRuntimeStatus | undefined;
 export declare function writeElectronRuntimeStatus(home: string, status: ElectronRuntimeStatus): void;
+//# sourceMappingURL=electron-runtime-status.d.ts.map

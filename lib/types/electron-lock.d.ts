@@ -23,3 +23,4 @@ export declare function parseInstallLock(raw: string): InstallLockRecord | undef
  * record gets a short grace for a concurrent writer, then goes stale.
  */
 export declare function installLockStale(raw: string | undefined, mtimeMs: number, now: number, alive?: (pid: number) => boolean): boolean;
+//# sourceMappingURL=electron-lock.d.ts.map

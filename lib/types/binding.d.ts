@@ -97,3 +97,4 @@ export declare function patchTouchesElectronBinding(patch: Record<string, unknow
 /** The host attaches a session only when its cwd IS the workspace path
  * (canonical equality), not a descendant. */
 export declare function isPetWorkspace(cwd: string | undefined | null, root: string): boolean;
+//# sourceMappingURL=binding.d.ts.map

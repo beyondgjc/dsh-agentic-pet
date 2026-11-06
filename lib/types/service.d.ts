@@ -170,3 +170,4 @@ export declare function createUnregisteredPetHttp(home?: string): PetService;
  * plugins can still `inject: ['petService']`.
  */
 export declare function installPetService(ctx: Context, home: string): PetHttpService;
+//# sourceMappingURL=service.d.ts.map

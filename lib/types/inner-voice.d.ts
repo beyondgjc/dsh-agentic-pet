@@ -248,6 +248,16 @@ export interface WakePromptFacts {
         label?: string;
         text: string;
     }>;
+    /** 阶段摘要索引行（REQ-M05）：一笔一行，只给锚点不给细节。 */
+    journalEpochs?: string[];
+    /** 兜底（REQ-M05）：当前文件没有近期条目时，注入最近一条 epoch 全文。 */
+    journalEpochFallback?: {
+        at: number;
+        label?: string;
+        text: string;
+    };
+    /** 阶段摘要到点了（REQ-M05）：唤醒时提示她自己写。 */
+    journalEpochDue?: string;
     /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
     presence?: PresenceFacts;
 }
@@ -285,3 +295,4 @@ export declare function buildTouchPrompt(facts: TouchPromptFacts): string;
  * clamps to the contract's 2000-character ceiling. A plan inside the ±60s
  * merge window folds in: the tag becomes the union and the intent rides. */
 export declare function buildChatPrompt(text: string, mergedPlan?: MergedWakePlan, presence?: PresenceFacts): string;
+//# sourceMappingURL=inner-voice.d.ts.map

@@ -83,3 +83,4 @@ export interface ExpressionFallbackSuggestion {
  * (and labelled as a default), never presented as a per-request match. */
 export declare function suggestExpressionFallback(capability: BodyCapability, requested: string, actionTags: readonly string[]): ExpressionFallbackSuggestion;
 export declare function formatMissingExpression(): string;
+//# sourceMappingURL=body.d.ts.map

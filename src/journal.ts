@@ -18,6 +18,18 @@ export interface JournalConfig {
   maxEntryChars: number
   maxFileBytes: number
   allowUnboundAppend: boolean
+  /** REQ-M08: total wake-injection char budget (pinned+recent+epoch lines).
+   * 0 = budget off — behavior identical to 0.4.9 (count-based only). */
+  injectMaxChars: number
+  /** REQ-M06: pinned entries join the wake injection (budgeted). */
+  injectPinned: boolean
+  /** REQ-M06: at most this many pinned entries are injected per wake. */
+  injectPinnedMax: number
+  /** REQ-M05: epoch index lines (`[起~止] 一句话`) per wake injection. */
+  injectEpochLines: number
+  /** REQ-M05: inject the newest epoch in full when the current file has no
+   * recent entries. */
+  injectEpochFallback: boolean
 }
 
 export interface JournalEntry {
@@ -25,6 +37,18 @@ export interface JournalEntry {
   source: string
   sessionId: string | null
   text: string
+  /** Write-time retrieval clues (REQ-M01): ≤5 tags, ≤8 entities. Part of the
+   * entry itself — the index only mirrors them, so a rebuild recovers them. */
+  tags?: string[]
+  entities?: string[]
+  /** REQ-M09 anti-echo: this entry's body repeats (equals / is contained in /
+   * contains) an existing entry's body. Kept in the chain, excluded from
+   * recall and injection by default. */
+  echo?: boolean
+  /** REQ-M07 tombstone: voids the entry with this id. `reason` rides along. */
+  voids?: { id: string; reason: string }
+  /** REQ-M05 epoch only: the range this summary covers (ms epochs). */
+  window?: { from: number; to: number }
   /** Hash chain: previous entry's hash ('genesis' for the first chained entry). */
   prev?: string
   /** sha256(prev + canonical entry). Present on entries written by this module. */
@@ -45,6 +69,11 @@ export const DEFAULT_JOURNAL_CONFIG: JournalConfig = {
   maxEntryChars: 120,
   maxFileBytes: 256 * 1024,
   allowUnboundAppend: false,
+  injectMaxChars: 0,
+  injectPinned: false,
+  injectPinnedMax: 2,
+  injectEpochLines: 4,
+  injectEpochFallback: true,
 }
 
 const MAX_ENTRY_CHARS = 2000
@@ -59,6 +88,17 @@ export function journalArchivePath(home: string, petId: string): string {
 
 export function journalMetaPath(home: string, petId: string): string {
   return join(petDataDir(home, petId), 'journal.meta.json')
+}
+
+/** REQ-M05: the pet's own stage summaries live OUTSIDE the main chain, in
+ * their own file. Same marker format, `source: "epoch"`. */
+export function journalEpochsPath(home: string, petId: string): string {
+  return join(petDataDir(home, petId), 'journal.epochs.md')
+}
+
+/** REQ-M03: the derived retrieval index (pure mirror — safe to delete). */
+export function journalIndexPath(home: string, petId: string): string {
+  return join(petDataDir(home, petId), 'journal.index.json')
 }
 
 function clamp(value: unknown, fallback: number, min: number, max: number): number {
@@ -79,6 +119,11 @@ export async function readJournalConfig(home: string): Promise<JournalConfig> {
       maxEntryChars: clamp(record.maxEntryChars, DEFAULT_JOURNAL_CONFIG.maxEntryChars, 40, 1000),
       maxFileBytes: clamp(record.maxFileBytes, DEFAULT_JOURNAL_CONFIG.maxFileBytes, 4096, 4 * 1024 * 1024),
       allowUnboundAppend: record.allowUnboundAppend === true,
+      injectMaxChars: clamp(record.injectMaxChars, DEFAULT_JOURNAL_CONFIG.injectMaxChars, 0, 100_000),
+      injectPinned: record.injectPinned === true,
+      injectPinnedMax: clamp(record.injectPinnedMax, DEFAULT_JOURNAL_CONFIG.injectPinnedMax, 1, 10),
+      injectEpochLines: clamp(record.injectEpochLines, DEFAULT_JOURNAL_CONFIG.injectEpochLines, 0, 12),
+      injectEpochFallback: record.injectEpochFallback !== false,
     }
   } catch {
     return { ...DEFAULT_JOURNAL_CONFIG }
@@ -102,6 +147,7 @@ export const journalSourceLabel = (source: string): string => {
     case 'chat': return '对话'
     case 'pet': return '自述'
     case 'unbound': return '未绑定会话'
+    case 'epoch': return '阶段摘要'
     default: return source
   }
 }
@@ -111,6 +157,11 @@ export function formatJournalEntry(entry: JournalEntry): string {
     at: entry.at,
     source: entry.source,
     sessionId: entry.sessionId,
+    ...(entry.tags === undefined ? {} : { tags: entry.tags }),
+    ...(entry.entities === undefined ? {} : { entities: entry.entities }),
+    ...(entry.echo === undefined ? {} : { echo: entry.echo }),
+    ...(entry.voids === undefined ? {} : { voids: entry.voids }),
+    ...(entry.window === undefined ? {} : { window: entry.window }),
     ...(entry.prev === undefined ? {} : { prev: entry.prev }),
     ...(entry.hash === undefined ? {} : { hash: entry.hash }),
   })
@@ -118,10 +169,14 @@ export function formatJournalEntry(entry: JournalEntry): string {
 }
 
 /** Chain link for an entry body. The text is part of the hash, so editing a
- * body without recomputing every later link is detectable. */
+ * body without recomputing every later link is detectable. Tags/entities are
+ * entry content and ride in the hash — but ONLY when present, so legacy
+ * entries (no tags) verify against the exact same input as before. */
 export function hashJournalEntry(prev: string, entry: JournalEntry): string {
+  const clueTags = entry.tags === undefined ? '' : `\n${JSON.stringify(entry.tags)}`
+  const clueEntities = entry.entities === undefined ? '' : `\n${JSON.stringify(entry.entities)}`
   return createHash('sha256')
-    .update(`${prev}\n${entry.at}\n${entry.source}\n${entry.sessionId ?? ''}\n${entry.text.trim()}`)
+    .update(`${prev}\n${entry.at}\n${entry.source}\n${entry.sessionId ?? ''}${clueTags}${clueEntities}\n${entry.text.trim()}`)
     .digest('hex')
 }
 
@@ -142,6 +197,22 @@ function parseMarker(record: unknown): JournalEntry | undefined {
     source: r.source,
     sessionId: typeof r.sessionId === 'string' ? r.sessionId : null,
     text: '',
+    ...(Array.isArray(r.tags)
+      ? { tags: r.tags.filter((tag): tag is string => typeof tag === 'string') }
+      : {}),
+    ...(Array.isArray(r.entities)
+      ? { entities: r.entities.filter((item): item is string => typeof item === 'string') }
+      : {}),
+    ...(r.echo === true ? { echo: true } : {}),
+    ...(typeof r.voids === 'object' && r.voids !== null
+      && typeof (r.voids as Record<string, unknown>).id === 'string'
+      ? { voids: { id: (r.voids as Record<string, unknown>).id as string, reason: typeof (r.voids as Record<string, unknown>).reason === 'string' ? (r.voids as Record<string, unknown>).reason as string : '' } }
+      : {}),
+    ...(typeof r.window === 'object' && r.window !== null
+      && typeof (r.window as Record<string, unknown>).from === 'number'
+      && typeof (r.window as Record<string, unknown>).to === 'number'
+      ? { window: { from: (r.window as Record<string, unknown>).from as number, to: (r.window as Record<string, unknown>).to as number } }
+      : {}),
     ...(typeof r.prev === 'string' ? { prev: r.prev } : {}),
     ...(typeof r.hash === 'string' ? { hash: r.hash } : {}),
   }
@@ -297,8 +368,9 @@ export async function readJournalForInjection(
 const queues = new Map<string, Promise<unknown>>()
 
 /** Serialize writes per file inside this process. `appendFile` keeps the
- * cross-process write itself atomic. */
-function withJournalLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+ * cross-process write itself atomic. Side files (epochs, index) share the
+ * journal's lock namespace through their own paths. */
+export function withJournalLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = queues.get(key) ?? Promise.resolve()
   const run = previous.then(fn, fn)
   queues.set(key, run.then(() => undefined, () => undefined))
@@ -315,7 +387,38 @@ interface JournalMeta {
   lastHash?: string
   /** Number of chained entries in the current segment. */
   chainLength?: number
+  /** REQ-M06: ids of pinned entries (out-of-band — entries are immutable). */
+  pinnedIds?: string[]
+  /** REQ-M06: rotation cursor for injecting pinned entries. */
+  pinCursor?: number
+  /** REQ-M05: rotate happened; the pet owes one epoch at the next wake. */
+  pendingEpoch?: boolean
+  /** REQ-M05: epoch bookkeeping — when the last epoch was written and how
+   * many journal entries existed then (for the ≥50-new-entries trigger). */
+  lastEpochAt?: number
+  epochBaseCount?: number
 }
+
+export async function readJournalMeta(home: string, petId: string): Promise<JournalMeta | undefined> {
+  return readMeta(home, petId)
+}
+
+/** Bookkeeping mutation (pin list, epoch triggers) — runs inside the journal
+ * lock so it can never interleave with a concurrent append. */
+export async function mutateJournalMeta(
+  home: string,
+  petId: string,
+  compute: (meta: JournalMeta | undefined) => Partial<JournalMeta>,
+): Promise<JournalMeta> {
+  const path = journalPath(home, petId)
+  return withJournalLock(path, async () => {
+    const raw = await readFile(path, 'utf8').catch(() => '')
+    const current = await readMeta(home, petId)
+    return writeMeta(home, petId, raw, compute(current))
+  })
+}
+
+export type { JournalMeta }
 
 async function readMeta(home: string, petId: string): Promise<JournalMeta | undefined> {
   try {
@@ -327,7 +430,12 @@ async function readMeta(home: string, petId: string): Promise<JournalMeta | unde
   return undefined
 }
 
-async function writeMeta(home: string, petId: string, raw: string): Promise<void> {
+async function writeMeta(
+  home: string,
+  petId: string,
+  raw: string,
+  extras: Partial<JournalMeta> = {},
+): Promise<JournalMeta> {
   const entries = parseJournalEntries(raw)
   // A trace entry is a reset point: entries before the last trace are known
   // compromised and are not re-verified; the chain segment starts there.
@@ -338,7 +446,20 @@ async function writeMeta(home: string, petId: string, raw: string): Promise<void
   const segment = entries.slice(lastTrace === -1 ? 0 : lastTrace)
   const chained = segment.filter(entry => entry.hash !== undefined)
   const lastHash = chained.at(-1)?.hash
+  const previous = await readMeta(home, petId)
+  // Bookkeeping that lives outside the chain (pin list, epoch triggers)
+  // survives rewrites unless explicitly overridden via `extras`.
+  const carriedOver = previous === undefined ? {} : {
+    ...(previous.pinnedIds === undefined ? {} : { pinnedIds: previous.pinnedIds }),
+    ...(previous.pinCursor === undefined ? {} : { pinCursor: previous.pinCursor }),
+    ...(previous.lastEpochAt === undefined ? {} : { lastEpochAt: previous.lastEpochAt }),
+    ...(previous.epochBaseCount === undefined ? {} : { epochBaseCount: previous.epochBaseCount }),
+    // pendingEpoch must survive plain appends — only an epoch write clears it.
+    ...(previous.pendingEpoch === undefined ? {} : { pendingEpoch: previous.pendingEpoch }),
+  }
   const meta: JournalMeta = {
+    ...carriedOver,
+    ...extras,
     bytes: Buffer.byteLength(raw, 'utf8'),
     hash: digest(raw),
     updatedAt: Date.now(),
@@ -346,6 +467,15 @@ async function writeMeta(home: string, petId: string, raw: string): Promise<void
     chainLength: chained.length,
   }
   await writeFile(journalMetaPath(home, petId), `${JSON.stringify(meta)}\n`, 'utf8')
+  return meta
+}
+
+/** Stable id for an entry (REQ-M03): derived from `at` + hash prefix, so a
+ * rebuild reproduces it exactly. Hash-less (imported) entries fall back to a
+ * position-stable `imp<N>` suffix — they cannot be pinned but stay addressable. */
+export function entryId(entry: JournalEntry, ordinal = 0): string {
+  const iso = new Date(entry.at).toISOString()
+  return entry.hash === undefined ? `e-${iso}-imp${ordinal}` : `e-${iso}-${entry.hash.slice(0, 6)}`
 }
 
 async function rotate(home: string, petId: string): Promise<void> {
@@ -362,31 +492,74 @@ async function rotate(home: string, petId: string): Promise<void> {
     sessionId: null,
     text: '旧记录已归档到 journal.archive.md。',
   }, prev)
+  const meta = await readMeta(home, petId)
+  const pinned = new Set(meta?.pinnedIds ?? [])
+  const isPinned = (entry: JournalEntry, index: number): boolean =>
+    entry.hash !== undefined && pinned.has(entryId(entry, index))
+  // Archive keeps the complete raw file; the current file keeps the newest
+  // entries plus a pointer note, so wake injection stays cheap. Pinned
+  // entries (REQ-M06) never sink: they ride along in file order.
   if (entries.length <= 1) {
-    await writeFile(path, formatJournalEntry(note(entries.at(-1)?.hash ?? 'genesis')), 'utf8')
+    const sole = entries[0]
+    const kept = sole !== undefined && isPinned(sole, 0) ? [sole] : []
+    await writeFile(
+      path,
+      [...kept, note(kept.at(-1)?.hash ?? sole?.hash ?? 'genesis')].map(formatJournalEntry).join(''),
+      'utf8',
+    )
     return
   }
-  // Archive keeps the complete raw file; the current file keeps the newest
-  // entries plus a pointer note, so wake injection stays cheap.
-  const keep = entries.slice(-Math.min(20, entries.length - 1))
+  const windowStart = entries.length - Math.min(20, entries.length - 1)
+  const keep = entries.filter((entry, index) => isPinned(entry, index) || index >= windowStart)
   const rebuilt = [...keep, note(keep.at(-1)?.hash ?? 'genesis')].map(formatJournalEntry).join('')
   await writeFile(path, rebuilt, 'utf8')
+}
+
+export interface AppendJournalResult {
+  path: string
+  at: number
+  rotated: boolean
+  /** Stable id of the entry just appended (for recall / pin / void). */
+  id: string
+  /** REQ-M09: true when the body repeats an existing entry (echo). */
+  echo: boolean
 }
 
 export async function appendJournal(
   home: string,
   petId: string,
-  entry: { at?: number; source: string; sessionId: string | null; text: string },
+  entry: {
+    at?: number
+    source: string
+    sessionId: string | null
+    text: string
+    tags?: string[]
+    entities?: string[]
+    /** REQ-M07 tombstone: marks the referenced entry as voided. */
+    voids?: { id: string; reason: string }
+  },
   config: JournalConfig,
-): Promise<{ path: string; at: number; rotated: boolean }> {
+): Promise<AppendJournalResult> {
   const text = entry.text.trim().slice(0, MAX_ENTRY_CHARS)
   if (text === '') throw new Error('journal 追加内容不能为空')
+  const tags = normalizeClues(entry.tags, 5, 'tags')
+  const entities = normalizeClues(entry.entities, 8, 'entities')
   const path = journalPath(home, petId)
   return withJournalLock(path, async () => {
     await mkdir(dirname(path), { recursive: true })
     const existing = await readFile(path, 'utf8').catch(() => '')
     const meta = await readMeta(home, petId)
     const existingEntries = parseJournalEntries(existing)
+    // REQ-M09 anti-echo: compare against every body that already exists
+    // (current file, archive, epochs). Exact repeats flag at any length;
+    // containment needs ≥8 chars so two-letter statuses don't flag everything.
+    // Mechanical tombstones never echo-check.
+    const echo = entry.voids === undefined
+      ? isEcho(text, [
+        ...existingEntries.map(item => item.text),
+        ...await readSideTexts(home, petId),
+      ])
+      : false
     let prev = existingEntries.at(-1)?.hash ?? 'genesis'
     const chunks: string[] = []
     if (existing.trim() !== '' && meta !== undefined && meta.hash !== digest(existing)) {
@@ -402,7 +575,16 @@ export async function appendJournal(
     // Stamp inside the lock: a queued append must record when it actually
     // wrote, not when its tool call started.
     const at = entry.at ?? Date.now()
-    const nextEntry = chainEntry({ at, source: entry.source, sessionId: entry.sessionId, text }, prev)
+    const nextEntry = chainEntry({
+      at,
+      source: entry.source,
+      sessionId: entry.sessionId,
+      text,
+      ...(tags === undefined ? {} : { tags }),
+      ...(entities === undefined ? {} : { entities }),
+      ...(echo ? { echo: true } : {}),
+      ...(entry.voids === undefined ? {} : { voids: entry.voids }),
+    }, prev)
     chunks.push(formatJournalEntry(nextEntry))
     await appendFile(path, chunks.join(''), 'utf8')
     let current = await readFile(path, 'utf8')
@@ -412,9 +594,42 @@ export async function appendJournal(
       current = await readFile(path, 'utf8')
       rotated = true
     }
-    await writeMeta(home, petId, current)
-    return { path, at, rotated }
+    // Rotate marks that the pet owes one epoch (REQ-M05) — the wake path reads it.
+    await writeMeta(home, petId, current, rotated ? { pendingEpoch: true } : {})
+    return { path, at, rotated, id: entryId(nextEntry), echo }
   })
+}
+
+const normalizeClues = (value: string[] | undefined, max: number, name: string): string[] | undefined => {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new Error(`${name} 必须是字符串数组`)
+  const cleaned = [...new Set(value.map(item => String(item).trim()).filter(item => item !== ''))]
+  if (cleaned.length > max) throw new Error(`${name} 最多 ${max} 个（收到 ${cleaned.length} 个）`)
+  return cleaned.length === 0 ? undefined : cleaned
+}
+
+/** REQ-M09: verbatim repeats flag at any length; containment flags when the
+ * shorter body is ≥8 chars (short statuses like 「想你」 must not flag). */
+export const isEcho = (text: string, existing: string[]): boolean => {
+  const needle = text.trim()
+  if (needle === '') return false
+  return existing.some((body) => {
+    const hay = body.trim()
+    if (hay === '') return false
+    if (hay === needle) return true
+    const shorter = hay.length < needle.length ? hay : needle
+    if (shorter.length < 8) return false
+    return hay.includes(needle) || needle.includes(hay)
+  })
+}
+
+/** Bodies of the side files (archive + epochs) for echo comparison. */
+async function readSideTexts(home: string, petId: string): Promise<string[]> {
+  const parts = await Promise.all([
+    readFile(journalArchivePath(home, petId), 'utf8').catch(() => ''),
+    readFile(journalEpochsPath(home, petId), 'utf8').catch(() => ''),
+  ])
+  return parts.flatMap(raw => parseJournalEntries(raw).map(entry => entry.text))
 }
 
 /** One-time import of the user's hand-written notebook. The source is never

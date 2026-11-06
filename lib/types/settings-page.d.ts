@@ -20,3 +20,4 @@ import type { PetService } from './service.ts';
  * @param home - the dsh home holding the settings/ledger/manifest files.
  */
 export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl): void;
+//# sourceMappingURL=settings-page.d.ts.map

@@ -25,3 +25,4 @@ export declare function hasPresence(facts: PresenceFacts): boolean;
 /** One compact line; prompt builders prepend the `[你不在的时候]` tag. */
 export declare function formatPresenceLine(facts: PresenceFacts): string;
 export declare function readPresenceConfig(home: string): Promise<PresenceConfig>;
+//# sourceMappingURL=presence.d.ts.map

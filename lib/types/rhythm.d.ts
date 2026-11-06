@@ -19,3 +19,4 @@ export declare function parseClock(value: unknown): number | undefined;
 export declare function isQuietAt(date: Date, quiet: QuietConfig | null | undefined): boolean;
 /** Read `rhythm.quiet` from pet-settings.json; absent/null/invalid = no quiet. */
 export declare function readRhythmConfig(home: string): Promise<RhythmConfig>;
+//# sourceMappingURL=rhythm.d.ts.map
