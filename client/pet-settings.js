@@ -602,7 +602,7 @@ window.__ModuleLoader__.load({
           })) : null,
           h(Hint, null, '静默只压世界时钟；自主唤醒照常，只会在 prompt 里提示“用户可能已睡”；启动问好不变。')),
         h(Section, { title: '连续性本子' },
-          h('div', { style: row }, '启用', h(Toggle, { value: journalOn, onChange: function () {
+          h('div', { style: row }, '唤醒时带入本子', h(Toggle, { value: journalOn, onChange: function () {
             update({ journal: { enabled: !journalOn } })
           } })),
           journalOn ? h('div', { style: row }, '每次唤醒注入最近',
@@ -610,10 +610,10 @@ window.__ModuleLoader__.load({
               var v = parseInt(e.target.value, 10)
               if (Number.isFinite(v)) update({ journal: { injectRecent: Math.min(20, Math.max(1, v)) } })
             } }), '条') : null,
-          journalOn ? h('div', { style: row }, '允许无绑定会话追加', h(Toggle, {
+          h('div', { style: row }, '允许无绑定会话追加', h(Toggle, {
             value: journal.allowUnboundAppend === true,
             onChange: function () { update({ journal: { allowUnboundAppend: journal.allowUnboundAppend !== true } }) },
-          })) : null,
+          })),
           h(Hint, null, '本子在 ~/.dsh/whale598/<petId>/journal.md：可读、可追加、不静默删改；手写本子已导入。默认只有宠物自己的会话可以追加。')),
         h(Section, { title: '你不在的时候' },
           h('div', { style: row }, '回来时给我一份摘要', h(Toggle, { value: presenceOn, onChange: function () {
