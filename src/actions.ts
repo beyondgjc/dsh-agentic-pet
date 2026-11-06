@@ -15,6 +15,8 @@ export interface ActionCatalogEntry {
   readonly energy?: 'low' | 'mid' | 'high'
   readonly durationHintMs?: number
   readonly textInFrame?: boolean
+  /** State animation that loops; wait cannot observe a meaningful end. */
+  readonly loop?: boolean
 }
 
 /** A pet's advertised capabilities. `contractVersion: null` = a legacy
@@ -55,12 +57,14 @@ export function normalizeCapabilities(raw: unknown): PetCapabilities {
       ? entry.durationHintMs
       : undefined
     const textInFrame = typeof entry.textInFrame === 'boolean' ? entry.textInFrame : undefined
+    const loop = entry.loop === true ? true : undefined
     actionCatalog.push({
       id: entry.id,
       tags,
       ...(energy === undefined ? {} : { energy }),
       ...(durationHintMs === undefined ? {} : { durationHintMs }),
       ...(textInFrame === undefined ? {} : { textInFrame }),
+      ...(loop === undefined ? {} : { loop }),
     })
   }
   const suppliedVocabulary = Array.isArray(record.actionTagVocabulary)

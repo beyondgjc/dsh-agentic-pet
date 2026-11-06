@@ -54,10 +54,11 @@ interface CatalogEntry {
   energy?: 'low' | 'mid' | 'high'
   durationHintMs?: number
   textInFrame?: boolean
+  loop?: boolean
 }
 
 /** The body-owned tag file: keyed by clip id, authored next to the media. */
-type ActionTagMeta = Pick<CatalogEntry, 'tags' | 'energy' | 'durationHintMs' | 'textInFrame'>
+type ActionTagMeta = Pick<CatalogEntry, 'tags' | 'energy' | 'durationHintMs' | 'textInFrame' | 'loop'>
 
 async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
   const file = join(resolveAssetsRoot(), CHARACTER, 'actions.tags.json')
@@ -77,16 +78,33 @@ async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
         ? record.durationHintMs
         : undefined
       const textInFrame = typeof record.textInFrame === 'boolean' ? record.textInFrame : undefined
+      const loop = record.loop === true ? true : undefined
       map.set(id, {
         tags,
         ...(energy === undefined ? {} : { energy }),
         ...(durationHintMs === undefined ? {} : { durationHintMs }),
         ...(textInFrame === undefined ? {} : { textInFrame }),
+        ...(loop === undefined ? {} : { loop }),
       })
     }
     return map
   } catch {
     return new Map() // tags are optional: the id catalog still works
+  }
+}
+
+/** The body's own description (body/1), next to the media. Missing or
+ * unreadable is the legacy path: /body 404s and the v4 contract is untouched. */
+async function readBodyDocument(): Promise<Record<string, unknown> | null> {
+  const file = join(resolveAssetsRoot(), CHARACTER, 'body.json')
+  try {
+    const raw = JSON.parse(await readFile(file, 'utf8')) as unknown
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+    const body = raw as Record<string, unknown>
+    if (typeof body.bodyId !== 'string') body.bodyId = CHARACTER
+    return body
+  } catch {
+    return null
   }
 }
 
@@ -477,7 +495,8 @@ async function main(): Promise<void> {
   const actionIds = ['celebrate', ...actionCatalog.map(entry => entry.id)]
   const actionTagVocabulary = [...new Set(actionCatalog.flatMap(entry => entry.tags ?? []))]
   const tagged = actionCatalog.some(entry => (entry.tags?.length ?? 0) > 0)
-  console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)}`)
+  const bodyDocument = await readBodyDocument()
+  console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)} body=${bodyDocument === null ? 'none' : String(bodyDocument.schema ?? 'missing-schema')}`)
 
   let handle: HostChildHandle | undefined
   const attachUrl = process.env.DSH_PET_URL ?? await readLocatorUrl()
@@ -909,11 +928,22 @@ async function main(): Promise<void> {
           ...(entry.energy === undefined ? {} : { energy: entry.energy }),
           ...(entry.durationHintMs === undefined ? {} : { durationHintMs: entry.durationHintMs }),
           ...(entry.textInFrame === undefined ? {} : { textInFrame: entry.textInFrame }),
+          ...(entry.loop === undefined ? {} : { loop: entry.loop }),
         })),
         actionTagVocabulary,
         tagged,
         interactions: ['approval', 'question'],
       })
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/body') {
+      // body/1 is a separate channel: a legacy pet 404s here, and the driver
+      // treats that as "no self-description" without touching v4.
+      if (bodyDocument === null) {
+        send(404, { error: 'no body.json' })
+        return
+      }
+      send(200, bodyDocument)
       return
     }
     if (url.pathname === '/status') {

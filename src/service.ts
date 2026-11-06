@@ -16,6 +16,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { normalizeCapabilities, type PetCapabilities } from './actions.ts'
+import { normalizeBody, type BodyDescription } from './body.ts'
 import { readAllPets, type PetEntry } from './registry.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -124,6 +125,11 @@ export abstract class PetService extends Service {
   async capabilities(_entry: PetEntry): Promise<PetCapabilities | null> {
     return null
   }
+
+  /** The body/1 self-description (`/body`); null = legacy, absent or invalid. */
+  async body(_entry: PetEntry): Promise<BodyDescription | null> {
+    return null
+  }
 }
 
 /** Defensive field extraction: implementations may omit or mistype anything. */
@@ -223,6 +229,11 @@ export class PetHttpService extends PetService {
   // celebrate-only for at most one TTL, never to a thrown tool error.
   private readonly capsCache = new Map<string, { at: number; caps: PetCapabilities }>()
   private static readonly CAPS_TTL_MS = 30_000
+  // body/1 is also boot-derived; null caches a missing/invalid document so a
+  // legacy pet is not re-probed on every pet_state {body:true}. Optional and
+  // lazily created because a hot-reloaded instance can predate this field.
+  private bodyCache: Map<string, { at: number; body: BodyDescription | null }> | undefined
+  private static readonly BODY_TTL_MS = 30_000
   // Liveness cache (single-flight): EVERY consumer — state pushes, the 5s
   // event supervisor, per-pet event loops, voice gates, wake sweep, tool
   // targeting — shares one probe pass per TTL window. Probing is discovery's
@@ -282,6 +293,26 @@ export class PetHttpService extends PetService {
     }
     this.capsCache.set(entry.id, { at: Date.now(), caps })
     return caps
+  }
+
+  override async body(entry: PetEntry): Promise<BodyDescription | null> {
+    const cache = this.bodyCache ?? (this.bodyCache = new Map())
+    const hit = cache.get(entry.id)
+    if (hit !== undefined && Date.now() - hit.at < PetHttpService.BODY_TTL_MS) return hit.body
+    let body: BodyDescription | null = null
+    try {
+      const response = await fetch(`http://127.0.0.1:${String(entry.port)}/body`, {
+        signal: AbortSignal.timeout(1500),
+      })
+      if (response.ok) {
+        const normalized = normalizeBody(await response.json())
+        if (normalized.kind === 'body') body = normalized.body
+      }
+    } catch {
+      // Missing /body is the legacy path, not an error.
+    }
+    cache.set(entry.id, { at: Date.now(), body })
+    return body
   }
 
   async call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown> {

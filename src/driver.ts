@@ -20,6 +20,7 @@ import {
   resolveTagRequest,
   type ActionCatalogEntry,
 } from './actions.ts'
+import type { BodyDescription } from './body.ts'
 import {
   classifyAttachFailure,
   isPetPreset,
@@ -2669,7 +2670,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_do',
-      description: 'Make the desktop pet perform a one-shot animation. Use sparingly to punctuate moments (e.g. celebrate when a task the user cared about succeeds). Choose by `action` (an id from the PET\'S OWN catalog) OR by `tag` (a semantic label the current body advertises, e.g. "亲近"/"工作"); the two are mutually exclusive. "celebrate" always works; "random" lets the pet pick. `performed: true` means the pet ACCEPTED the request, not that the clip finished. Omit `wait` for fire-and-forget (the result carries mode:"no-wait" and note:"fire-and-forget"); `wait:true` reports durationMs/completedAt when available, or an explicit waitLost/waitTimedOut. Tags are body-owned: read pet_state {actions:true} for the current body\'s actionCatalog and actionTagVocabulary. Multiple pets may be running: see pet_state for their ids.',
+      description: 'Make the desktop pet perform a one-shot animation. Use sparingly to punctuate moments (e.g. celebrate when a task the user cared about succeeds). Choose by `action` (an id from the PET\'S OWN catalog) OR by `tag` (a semantic label the current body advertises, e.g. "亲近"/"工作"); the two are mutually exclusive. "celebrate" always works; "random" lets the pet pick. `performed: true` means the pet ACCEPTED the request, not that the clip finished. Omit `wait` for fire-and-forget (the result carries mode:"no-wait" and note:"fire-and-forget"); `wait:true` reports durationMs/completedAt when available, a loop:{true,durationMs:null} witness for state clips, or an explicit waitLost/waitTimedOut. Tags are body-owned: read pet_state {actions:true} for the current body\'s actionCatalog and actionTagVocabulary. Multiple pets may be running: see pet_state for their ids.',
       parameters: {
         action: { type: 'string', description: 'The animation id from the pet\'s own catalog (pet_state {actions:true}), "celebrate" (universal), or "random" (pet picks). Mutually exclusive with tag.' },
         tag: { type: 'string', description: 'A semantic tag from the CURRENT body\'s actionTagVocabulary; the driver picks a matching clip. Mutually exclusive with action. The vocabulary is body-owned, not a global list.' },
@@ -2723,6 +2724,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             // used at all, how often, and what "random" actually drew.
             driverLog(home, `PET_DO pet=${entry.id} action=${action}${action === requested ? '' : ` (requested: ${requested})`}`)
           }
+          const actionMeta = caps?.actionCatalog?.find(entry => entry.id === action)
           const response = await pet.call(entry, '/action', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -2736,6 +2738,19 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
               ...requestedField,
               mode: 'no-wait',
               note: 'fire-and-forget',
+            })
+          }
+          // State animations loop by design: the clip never hands back, so
+          // waiting would just burn the 20s budget. Tell the caller it is a
+          // loop instead of pretending completion is observable.
+          if (actionMeta?.loop === true) {
+            return JSON.stringify({
+              performed: true,
+              action,
+              ...requestedField,
+              mode: 'wait',
+              loop: true,
+              durationMs: null,
             })
           }
           // The renderer reports one-shot completion (clip end) through the
@@ -3174,9 +3189,10 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     }))
     scope.tools.register(defineTool({
       name: 'pet_state',
-      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book and pending self-wake plans (wakePlans — the pet\'s own pet_schedule_wake schedule). selfPetId tells you which pet YOU are (your own session\'s owner; null when called from a session that is not a pet\'s own). Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet. With actions:true, each pet also carries its body-owned actionCatalog (id/tags/energy/…) and actionTagVocabulary for pet_do {tag}.',
+      description: 'Read the desktop pets\' current state: every running pet with its id, what it is doing, which animation is playing, where it sits on screen (location), where it may roam (world, when the pet supports one), its visibility, plus each pet\'s affection book and pending self-wake plans (wakePlans — the pet\'s own pet_schedule_wake schedule). selfPetId tells you which pet YOU are (your own session\'s owner; null when called from a session that is not a pet\'s own). Use it when the user refers to a pet, to pick a target for pet_say/pet_do, or to react to a pet. With actions:true, each pet also carries its body-owned actionCatalog (id/tags/energy/…) and actionTagVocabulary for pet_do {tag}. With body:true, each pet also carries its body/1 self-description (schema, appearance, capabilities, usage and fallbacks) when it publishes one.',
       parameters: {
         actions: { type: 'boolean', description: 'Also include each pet\'s action catalog, body-owned tags, and vocabulary — the ids/tags pet_do accepts on it. Omit for the cheaper summary (an unknown pet_do action/tag self-reports its menu).' },
+        body: { type: 'boolean', description: 'Also include each pet\'s body/1 self-description from characters/<id>/body.json: schema, appearance, capabilities, usage and fallbacks. Omit for the cheaper summary; legacy pets have no body and read as null.' },
       },
       output: {
         schema: { type: 'string' },
@@ -3211,6 +3227,14 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             })
           }))
         }
+        // body/1 is a separate channel; a legacy pet returns null, which is
+        // still a constant witness when the caller asked for it.
+        const bodiesById = new Map<string, BodyDescription | null>()
+        if (args.body === true) {
+          await Promise.all(pets.map(async (entry) => {
+            bodiesById.set(entry.id, await pet.body(entry))
+          }))
+        }
         const knownIds = new Set([...pets.map(entry => entry.id), 'electron', 'pure'])
         const ledgers: Record<string, unknown> = {}
         const wakePlans: Record<string, Array<{ id: string; at: number; intent: string; createdAt: number }>> = {}
@@ -3229,14 +3253,16 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         const petsOut = states.map((state) => {
           const actions = actionsById.get(state.id)
           const catalog = catalogsById.get(state.id)
+          const body = bodiesById.get(state.id)
           const base = actions === undefined
-            ? state
+            ? (body === undefined ? state : { ...state, body })
             : {
                 ...state,
                 actions,
                 actionCatalog: catalog?.actionCatalog ?? null,
                 actionTagVocabulary: catalog?.actionTagVocabulary ?? [],
                 tagged: catalog?.tagged ?? false,
+                ...(body === undefined ? {} : { body }),
               }
           // The model addresses pets by id, but should SEE the user's naming.
           // voiceBinding is the WHY behind selfPetId: configured vs effective

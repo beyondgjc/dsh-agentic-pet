@@ -13,6 +13,7 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import { type PetCapabilities } from './actions.ts';
+import { type BodyDescription } from './body.ts';
 import { type PetEntry } from './registry.ts';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -112,6 +113,8 @@ export declare abstract class PetService extends Service {
      * nothing" (`actions: null`), which callers must treat as celebrate-only.
      */
     capabilities(_entry: PetEntry): Promise<PetCapabilities | null>;
+    /** The body/1 self-description (`/body`); null = legacy, absent or invalid. */
+    body(_entry: PetEntry): Promise<BodyDescription | null>;
 }
 /** Defensive field extraction: implementations may omit or mistype anything. */
 export declare function normalizeStatus(id: string, raw: Record<string, unknown>, online: boolean): PetSnapshot;
@@ -125,6 +128,8 @@ export declare class PetHttpService extends PetService {
     readonly home: string;
     private readonly capsCache;
     private static readonly CAPS_TTL_MS;
+    private bodyCache;
+    private static readonly BODY_TTL_MS;
     private listCache;
     private static readonly LIST_TTL_MS;
     constructor(ctx: Context, home?: string);
@@ -133,6 +138,7 @@ export declare class PetHttpService extends PetService {
     list(): Promise<PetEntry[]>;
     snapshot(entry: PetEntry): Promise<PetSnapshot>;
     capabilities(entry: PetEntry): Promise<PetCapabilities>;
+    body(entry: PetEntry): Promise<BodyDescription | null>;
     call(entry: PetEntry, path: string, init?: RequestInit): Promise<unknown>;
 }
 /**

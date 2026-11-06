@@ -14,6 +14,8 @@ export interface ActionCatalogEntry {
     readonly energy?: 'low' | 'mid' | 'high';
     readonly durationHintMs?: number;
     readonly textInFrame?: boolean;
+    /** State animation that loops; wait cannot observe a meaningful end. */
+    readonly loop?: boolean;
 }
 /** A pet's advertised capabilities. `contractVersion: null` = a legacy
  * implementation that predates the version field (v1 semantics: seven

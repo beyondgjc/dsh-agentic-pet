@@ -53,11 +53,12 @@ describe('normalizeCapabilities', () => {
   it('normalizes a body-owned action catalog and derives the tag vocabulary', () => {
     const caps = normalizeCapabilities({
       contractVersion: 4,
-      actions: ['写代码', '庆祝'],
+      actions: ['写代码', '庆祝', '待机呼吸休闲'],
       actionCatalog: [
         { id: '写代码', tags: ['工作', '专注'], energy: 'mid', durationHintMs: 3000 },
         { id: '庆祝', tags: ['庆祝'], energy: 'high', textInFrame: true },
-        { id: 'bad-energy', tags: ['日常'], energy: 'extreme' },
+        { id: '待机呼吸休闲', tags: ['待机'], loop: true },
+        { id: 'bad-energy', tags: ['日常'], energy: 'extreme', loop: 'yes' },
         { id: '', tags: ['dropped'] },
       ],
       actionTagVocabulary: ['工作', '专注', '庆祝', '日常'],
@@ -65,6 +66,7 @@ describe('normalizeCapabilities', () => {
     expect(caps.actionCatalog).toEqual([
       { id: '写代码', tags: ['工作', '专注'], energy: 'mid', durationHintMs: 3000 },
       { id: '庆祝', tags: ['庆祝'], energy: 'high', textInFrame: true },
+      { id: '待机呼吸休闲', tags: ['待机'], loop: true },
       { id: 'bad-energy', tags: ['日常'] },
     ])
     expect(caps.actionTagVocabulary).toEqual(['工作', '专注', '庆祝', '日常'])
