@@ -49,7 +49,7 @@
     "manifestVersion": 1
   },
   "dependencies": {
-    "dsh-agentic-pet-assets": "^0.1.1",
+    "dsh-agentic-pet-assets": "^0.1.2",
     "electron": "44.10.2"
   },
   "peerDependencies": {
