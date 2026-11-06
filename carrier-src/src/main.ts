@@ -954,13 +954,29 @@ async function main(): Promise<void> {
         send(422, { ok: false, error: 'expression layer not supported' })
         return
       }
-      const expression = typeof body.expression === 'string' ? body.expression.trim() : ''
-      if (expression === '') {
-        send(422, { ok: false, error: 'expression required' })
-        return
-      }
-      console.log(`[pet] expression test: ${expression}`)
-      send(200, { ok: true, expression })
+      // The /expression stub sits before the shared POST body reader below,
+      // so it reads and parses its own request body (event style — this
+      // handler is not async).
+      let raw = ''
+      req.setEncoding('utf8')
+      req.on('data', (chunk: string) => { raw += chunk })
+      req.on('error', () => { send(400, { error: 'request error' }) })
+      req.on('end', () => {
+        let body: Record<string, unknown>
+        try {
+          body = JSON.parse(raw) as Record<string, unknown>
+        } catch {
+          send(400, { error: 'invalid json' })
+          return
+        }
+        const expression = typeof body.expression === 'string' ? body.expression.trim() : ''
+        if (expression === '') {
+          send(422, { ok: false, error: 'expression required' })
+          return
+        }
+        console.log(`[pet] expression test: ${expression}`)
+        send(200, { ok: true, expression })
+      })
       return
     }
     if (url.pathname === '/status') {

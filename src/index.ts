@@ -645,7 +645,7 @@ export function apply(ctx: Context): void {
       return
     }
     const reason = result.kind === 'busy' ? 'blocked by another activation' : `failed (${result.error})`
-    const delay = RETRY_DELAYS_MS[Math.min(installAttempt - 1, RETRY_DELAYS_MS.length - 1)]
+    const delay = RETRY_DELAYS_MS[Math.min(installAttempt - 1, RETRY_DELAYS_MS.length - 1)]!
     logCarrier(`electron install ${reason}; retrying in ${String(delay / 1_000)}s`)
     if (retryTimer !== undefined) clearTimeout(retryTimer)
     retryTimer = setTimeout(() => { void ensureCarrier(url, carrierDir, nextPkgDir) }, delay)

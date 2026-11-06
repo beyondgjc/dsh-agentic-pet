@@ -185,8 +185,10 @@ export async function collectMemory(home: string, petId: string): Promise<Collec
     }
     const ids = perFileIds.get(memory.origin) ?? []
     const position = ids.indexOf(memory.id)
-    if (position > 0) memory.prevId = ids[position - 1]
-    if (position >= 0 && position + 1 < ids.length) memory.nextId = ids[position + 1]
+    const prevId = position > 0 ? ids[position - 1] : undefined
+    const nextId = position >= 0 && position + 1 < ids.length ? ids[position + 1] : undefined
+    if (prevId !== undefined) memory.prevId = prevId
+    if (nextId !== undefined) memory.nextId = nextId
   }
   return {
     entries: ordered,
@@ -1008,7 +1010,7 @@ interface WakeParts {
 /** Pure trimming (REQ-M08): pinned > recent > epoch lines (oldest dropped
  * first) > fallback. Text chars count toward the budget; labels ride free. */
 export function budgetWake(parts: WakeParts, maxChars: number): WakeParts {
-  if (maxChars <= 0) return { pinned: [], recent: parts.recent, epochLines: [], epochFallback: undefined }
+  if (maxChars <= 0) return { pinned: [], recent: parts.recent, epochLines: [] }
   let budget = maxChars
   const pinned: JournalInjection[] = []
   for (const entry of parts.pinned) {
@@ -1031,7 +1033,12 @@ export function budgetWake(parts: WakeParts, maxChars: number): WakeParts {
   const epochFallback = parts.epochFallback !== undefined && budget - parts.epochFallback.text.length >= 0
     ? parts.epochFallback
     : undefined
-  return { pinned, recent, epochLines, epochFallback }
+  return {
+    pinned,
+    recent,
+    epochLines,
+    ...(epochFallback === undefined ? {} : { epochFallback }),
+  }
 }
 
 export async function buildJournalInjection(
@@ -1087,9 +1094,9 @@ export async function buildJournalInjection(
     pinned: pinnedOut,
     recent: recentOut,
     epochLines: epochIndexLines(epochs, journalStartAt === Number.MAX_SAFE_INTEGER ? Date.now() : journalStartAt, config.injectEpochLines),
-    epochFallback: recent.length === 0 && config.injectEpochFallback && epochs.length > 0
-      ? renderInjection([...epochs].sort((a, b) => a.at - b.at).at(-1)!, config, '阶段摘要')
-      : undefined,
+    ...(recent.length === 0 && config.injectEpochFallback && epochs.length > 0
+      ? { epochFallback: renderInjection([...epochs].sort((a, b) => a.at - b.at).at(-1)!, config, '阶段摘要') }
+      : {}),
   }
   const budgeted = budgetWake(parts, config.injectMaxChars)
   return {

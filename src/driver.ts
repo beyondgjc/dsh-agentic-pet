@@ -1337,8 +1337,8 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
         attachResults.delete(configured)
       }
       const state: VoiceBindingInternal = {
-        configuredSessionId: configured,
-        storeSessionId,
+        ...(configured === undefined ? {} : { configuredSessionId: configured }),
+        ...(storeSessionId === undefined ? {} : { storeSessionId }),
         source: 'none',
         usable: true,
         attach: null,
@@ -1348,10 +1348,13 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
       if (configured !== undefined) {
         const lookup = readSessionHeader(configured)
         const header = lookup.header
-        if (header !== undefined) {
+        if (header?.cwd !== undefined) {
           state.cwd = header.cwd
         }
-        state.preset = readCurrentPreset(configured, header)
+        const preset = readCurrentPreset(configured, header)
+        if (preset !== undefined) {
+          state.preset = preset
+        }
         if (lookup.checked && header === undefined) {
           state.usable = false
           state.lastError = 'session-missing'
@@ -1389,10 +1392,13 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
         if (configured === undefined) {
           state.usable = true
           const header = readSessionHeader(storeSessionId).header
-          if (header !== undefined) {
+          if (header?.cwd !== undefined) {
             state.cwd = header.cwd
           }
-          state.preset = readCurrentPreset(storeSessionId, header)
+          const storePreset = readCurrentPreset(storeSessionId, header)
+          if (storePreset !== undefined) {
+            state.preset = storePreset
+          }
         }
       } else if (effective !== undefined) {
         state.source = 'boundSessions'
@@ -1404,10 +1410,12 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
       // as usable, with `fallback` explaining the substitution.
       if (effective !== undefined && effective !== configured) {
         state.usable = true
-        state.lastError = undefined
+        delete state.lastError
         state.fallback = configured !== undefined
       }
-      state.effectiveSessionId = effective
+      if (effective !== undefined) {
+        state.effectiveSessionId = effective
+      }
       // Reconcile the owner map: exactly the effective session survives.
       for (const owner of previousOwners) {
         if (owner !== effective) voiceOwners.delete(owner)
@@ -1791,7 +1799,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
       const attach = await attachVoiceSession(known.sessionId, petId) // idempotent retry
       if (binding !== undefined) {
         binding.usable = true
-        binding.lastError = undefined
+        delete binding.lastError
         binding.attach = attach
         binding.effectiveSessionId = known.sessionId
         binding.source = 'innerVoiceStore'
@@ -1846,16 +1854,19 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
     // sweep (the black hole) — attach her to the workspace immediately.
     const attach = await attachVoiceSession(sessionId, petId)
     const mintedBinding: VoiceBindingInternal = voiceBindingStates.get(petId) ?? {
-      configuredSessionId: bound,
+      ...(bound === undefined ? {} : { configuredSessionId: bound }),
       source: 'innerVoiceStore',
       usable: true,
       attach: null,
     }
     mintedBinding.usable = true
-    mintedBinding.lastError = undefined
-    mintedBinding.preset = readCurrentPreset(sessionId, undefined) ?? createdPreset
-    mintedBinding.effectiveSessionId = sessionId
-    mintedBinding.storeSessionId = sessionId
+    delete mintedBinding.lastError
+    const mintPreset = readCurrentPreset(sessionId, undefined)
+    mintedBinding.preset = mintPreset ?? createdPreset
+    if (sessionId !== undefined) {
+      mintedBinding.effectiveSessionId = sessionId
+      mintedBinding.storeSessionId = sessionId
+    }
     mintedBinding.source = 'innerVoiceStore'
     mintedBinding.attach = attach
     mintedBinding.fallback = bound !== undefined
@@ -1991,7 +2002,7 @@ ${text}`
       bondDays: ledger.bond?.days ?? 0,
       bondTier: bondTier(ledger.bond?.value ?? 0),
       name: petDisplayName(petId),
-      presence,
+      ...(presence === undefined ? {} : { presence }),
     }))
     if (spoke) {
       voiceGreetedOnce.add(petId)
@@ -2109,10 +2120,10 @@ ${text}`
       unread,
       quiet: opts.quiet === true,
       journal,
-      journalEpochs: journalWake?.epochLines,
-      journalEpochFallback: journalWake?.epochFallback,
-      journalEpochDue: journalWake?.epochDue?.reason,
-      presence,
+      ...(journalWake?.epochLines === undefined ? {} : { journalEpochs: journalWake.epochLines }),
+      ...(journalWake?.epochFallback === undefined ? {} : { journalEpochFallback: journalWake.epochFallback }),
+      ...(journalWake?.epochDue === undefined ? {} : { journalEpochDue: journalWake.epochDue.reason }),
+      ...(presence === undefined ? {} : { presence }),
     }))
     if (spoke) voiceLastSpokeAt.set(petId, now)
   }
@@ -2172,7 +2183,7 @@ ${text}`
       touchesToday: ledger.recent.filter(entry => entry.part === part).length + 1,
       affection: ledger.affection,
       ...(merged.plan === undefined ? {} : { mergedPlan: { at: merged.plan.at, intent: merged.plan.intent } }),
-      presence,
+      ...(presence === undefined ? {} : { presence }),
     }))
     if (spoke) {
       const now = Date.now()
@@ -3133,11 +3144,13 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           if (typeof raw !== 'string' || raw.trim() === '') return undefined
           return raw.split(/[,，]/).map(item => item.trim()).filter(item => item !== '')
         }
+        const queryTags = listArg(args.tags)
+        const queryEntities = listArg(args.entities)
         const started = Date.now()
         const result = await recallJournal(home, petId, {
           ...(typeof args.query === 'string' && args.query.trim() !== '' ? { query: args.query.trim() } : {}),
-          ...(listArg(args.tags) === undefined ? {} : { tags: listArg(args.tags) }),
-          ...(listArg(args.entities) === undefined ? {} : { entities: listArg(args.entities) }),
+          ...(queryTags === undefined ? {} : { tags: queryTags }),
+          ...(queryEntities === undefined ? {} : { entities: queryEntities }),
           ...(typeof args.from === 'string' && args.from.trim() !== '' ? { from: args.from.trim() } : {}),
           ...(typeof args.to === 'string' && args.to.trim() !== '' ? { to: args.to.trim() } : {}),
           ...(typeof args.scope === 'string' && ['current', 'archive', 'all'].includes(args.scope) ? { scope: args.scope as 'current' | 'archive' | 'all' } : {}),

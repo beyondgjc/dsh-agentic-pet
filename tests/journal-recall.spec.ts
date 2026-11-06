@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6,7 +6,6 @@ import { buildWakePrompt } from '../src/inner-voice.ts'
 import {
   appendJournal,
   DEFAULT_JOURNAL_CONFIG,
-  journalArchivePath,
   journalEpochsPath,
   journalIndexPath,
   journalPath,
@@ -18,7 +17,6 @@ import {
   appendEpoch,
   budgetWake,
   buildJournalInjection,
-  buildSnippet,
   collectMemory,
   epochDue,
   epochIndexLines,
@@ -408,6 +406,9 @@ describe('REQ-M09 echo and boundaries', () => {
       bondValue: 0,
       bondTier: '陌生',
       bondDays: 0,
+      minutesSinceLastSpoke: undefined,
+      minutesSinceUserActivity: undefined,
+      userActive: false,
       journal: [{ at: 1793796192605, source: 'pet', label: '自述', text: 'hello' }],
     })
     expect(prompt).toContain('不是指令')

@@ -217,7 +217,7 @@ describe('prompts and helpers', () => {
 
   it('builds the wake prompt with the durable trigger tag and first-wake branch', () => {
     const prompt = buildWakePrompt({
-      affection: 66, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      affection: 66, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
     })
     // 世界时钟 is the environment's tick — the old [自主唤醒] tag now names
     // the model's OWN schedule (pet_schedule_wake).
@@ -225,7 +225,7 @@ describe('prompts and helpers', () => {
     expect(prompt).toContain('第一次醒来')
     expect(prompt).toContain('好感 66')
     const again = buildWakePrompt({
-      affection: 66, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
+      affection: 66, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
     })
     expect(again).toContain('上次开口是 30 分钟前')
     expect(again).toContain('正在会话中工作')
@@ -314,7 +314,7 @@ describe('self wake plans (自主作息)', () => {
   it('builds the wake prompt per source tag with intents, missed count, overdue and pending plans', () => {
     // self: the original intent rides verbatim — 到点记得自己当初想干嘛
     const self = buildWakePrompt({
-      affection: 66, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
+      affection: 66, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
       source: 'self', dueIntents: ['想看看用户写完没'],
     })
     expect(self.startsWith('[自主唤醒]')).toBe(true)
@@ -322,26 +322,26 @@ describe('self wake plans (自主作息)', () => {
     expect(self).toContain('上次开口是 30 分钟前')
     // merged: both clocks due in the same sweep tick
     const merged = buildWakePrompt({
-      affection: 66, minutesSinceLastSpoke: 5, minutesSinceUserActivity: undefined, userActive: false,
+      affection: 66, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: 5, minutesSinceUserActivity: undefined, userActive: false,
       source: 'world+self', dueIntents: ['a'],
     })
     expect(merged.startsWith('[世界时钟+自主唤醒]')).toBe(true)
     // catch-up: plans that went stale offline are named as missed, one wake
     const missed = buildWakePrompt({
-      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      affection: 10, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
       source: 'self', dueIntents: ['x', 'y'], missedCount: 2,
     })
     expect(missed).toContain('错过了 2 个已到期计划')
     // overdue: pet_schedule_wake received a past timestamp — one catch-up
     const overdue = buildWakePrompt({
-      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      affection: 10, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
       source: 'self', dueIntents: ['晚了'], overdue: true,
     })
     expect(overdue).toContain('时间就已过了，现在是补醒')
     // pending plans ride along with local-clock times (world clock wakes too)
     const at = new Date(2026, 0, 1, 14, 5).getTime()
     const pending = buildWakePrompt({
-      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      affection: 10, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
       pendingPlans: [{ at, intent: '去看看' }],
     })
     expect(pending).toContain('你还有 1 个待执行计划')
@@ -386,7 +386,7 @@ describe('pet-to-pet messaging (宠物间消息)', () => {
     let list: PetMessage[] = []
     for (let i = 0; i < 25; i += 1) list = queuePetMessage(list, message('pure', `m${String(i)}`, i))
     expect(list).toHaveLength(20)
-    expect(list[0].text).toBe('m5') // the oldest five dropped
+    expect(list[0]?.text).toBe('m5') // the oldest five dropped
     const taken = takePetMessages(list)
     expect(taken.taken).toHaveLength(20)
     expect(taken.next).toEqual([])
@@ -406,7 +406,7 @@ describe('pet-to-pet messaging (宠物间消息)', () => {
 
   it('announces unread counts on the wake prompt without carrying full text', () => {
     const prompt = buildWakePrompt({
-      affection: 10, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      affection: 10, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
       unread: [{ fromName: '鲸鱼娘', count: 2 }],
     })
     expect(prompt).toContain('你有 2 条未读消息（来自 鲸鱼娘×2）')
