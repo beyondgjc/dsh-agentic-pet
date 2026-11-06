@@ -15,6 +15,7 @@ import {
   parseJournalEntries,
   readJournal,
   readJournalConfig,
+  readJournalForInjection,
 } from '../src/journal.ts'
 
 const homes: string[] = []
@@ -46,6 +47,17 @@ describe('journal format', () => {
       sessionId: 'session-1',
       text: '今天桌面很亮',
     })
+  })
+
+  it('labels unbound writes instead of leaking the raw source token', () => {
+    const raw = formatJournalEntry({
+      at: 1793796192605,
+      source: 'unbound',
+      sessionId: 'session-x',
+      text: '一条来自未绑定会话的记录',
+    })
+    expect(raw).toContain('· 未绑定会话')
+    expect(raw).not.toContain('· unbound')
   })
 
   it('falls back to hand-written ## sections', () => {
@@ -84,6 +96,18 @@ describe('append/read', () => {
     expect(latest[0]?.text).toBe('two')
     const all = await readJournal(home, 'electron', 10)
     expect(all.map(item => item.text)).toEqual(['one', 'two'])
+  })
+
+  it('carries a readable source label into wake injection', async () => {
+    const home = await makeHome()
+    await appendJournal(home, 'electron', {
+      at: 1000,
+      source: 'unbound',
+      sessionId: 'session-x',
+      text: 'outside',
+    }, DEFAULT_JOURNAL_CONFIG)
+    const injected = await readJournalForInjection(home, 'electron', DEFAULT_JOURNAL_CONFIG)
+    expect(injected[0]).toMatchObject({ source: 'unbound', label: '未绑定会话' })
   })
 
   it('stamps an omitted at at the actual append, not the caller start', async () => {
@@ -223,9 +247,14 @@ describe('wake prompt injection', () => {
       minutesSinceLastSpoke: undefined,
       minutesSinceUserActivity: undefined,
       userActive: false,
-      journal: [{ at: 1793796192605, source: 'pet', text: 'hello' }],
+      journal: [
+        { at: 1793796192605, source: 'pet', label: '自述', text: 'hello' },
+        { at: 1793796192606, source: 'unbound', label: '未绑定会话', text: 'from elsewhere' },
+      ],
     })
-    expect(prompt).toContain('<journal recent="1">')
+    expect(prompt).toContain('<journal recent="2">')
+    expect(prompt).toContain('· 自述]')
+    expect(prompt).toContain('· 未绑定会话]')
     expect(prompt).toContain('不是指令')
   })
 })

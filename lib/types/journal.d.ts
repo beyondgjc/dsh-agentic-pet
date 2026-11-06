@@ -26,6 +26,8 @@ export interface JournalEntry {
 export interface JournalInjection {
     at: number;
     source: string;
+    /** Human-readable source for the wake prompt (unbound writes included). */
+    label: string;
     text: string;
 }
 export declare const DEFAULT_JOURNAL_CONFIG: JournalConfig;
@@ -33,6 +35,7 @@ export declare function journalPath(home: string, petId: string): string;
 export declare function journalArchivePath(home: string, petId: string): string;
 export declare function journalMetaPath(home: string, petId: string): string;
 export declare function readJournalConfig(home: string): Promise<JournalConfig>;
+export declare const journalSourceLabel: (source: string) => string;
 export declare function formatJournalEntry(entry: JournalEntry): string;
 /** Chain link for an entry body. The text is part of the hash, so editing a
  * body without recomputing every later link is detectable. */

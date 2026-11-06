@@ -245,6 +245,7 @@ export interface WakePromptFacts {
     journal?: Array<{
         at: number;
         source: string;
+        label?: string;
         text: string;
     }>;
     /** 用户刚从一段离开中回来：最多一行的期间摘要。 */

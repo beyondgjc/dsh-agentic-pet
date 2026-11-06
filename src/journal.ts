@@ -34,6 +34,8 @@ export interface JournalEntry {
 export interface JournalInjection {
   at: number
   source: string
+  /** Human-readable source for the wake prompt (unbound writes included). */
+  label: string
   text: string
 }
 
@@ -89,7 +91,7 @@ const localStamp = (at: number): string => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-const sourceLabel = (source: string): string => {
+export const journalSourceLabel = (source: string): string => {
   switch (source) {
     case 'user': return '用户'
     case 'system': return '系统'
@@ -99,6 +101,7 @@ const sourceLabel = (source: string): string => {
     case 'touch': return '被摸'
     case 'chat': return '对话'
     case 'pet': return '自述'
+    case 'unbound': return '未绑定会话'
     default: return source
   }
 }
@@ -111,7 +114,7 @@ export function formatJournalEntry(entry: JournalEntry): string {
     ...(entry.prev === undefined ? {} : { prev: entry.prev }),
     ...(entry.hash === undefined ? {} : { hash: entry.hash }),
   })
-  return `<!-- journal ${meta} -->\n## ${localStamp(entry.at)} · ${sourceLabel(entry.source)}\n\n${entry.text.trim()}\n\n`
+  return `<!-- journal ${meta} -->\n## ${localStamp(entry.at)} · ${journalSourceLabel(entry.source)}\n\n${entry.text.trim()}\n\n`
 }
 
 /** Chain link for an entry body. The text is part of the hash, so editing a
@@ -286,6 +289,7 @@ export async function readJournalForInjection(
   return entries.map(entry => ({
     at: entry.at,
     source: entry.source,
+    label: journalSourceLabel(entry.source),
     text: entry.text.slice(0, config.maxEntryChars).replace(/</g, '‹').replace(/>/g, '›'),
   }))
 }
