@@ -55,3 +55,31 @@ export type BodyNormalization = {
 /** Validate the body/1 envelope; preserve every unknown field. A missing or
  * foreign schema is legacy, not an error: old bodies keep working. */
 export declare function normalizeBody(raw: unknown): BodyNormalization;
+export type ExpressionResolution = {
+    readonly kind: 'ok';
+    readonly expression: string;
+} | {
+    readonly kind: 'unsupported';
+    readonly capability: BodyCapability;
+} | {
+    readonly kind: 'unknown';
+    readonly available: readonly string[];
+} | {
+    readonly kind: 'missing';
+};
+/** Resolve pet_express against the CURRENT body's own expression capability.
+ * There is no cross-body expression vocabulary. */
+export declare function resolveExpressionRequest(body: BodyDescription | null, requested: string): ExpressionResolution;
+export interface ExpressionFallbackSuggestion {
+    readonly message: string;
+    readonly fallback: {
+        readonly tool: string;
+        readonly args: Readonly<Record<string, unknown>>;
+    } | null;
+    readonly availableTags: readonly string[];
+}
+/** Compute the degradation per REQUEST, not per body: a name that is also an
+ * action tag gets that tag; otherwise the body's declared default is used
+ * (and labelled as a default), never presented as a per-request match. */
+export declare function suggestExpressionFallback(capability: BodyCapability, requested: string, actionTags: readonly string[]): ExpressionFallbackSuggestion;
+export declare function formatMissingExpression(): string;

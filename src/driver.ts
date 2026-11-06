@@ -20,7 +20,12 @@ import {
   resolveTagRequest,
   type ActionCatalogEntry,
 } from './actions.ts'
-import type { BodyDescription } from './body.ts'
+import {
+  formatMissingExpression,
+  resolveExpressionRequest,
+  suggestExpressionFallback,
+  type BodyDescription,
+} from './body.ts'
 import {
   classifyAttachFailure,
   isPetPreset,
@@ -2803,6 +2808,67 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             ...requestedField,
             mode: 'wait',
             waitTimedOut: true,
+          })
+        } catch (error: unknown) {
+          throw classify(error)
+        }
+      },
+    }))
+    scope.tools.register(defineTool({
+      name: 'pet_express',
+      description: 'Set a body-owned expression layer (e.g. an accessory or face toggle). Expression names come from the CURRENT body\'s body/1 self-description: read pet_state {body:true} and look at capabilities.expressions. Only bodies that advertise supported:true accept this; an unsupported body refuses with {performed:false,error,fallback,availableTags}, where fallback is computed per requested name (matching action tag first, then the body\'s default). This is not pet_do: expressions are a separate capability, not one-shot clips.',
+      parameters: {
+        expression: { type: 'string', required: true, description: 'The expression id from the current body\'s capabilities.expressions.catalog. Omit nothing else here.' },
+        pet: { type: 'string', description: 'Which pet performs: its id from pet_state. Omit for the default pet.' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        requireOwnedSession(exec)
+        try {
+          const entry = await resolveTarget(args.pet, exec?.agent?.id)
+          const requested = typeof args.expression === 'string' ? args.expression.trim() : ''
+          if (requested === '') throw new Error('expression 必填：要切哪个表情？')
+          const [body, caps] = await Promise.all([pet.body(entry), pet.capabilities(entry)])
+          const resolution = resolveExpressionRequest(body, requested)
+          if (resolution.kind === 'missing') throw new Error(formatMissingExpression())
+          if (resolution.kind === 'unsupported') {
+            const suggestion = suggestExpressionFallback(
+              resolution.capability,
+              requested,
+              caps?.actionTagVocabulary ?? [],
+            )
+            // Refuse, but hand the caller a machine-readable next step: the
+            // fallback is computed per request, not copied from the body.
+            return JSON.stringify({
+              performed: false,
+              error: suggestion.message,
+              fallback: suggestion.fallback,
+              availableTags: suggestion.availableTags,
+            })
+          }
+          if (resolution.kind === 'unknown') {
+            throw new Error(
+              `unknown expression "${requested}" for pet "${entry.id}" (发生了什么)。`
+              + '这具身体的表情目录里没有它（为什么）。'
+              + `可用表情：${resolution.available.length > 0 ? formatAvailableActions(resolution.available) : '（未提供目录）'} — 从列表里选一个再试（下一步）。`,
+            )
+          }
+          const response = await pet.call(entry, '/expression', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ expression: requested }),
+          }) as { ok?: unknown; error?: unknown } | null
+          if (response !== null && typeof response === 'object' && response.ok === false) {
+            throw new Error(`expression rejected by ${entry.id}: ${String(response.error ?? 'unknown')}`)
+          }
+          driverLog(home, `PET_EXPRESS pet=${entry.id} expression=${requested}`)
+          return JSON.stringify({
+            performed: true,
+            expression: requested,
+            mode: 'no-wait',
           })
         } catch (error: unknown) {
           throw classify(error)

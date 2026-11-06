@@ -928,6 +928,23 @@ async function main() {
             send(200, bodyDocument);
             return;
         }
+        if (req.method === 'POST' && url.pathname === '/expression') {
+            // Contract-test stub: only the whale-test fixture acknowledges an
+            // expression. The production body has no expression layer; a real body
+            // replaces this with its own renderer.
+            if (bodyDocument === null || bodyDocument.bodyId !== 'whale-test') {
+                send(422, { ok: false, error: 'expression layer not supported' });
+                return;
+            }
+            const expression = typeof body.expression === 'string' ? body.expression.trim() : '';
+            if (expression === '') {
+                send(422, { ok: false, error: 'expression required' });
+                return;
+            }
+            console.log(`[pet] expression test: ${expression}`);
+            send(200, { ok: true, expression });
+            return;
+        }
         if (url.pathname === '/status') {
             // The mirror: what the pet currently is doing, where it stands. v2:
             // `location` (the pet-body rect) + `world` (the roaming area, null =

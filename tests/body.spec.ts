@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { normalizeBody } from '../src/body.ts'
+import {
+  formatMissingExpression,
+  normalizeBody,
+  resolveExpressionRequest,
+  suggestExpressionFallback,
+  type BodyCapability,
+} from '../src/body.ts'
 
 const base = {
   schema: 'body/1',
@@ -145,5 +151,75 @@ describe('normalizeBody', () => {
     if (result.kind !== 'body') return
     expect(result.body.capabilities?.expressions?.supported).toBe(false)
     expect(result.body.capabilities?.expressions?.fallback?.substitute.tool).toBe('pet_do')
+  })
+})
+
+describe('pet_express resolution', () => {
+  const whale = normalizeBody(base)
+  if (whale.kind !== 'body') throw new Error('fixture must be a body')
+
+  it('degrades per request: a name that is an action tag becomes that tag', () => {
+    const resolution = resolveExpressionRequest(whale.body, '害羞')
+    expect(resolution.kind).toBe('unsupported')
+    if (resolution.kind !== 'unsupported') return
+    const tags = ['害羞', '开心', '工作']
+    const shy = suggestExpressionFallback(resolution.capability, '害羞', tags)
+    expect(shy.fallback).toEqual({ tool: 'pet_do', args: { tag: '害羞' } })
+    expect(shy.message).toBe(
+      '这具身体没有表情层（发生了什么）。表情能力在 capabilities.expressions 中声明为不支持（为什么）。最接近的是「害羞」标签下的动作，可以改用 pet_do {tag:"害羞"}（下一步）。',
+    )
+    const happy = suggestExpressionFallback(resolution.capability, '开心', tags)
+    expect(happy.fallback).toEqual({ tool: 'pet_do', args: { tag: '开心' } })
+    expect(happy.message).toContain('「开心」标签下的动作')
+  })
+
+  it('uses the body default only when no action tag matches', () => {
+    const resolution = resolveExpressionRequest(whale.body, '星星眼')
+    if (resolution.kind !== 'unsupported') throw new Error('fixture must be unsupported')
+    const stars = suggestExpressionFallback(resolution.capability, '星星眼', ['害羞', '开心'])
+    expect(stars.fallback).toEqual({ tool: 'pet_do', args: { action: '点击回应-害羞惊讶' } })
+    expect(stars.message).toContain('没有找到与「星星眼」直接匹配的动作')
+    expect(stars.message).toContain('默认替代')
+  })
+
+  it('returns no fallback when neither a tag nor a default exists', () => {
+    const capability: BodyCapability = { supported: false, usage: '没有表情层。' }
+    const result = suggestExpressionFallback(capability, '星星眼', ['害羞'])
+    expect(result.fallback).toBeNull()
+    expect(result.availableTags).toEqual(['害羞'])
+    expect(result.message).toContain('可用标签：害羞')
+  })
+
+  it('resolves a supported whale-test catalog and rejects an unknown name', () => {
+    const supported = normalizeBody({
+      ...base,
+      bodyId: 'whale-test',
+      capabilities: {
+        ...base.capabilities,
+        expressions: {
+          supported: true,
+          usage: '用 pet_express 切表情。',
+          catalog: ['开心', '害羞', '星星眼'],
+          tags: ['开心', '害羞'],
+          count: 3,
+        },
+      },
+    })
+    if (supported.kind !== 'body') throw new Error('fixture must be a body')
+    for (const expression of ['开心', '害羞', '星星眼']) {
+      expect(resolveExpressionRequest(supported.body, expression)).toEqual({ kind: 'ok', expression })
+    }
+    expect(resolveExpressionRequest(supported.body, '得意')).toEqual({
+      kind: 'unknown',
+      available: ['开心', '害羞', '星星眼'],
+    })
+  })
+
+  it('treats a missing body or missing expressions capability as missing', () => {
+    expect(resolveExpressionRequest(null, '头顶鲸').kind).toBe('missing')
+    const bare = normalizeBody({ schema: 'body/1' })
+    if (bare.kind !== 'body') throw new Error('fixture must be a body')
+    expect(resolveExpressionRequest(bare.body, '头顶鲸').kind).toBe('missing')
+    expect(formatMissingExpression()).toContain('body/1')
   })
 })

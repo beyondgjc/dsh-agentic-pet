@@ -95,6 +95,71 @@ export function normalizeBody(raw: unknown): BodyNormalization {
   return { kind: 'body', body: { ...raw } as BodyDescription }
 }
 
+export type ExpressionResolution =
+  | { readonly kind: 'ok'; readonly expression: string }
+  | { readonly kind: 'unsupported'; readonly capability: BodyCapability }
+  | { readonly kind: 'unknown'; readonly available: readonly string[] }
+  | { readonly kind: 'missing' }
+
+/** Resolve pet_express against the CURRENT body's own expression capability.
+ * There is no cross-body expression vocabulary. */
+export function resolveExpressionRequest(body: BodyDescription | null, requested: string): ExpressionResolution {
+  const expressions = body?.capabilities?.expressions
+  if (expressions === undefined) return { kind: 'missing' }
+  if (expressions.supported !== true) return { kind: 'unsupported', capability: expressions }
+  const catalog = expressions.catalog
+  if (catalog !== undefined && !catalog.includes(requested)) {
+    return { kind: 'unknown', available: catalog }
+  }
+  return { kind: 'ok', expression: requested }
+}
+
+const formatSubstituteArgs = (args: Readonly<Record<string, unknown>>): string =>
+  Object.entries(args).map(([key, value]) => `${key}:${JSON.stringify(value)}`).join(', ')
+
+export interface ExpressionFallbackSuggestion {
+  readonly message: string
+  readonly fallback: { readonly tool: string; readonly args: Readonly<Record<string, unknown>> } | null
+  readonly availableTags: readonly string[]
+}
+
+/** Compute the degradation per REQUEST, not per body: a name that is also an
+ * action tag gets that tag; otherwise the body's declared default is used
+ * (and labelled as a default), never presented as a per-request match. */
+export function suggestExpressionFallback(
+  capability: BodyCapability,
+  requested: string,
+  actionTags: readonly string[],
+): ExpressionFallbackSuggestion {
+  const base = '这具身体没有表情层（发生了什么）。表情能力在 capabilities.expressions 中声明为不支持（为什么）。'
+  if (actionTags.includes(requested)) {
+    const fallback = { tool: 'pet_do', args: { tag: requested } }
+    return {
+      message: `${base}最接近的是「${requested}」标签下的动作，可以改用 ${fallback.tool} {${formatSubstituteArgs(fallback.args)}}（下一步）。`,
+      fallback,
+      availableTags: actionTags,
+    }
+  }
+  const substitute = capability.fallback?.substitute
+  if (substitute !== undefined) {
+    return {
+      message: `${base}没有找到与「${requested}」直接匹配的动作；这具身体的默认替代是 ${substitute.tool} {${formatSubstituteArgs(substitute.args)}}（下一步）。`,
+      fallback: substitute,
+      availableTags: actionTags,
+    }
+  }
+  const tags = actionTags.length > 0 ? `；可用标签：${actionTags.slice(0, 12).join('、')}` : ''
+  return {
+    message: `${base}没有找到与「${requested}」直接匹配的动作${tags}（下一步）。`,
+    fallback: null,
+    availableTags: actionTags,
+  }
+}
+
+export function formatMissingExpression(): string {
+  return '这具身体没有发布表情自述（发生了什么）。它没有 body/1 的 expressions 能力（为什么）。先 pet_state {body:true} 看身体能力，或改用 pet_do 播动作（下一步）。'
+}
+
 function validateCapability(kind: string, value: unknown): string | null {
   if (!isRecord(value)) return `${kind} is not an object`
   if (typeof value.supported !== 'boolean') return `${kind}.supported must be boolean`
