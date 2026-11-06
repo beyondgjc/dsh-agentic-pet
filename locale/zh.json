@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Agentic 桌面宠物",
+    "description": "dsh 桌面宠物：经由 web 组合层伺服宠物页面、由进程内 dsh 事件驱动、可从桌面应答审批与提问的 agentic 宠物插件。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

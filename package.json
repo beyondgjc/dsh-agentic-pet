@@ -18,7 +18,8 @@
     "./src/*": "./src/*",
     "./package.json": "./package.json",
     "./tools": "./lib/tools.js",
-    "./presets/*.patch.yml": "./presets/*.patch.yml"
+    "./presets/*.patch.yml": "./presets/*.patch.yml",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib/*.js",
@@ -27,7 +28,9 @@
     "lib/types/**/*.d.ts",
     "carrier/**/*",
     "!carrier/assets/**",
-    "presets/**/*"
+    "presets/**/*",
+    "locale/*.json",
+    "docs/DETAIL.zh.md"
   ],
   "license": "MIT",
   "dsh": {
