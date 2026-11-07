@@ -77,24 +77,10 @@ function requireElement<T extends Element>(selector: string): T {
   return element
 }
 
-let video = requireElement<HTMLVideoElement>('#video')
-const logVideoError = (el: HTMLVideoElement): void => {
-  el.addEventListener('error', () => {
-    console.error(`[pet-video] source failed: ${el.src} ${String(el.error?.message ?? '')}`)
-  })
-}
-logVideoError(video)
-// B04 双缓冲：A/B 两个离屏 video 元素，GL 交叉淡入时同时上传两路纹理；
-// 切换 = 新片段进闲置层 → 交叉 → 旧的暂停。defaultMs=0 = 无交叉直接换。
-const videoB = document.createElement('video')
-videoB.muted = true
-videoB.playsInline = true
-videoB.crossOrigin = 'anonymous'
-logVideoError(videoB)
-let prevVideo: HTMLVideoElement | undefined
-let fadeStart = 0
-let fadeMs = 0
-let glFailed = false
+const video = requireElement<HTMLVideoElement>('#video')
+video.addEventListener('error', () => {
+  console.error(`[pet-video] source failed: ${video.src} ${String(video.error?.message ?? '')}`)
+})
 const stage = requireElement<HTMLCanvasElement>('#stage')
 const bubble = requireElement<HTMLDivElement>('#bubble')
 
@@ -157,14 +143,12 @@ function animationSource(key: string): string {
  * inside the key band and turned semi-transparent). Chroma-keying is only the
  * fallback for an opaque source.
  */
-function setupStage(initial: HTMLVideoElement, canvas: HTMLCanvasElement): void {
+function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
   const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false })
   if (gl === null) {
     // No WebGL: fall back to the raw video (white matte visible, still usable).
-    // B04：无 GL = 无交叉淡入，switchClip 走 replaceWith 直换。
-    glFailed = true
-    canvas.replaceWith(initial)
-    initial.style.display = 'block'
+    canvas.replaceWith(video)
+    video.style.display = 'block'
     return
   }
   const compile = (type: number, source: string): WebGLShader => {
@@ -183,8 +167,8 @@ function setupStage(initial: HTMLVideoElement, canvas: HTMLCanvasElement): void 
     'attribute vec2 p; varying vec2 v;'
     + 'void main(){ v = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }'))
   gl.attachShader(program, compile(gl.FRAGMENT_SHADER,
-    'precision highp float; varying vec2 v; uniform sampler2D t; uniform float uAlpha;'
-    + 'void main(){ vec4 c = texture2D(t, v); gl_FragColor = vec4(c.rgb, c.a * uAlpha); }'))
+    'precision highp float; varying vec2 v; uniform sampler2D t;'
+    + 'void main(){ gl_FragColor = texture2D(t, v); }'))
   gl.linkProgram(program)
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw new Error(`pet renderer: program link failed: ${String(gl.getProgramInfoLog(program))}`)
@@ -196,60 +180,38 @@ function setupStage(initial: HTMLVideoElement, canvas: HTMLCanvasElement): void 
   const position = gl.getAttribLocation(program, 'p')
   gl.enableVertexAttribArray(position)
   gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
-  const uAlpha = gl.getUniformLocation(program, 'uAlpha')
-  const textures = new WeakMap<object, WebGLTexture>()
-  const textureFor = (el: HTMLVideoElement): WebGLTexture => {
-    const existing = textures.get(el)
-    if (existing !== undefined) return existing
-    const texture = gl.createTexture()
-    if (texture === null) throw new Error('pet renderer: texture allocation failed')
-    gl.bindTexture(gl.TEXTURE_2D, texture)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-    textures.set(el, texture)
-    return texture
-  }
+  const texture = gl.createTexture()
+  gl.bindTexture(gl.TEXTURE_2D, texture)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
   gl.enable(gl.BLEND)
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
   gl.clearColor(0, 0, 0, 0)
 
   const draw = (): void => {
-    // B04：交叉淡入期间两层混绘（旧帧淡出、新帧淡入）；淡完暂停旧元素。
-    const now = performance.now()
-    const prev = prevVideo
-    const fading = prev !== undefined && fadeMs > 0 && now - fadeStart < fadeMs
-    // under-lay 交叉：旧层保持 alpha 1（桌面不透出），新层按进度盖上来——
-    // 双层各半透明会让桌面从身体里透出（实测"闪现两个身位"的根因）。
-    const layers: Array<{ el: HTMLVideoElement; alpha: number }> = fading && prev !== undefined
-      ? [
-        { el: prev, alpha: 1 },
-        { el: video, alpha: Math.min(1, (now - fadeStart) / fadeMs) },
-      ]
-      : [{ el: video, alpha: 1 }]
-    if (!fading && prev !== undefined) {
-      prev.pause()
-      prevVideo = undefined
-    }
-    if (video.videoWidth === 0) return
+    if (video.readyState < 2 || video.videoWidth === 0) return
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth
       canvas.height = video.videoHeight
     }
     gl.viewport(0, 0, canvas.width, canvas.height)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
     gl.clear(gl.COLOR_BUFFER_BIT)
-    for (const { el, alpha } of layers) {
-      if (el.readyState < 2 || el.videoWidth === 0) continue
-      gl.bindTexture(gl.TEXTURE_2D, textureFor(el))
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el)
-      gl.uniform1f(uAlpha, alpha)
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-    }
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
   }
-  // 双缓冲后 rVFC 只能挂一个元素——统一 rAF 驱动（两层都要喂）。
+  type FrameScheduler = HTMLVideoElement & {
+    requestVideoFrameCallback?: (callback: () => void) => number
+  }
+  const scheduled = video as FrameScheduler
   const schedule = (): void => {
-    requestAnimationFrame(() => { draw(); schedule() })
+    if (typeof scheduled.requestVideoFrameCallback === 'function') {
+      // Draw per decoded frame; no work between frames.
+      scheduled.requestVideoFrameCallback(() => { draw(); schedule() })
+    } else {
+      requestAnimationFrame(() => { draw(); schedule() })
+    }
   }
   schedule()
 }
@@ -260,36 +222,15 @@ let baseState: BaseState = 'idle'
 let override: 'waiting_approval' | 'waiting_question' | null = null
 let errorUntil = 0
 
-function transitionMsFor(toIdle: boolean): number {
-  const t = bodyTransitions
-  if (t === undefined) return 0
-  return Math.max(0, toIdle ? t.toIdleMs : t.defaultMs)
-}
-
-function switchClip(source: string, loop: boolean, transitionMs: number): void {
-  if (video.src === source) return
-  const outgoing = video
-  const incoming = outgoing === videoB ? video : videoB
-  incoming.src = source
-  incoming.loop = loop
-  void incoming.play().catch(() => { /* autoplay muted: always allowed */ })
-  if (glFailed) {
-    // 无 GL 的降级：可见节点直换（无交叉能力）。
-    incoming.style.display = 'block'
-    outgoing.replaceWith(incoming)
-  } else if (transitionMs > 0) {
-    prevVideo = outgoing
-    fadeStart = performance.now()
-    fadeMs = transitionMs
-  } else {
-    outgoing.pause()
-  }
-  video = incoming
-}
-
 function play(key: string): void {
   const source = animationSource(key)
-  switchClip(source, key !== 'celebrate', key === 'idle' ? transitionMsFor(true) : transitionMsFor(false))
+  if (video.src !== source) {
+    video.src = source
+    // State animations loop (a state persists until an event changes it);
+    // the celebration is a one-shot that hands back via its ended event.
+    video.loop = key !== 'celebrate'
+    void video.play().catch(() => { /* autoplay muted: always allowed */ })
+  }
 }
 
 function render(): void {
@@ -353,7 +294,6 @@ function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirro
     facing = 'right'
     applyFacing()
   }
-  switchClip(source, false, transitionMsFor(false))
   const handBack = (): void => {
     video.onended = null
     video.onerror = null
@@ -380,6 +320,9 @@ function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirro
   }
   video.onended = handBack
   video.onerror = handBack
+  video.loop = false
+  video.src = source
+  void video.play().catch(() => { /* autoplay muted: always allowed */ })
 }
 
 function flashError(): void {
@@ -446,7 +389,7 @@ interface BodyIdleConfig {
 let theater: TheaterConfig = { enabled: false, gapMinutes: 10 }
 let bodyIdle: BodyIdleConfig | undefined
 let idleBias: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> } | undefined
-let bodyTransitions: { defaultMs: number; toIdleMs: number } | undefined
+let _bodyTransitions: { defaultMs: number; toIdleMs: number } | undefined
 let bodyRects: Record<string, readonly number[]> | undefined
 let theaterTimer: ReturnType<typeof setTimeout> | undefined
 let theaterLastFile: string | undefined
@@ -724,7 +667,7 @@ async function loadBodyDescription(): Promise<void> {
     const transition = raw.capabilities?.transition
     if (transition?.kind === 'transition' && transition.supported === true
       && typeof transition.defaultMs === 'number' && Number.isFinite(transition.defaultMs)) {
-      bodyTransitions = {
+      _bodyTransitions = {
         defaultMs: Math.min(500, Math.max(0, transition.defaultMs)),
         toIdleMs: typeof transition.toIdleMs === 'number' && Number.isFinite(transition.toIdleMs)
           ? Math.min(500, Math.max(0, transition.toIdleMs))
@@ -832,6 +775,9 @@ const CLICK_MAX_MS = 500
 let touchReportTimer: ReturnType<typeof setTimeout> | undefined
 function handleTouch(clientX: number, clientY: number): void {
   const part = touchPartOf(clientX, clientY)
+  // 触摸诊断：分区命中与可用矩形进 runtime log——tail 摸不到时先看这行
+  // （bodyRects 若是 FALLBACK，说明 body.json 没送达渲染层）。
+  console.info(`[pet-touch] part=${part} rects=${Object.keys(bodyRects ?? {}).join('+') || 'FALLBACK'} facing=${facing}`)
   const named = PART_REACTIONS[part]
     ?.map(name => actionCatalog.get(name))
     .filter((entry): entry is CatalogClip => entry !== undefined)
@@ -866,9 +812,6 @@ petBody.addEventListener('pointerdown', (event) => {
     petBody.removeEventListener('pointerup', onUp)
     petBody.removeEventListener('pointercancel', onUp)
     globals.petDesktop?.dragEnd()
-    // B07 落定回弹：释放后 340ms 的轻微压缩-恢复，不引入物理。
-    petBody.classList.add('settle')
-    setTimeout(() => { petBody.classList.remove('settle') }, 380)
     const moved = Math.hypot(up.screenX - startX, up.screenY - startY)
     if (moved <= CLICK_MAX_DISTANCE && Date.now() - startAt <= CLICK_MAX_MS) {
       handleTouch(up.clientX, up.clientY)
