@@ -557,10 +557,30 @@ async function main() {
     console.log(`[pet] window bounds: ${JSON.stringify(window.getBounds())} scaleFactor=${primary.scaleFactor} workarea=${JSON.stringify(primary.workArea)}`);
     // Forward the renderer console: the pet page's own diagnostics (connection,
     // shader, video failures) never reach a terminal otherwise.
-    window.webContents.on('console-message', (_event, level, message, line, source) => {
-        console.log(`[pet-renderer] ${source}:${line} ${message}`);
-        if (level >= 2)
-            runtimeLog(`[pet-renderer:${String(level)}] ${message} (${source}:${String(line)})`);
+    // Electron 44 的 console-message 传事件对象（level 为字符串）；旧版是位置
+    // 参数——两种签名都接，诊断日志才不会全被过滤掉（实测盲区）。
+    window.webContents.on('console-message', (...args) => {
+        const first = args[0];
+        let level = args.length > 1 ? args[1] : undefined;
+        let message;
+        let source;
+        let line;
+        if (typeof first === 'object' && first !== null && ('message' in first || 'level' in first)) {
+            level = typeof first.level === 'number' ? first.level : String(first.level ?? '');
+            message = typeof first.message === 'string' ? first.message : undefined;
+            line = typeof first.lineNumber === 'number' ? first.lineNumber : undefined;
+            source = typeof first.sourceId === 'string' ? first.sourceId : undefined;
+        }
+        else {
+            level = typeof args[1] === 'number' ? args[1] : undefined;
+            message = typeof args[2] === 'string' ? args[2] : undefined;
+            line = typeof args[3] === 'number' ? args[3] : undefined;
+            source = typeof args[4] === 'string' ? args[4] : undefined;
+        }
+        const severity = typeof level === 'number' ? level : { verbose: 0, info: 1, warning: 2, error: 3 }[level ?? ''] ?? 1;
+        console.log(`[pet-renderer] ${source ?? '?'}:${String(line ?? '?')} ${message ?? ''}`);
+        if (severity >= 1)
+            runtimeLog(`[pet-renderer:${String(level)}] ${message ?? ''} (${source ?? '?'}:${String(line ?? '?')})`);
     });
     window.webContents.on('did-fail-load', (_event, code, description, url) => {
         console.log(`[pet-renderer] did-fail-load ${code} ${description} ${url}`);
@@ -798,13 +818,18 @@ async function main() {
         try {
             if (event.sender !== window.webContents)
                 return;
-            const part = touch?.part === 'head' || touch?.part === 'body' ? touch.part : 'unknown';
+            const part = touch?.part === 'head' || touch?.part === 'body'
+                || touch?.part === 'tail' || touch?.part === 'hand' ? touch.part : 'unknown';
             touchSeq += 1;
             touchEvents.push({ seq: touchSeq, type: 'touch', part, at: Date.now() });
             if (touchEvents.length > 200)
                 touchEvents.splice(0, touchEvents.length - 200);
             wakeEventWaiters();
-            console.log(`[pet] touch #${String(touchSeq)} (${part})`);
+            // B03 诊断：part + 渲染层可用的分区矩形一起落盘——tail 摸不到时先看这
+            // 行（rects 缺 tail = body.json 没送达渲染层）。
+            const rects = typeof touch?.rects === 'string' ? touch.rects : '';
+            console.log(`[pet] touch #${String(touchSeq)} (${part}) rects=${rects}`);
+            runtimeLog(`[pet-touch] #${String(touchSeq)} part=${part} rects=${rects}`);
         }
         catch (error) {
             console.error('[pet] touch failed:', String(error));

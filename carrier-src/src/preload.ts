@@ -55,7 +55,7 @@ contextBridge.exposeInMainWorld('petDesktop', {
     ipcRenderer.send('pet:interaction-answer', { id, answer })
   },
   /** A completed touch gesture on the pet body (click, not drag). */
-  reportTouch(touch: { part: string }): void {
+  reportTouch(touch: { part: string; rects?: string }): void {
     ipcRenderer.send('pet:touch', touch)
   },
   /** A finished one-shot animation: the completion trace for /action. */

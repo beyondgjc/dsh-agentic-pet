@@ -30,7 +30,7 @@ interface PetGlobals {
     answerInteraction(id: string, answer: unknown): void
     onSay(listener: (notice: { text: string; audio?: Uint8Array<ArrayBuffer> }) => void): void
     reportStatus(snapshot: Record<string, unknown>): void
-    reportTouch(touch: { part: string }): void
+    reportTouch(touch: { part: string; rects?: string }): void
     reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void
     sendChat(text: string): Promise<{ ok: boolean; reason?: string }>
   }
@@ -359,6 +359,12 @@ globals.petDesktop?.onCatalog?.((catalog) => {
       ...(record.noMirror === true ? { noMirror: true } : {}),
     })
   }
+  // B02/B03：body 自述随 catalog 推送（main 已读好 body.json——IPC 主路径，
+  // 实测渲染层 pet-asset fetch 不稳）。推送未带 body 时回落 fetch。
+  const pushedBody = (catalog as { body?: unknown }).body
+  if (typeof pushedBody === 'object' && pushedBody !== null) {
+    applyBodyDescription(pushedBody as Record<string, unknown>)
+  }
   scheduleTheater()
 })
 
@@ -390,7 +396,7 @@ let theater: TheaterConfig = { enabled: false, gapMinutes: 10 }
 let bodyIdle: BodyIdleConfig | undefined
 let idleBias: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> } | undefined
 let _bodyTransitions: { defaultMs: number; toIdleMs: number } | undefined
-let bodyRects: Record<string, readonly number[]> | undefined
+let bodyRects: Record<string, readonly (readonly number[])[]> | undefined
 let theaterTimer: ReturnType<typeof setTimeout> | undefined
 let theaterLastFile: string | undefined
 let idleRecent: string[] = []
@@ -455,7 +461,16 @@ function scheduleTheater(): void {
   const bodyIdleConfig = bodyIdle
   const bodyMode = bodyIdleConfig !== undefined && bodyIdlePool().length > 0
   if (!bodyMode && theaterPool().length === 0) return
-  const delay = bodyMode ? sampleIdleInterval(bodyIdleConfig.intervalMs) : Math.max(1, theater.gapMinutes) * 60_000
+  // B02 反馈：自由活动的 GapMinutes 不退役，作为身体节奏的间隔上限——
+  // 用户把间隔调小，待机就变快（下限仍为 body.json 的 min）。
+  const gapCapMs = Math.max(1, theater.gapMinutes) * 60_000
+  const idleBounds: readonly [number, number] = bodyMode
+    ? [
+      bodyIdleConfig.intervalMs[0],
+      Math.max(bodyIdleConfig.intervalMs[0], Math.min(bodyIdleConfig.intervalMs[1], gapCapMs)),
+    ]
+    : [60_000, 60_000]
+  const delay = bodyMode ? sampleIdleInterval(idleBounds) : gapCapMs
   idleNextAt = Date.now() + delay
   reportStatus()
   theaterTimer = setTimeout(() => {
@@ -648,58 +663,80 @@ const interactionQueue: Array<{ id: string; message: InteractionMessage }> = []
 
 /** B02：拉取身体自述，capabilities.idle.supported 时以身体节奏接管 idle
  * theater（autonomy 的 GapMinutes 退役，总开关仍归设置页）。失败 = legacy。 */
+type BodyCapabilityWire = {
+  kind?: unknown
+  supported?: unknown
+  intervalMs?: unknown
+  noRepeat?: unknown
+  defaultMs?: unknown
+  toIdleMs?: unknown
+}
+
+/** B02/B03：身体自述入库——idle 节奏 / transition / 命中区（含多矩形）。
+ * bodyIdle 激活时清掉 legacy 计时器再重铺（否则第一个动作要等满 legacy
+ * 间隔——实测 idleNextAt 缺失的根因）。 */
+function applyBodyDescription(raw: Record<string, unknown>): void {
+  const capabilities = raw.capabilities as
+    | Record<string, BodyCapabilityWire>
+    | undefined
+  const transition = capabilities?.transition
+  if (transition?.kind === 'transition' && transition.supported === true
+    && typeof transition.defaultMs === 'number' && Number.isFinite(transition.defaultMs)) {
+    _bodyTransitions = {
+      defaultMs: Math.min(500, Math.max(0, transition.defaultMs)),
+      toIdleMs: typeof transition.toIdleMs === 'number' && Number.isFinite(transition.toIdleMs)
+        ? Math.min(500, Math.max(0, transition.toIdleMs))
+        : Math.min(500, Math.max(0, transition.defaultMs)),
+    }
+  }
+  const rects = (raw.hitboxes as { rects?: unknown } | undefined)?.rects
+  if (typeof rects === 'object' && rects !== null) {
+    const cleaned: Record<string, readonly (readonly number[])[]> = {}
+    for (const [part, shape] of Object.entries(rects as Record<string, unknown>)) {
+      if (!Array.isArray(shape)) continue
+      if (shape.every(n => typeof n === 'number' && Number.isFinite(n))) {
+        cleaned[part] = [shape as readonly number[]]
+        continue
+      }
+      const multi = shape.filter(entry =>
+        Array.isArray(entry) && (entry as unknown[]).every(n => typeof n === 'number' && Number.isFinite(n)))
+      if (multi.length > 0) cleaned[part] = multi as readonly (readonly number[])[]
+    }
+    if (Object.keys(cleaned).length > 0) bodyRects = cleaned
+  }
+  const idle = capabilities?.idle
+  if (idle?.kind !== 'idle' || idle.supported !== true) return
+  const interval = Array.isArray(idle.intervalMs) ? idle.intervalMs : []
+  const min = interval[0]
+  const max = interval[1]
+  if (typeof min !== 'number' || !Number.isFinite(min)
+    || typeof max !== 'number' || !Number.isFinite(max) || min >= max) return
+  bodyIdle = {
+    intervalMs: [min, max],
+    noRepeat: typeof idle.noRepeat === 'number' && Number.isInteger(idle.noRepeat) && idle.noRepeat >= 1
+      ? idle.noRepeat
+      : 2,
+  }
+  if (theaterTimer !== undefined) {
+    clearTimeout(theaterTimer)
+    theaterTimer = undefined
+  }
+  scheduleTheater()
+}
+
 async function loadBodyDescription(): Promise<void> {
+  // pet-asset fetch 是降级路径：主路径 = pet:catalog 推送（main 已读好
+  // body.json，随 catalog 一起发——实机实测 fetch 不稳）。
   try {
     const response = await fetch(`pet-asset:///${CHARACTER}/body.json`)
-    if (!response.ok) return
-    type BodyCapabilityWire = {
-      kind?: unknown
-      supported?: unknown
-      intervalMs?: unknown
-      noRepeat?: unknown
-      defaultMs?: unknown
-      toIdleMs?: unknown
+    if (!response.ok) {
+      console.error(`[pet] body.json fetch HTTP ${String(response.status)}——bodyIdle/命中区走 legacy`)
+      return
     }
-    const raw = await response.json() as {
-      capabilities?: Record<string, BodyCapabilityWire>
-      hitboxes?: { rects?: unknown }
-    }
-    const transition = raw.capabilities?.transition
-    if (transition?.kind === 'transition' && transition.supported === true
-      && typeof transition.defaultMs === 'number' && Number.isFinite(transition.defaultMs)) {
-      _bodyTransitions = {
-        defaultMs: Math.min(500, Math.max(0, transition.defaultMs)),
-        toIdleMs: typeof transition.toIdleMs === 'number' && Number.isFinite(transition.toIdleMs)
-          ? Math.min(500, Math.max(0, transition.toIdleMs))
-          : Math.min(500, Math.max(0, transition.defaultMs)),
-      }
-    }
-    const rects = (raw.hitboxes as { rects?: unknown } | undefined)?.rects
-    if (typeof rects === 'object' && rects !== null) {
-      const cleaned: Record<string, readonly number[]> = {}
-      for (const [part, box] of Object.entries(rects as Record<string, unknown>)) {
-        if (Array.isArray(box) && box.length === 4 && box.every(n => typeof n === 'number' && Number.isFinite(n))) {
-          cleaned[part] = box as readonly number[]
-        }
-      }
-      if (Object.keys(cleaned).length > 0) bodyRects = cleaned
-    }
-    const idle = raw.capabilities?.idle
-    if (idle?.kind !== 'idle' || idle.supported !== true) return
-    const interval = Array.isArray(idle.intervalMs) ? idle.intervalMs : []
-    const min = interval[0]
-    const max = interval[1]
-    if (typeof min !== 'number' || !Number.isFinite(min)
-      || typeof max !== 'number' || !Number.isFinite(max) || min >= max) return
-    bodyIdle = {
-      intervalMs: [min, max],
-      noRepeat: typeof idle.noRepeat === 'number' && Number.isInteger(idle.noRepeat) && idle.noRepeat >= 1
-        ? idle.noRepeat
-        : 2,
-    }
-    scheduleTheater()
-  } catch {
-    // 没有 body.json 或拉取失败：维持 legacy theater（0.4.13 行为）。
+    const raw = await response.json() as Record<string, unknown>
+    applyBodyDescription(raw)
+  } catch (error) {
+    console.error(`[pet] body.json fetch failed: ${String(error)}——bodyIdle/命中区走 legacy`)
   }
 }
 
@@ -733,23 +770,18 @@ function touchPartOf(clientX: number, clientY: number): string {
   // B01/B03：舞台镜像后，视觉坐标先折回原始帧坐标，再比对 body.json 的矩形
   //（缺 body.json 回落 head/body 两个既有矩形）。判定顺序 = 特定分区优先。
   const frameX = facing === 'left' ? 640 - visualX : visualX
-  const rects: Record<string, readonly number[] | readonly (readonly number[])[]> = bodyRects ?? {
-    head: [185, 60, 436, 195],
-    body: [212, 60, 428, 330],
+  const rects: Record<string, readonly (readonly number[])[]> = bodyRects ?? {
+    head: [[185, 60, 436, 195]],
+    body: [[212, 60, 428, 330]],
   }
-  const isRect = (box: readonly unknown[]): boolean =>
-    box.length === 4 && box.every(n => typeof n === 'number' && Number.isFinite(n))
   const inBox = (box: readonly number[]): boolean =>
     frameX >= box[0] && frameX <= box[2] && videoY >= box[1] && videoY <= box[3]
   // 判定顺序 = 特定分区优先；一个分区允许多矩形（尾巴的双侧尾鳍）。
   for (const part of ['tail', 'hand', 'head', 'body']) {
     const shape = rects[part]
     if (shape === undefined) continue
-    if (isRect(shape as readonly unknown[])) {
-      if (inBox(shape as readonly number[])) return part
-      continue
-    }
-    for (const box of shape as readonly (readonly number[])[]) {
+    // 单矩形视作单元素多矩形，统一走同一条命中路径（避免跨形状断言）。
+    for (const box of shape) {
       if (inBox(box)) return part
     }
   }
@@ -793,7 +825,7 @@ function handleTouch(clientX: number, clientY: number): void {
   if (touchReportTimer !== undefined) clearTimeout(touchReportTimer)
   touchReportTimer = setTimeout(() => {
     touchReportTimer = undefined
-    globals.petDesktop?.reportTouch({ part })
+    globals.petDesktop?.reportTouch({ part, rects: Object.keys(bodyRects ?? {}).join('+') || 'FALLBACK' })
   }, 260)
 }
 
@@ -984,7 +1016,25 @@ globals.petDesktop?.onState((message) => {
   // timer (or disarms it when switched off).
   const autonomy = payload.autonomy
   if (typeof autonomy === 'object' && autonomy !== null) {
-    const record = autonomy as { idleAnimation?: unknown; gapMinutes?: unknown }
+    const record = autonomy as { idleAnimation?: unknown; gapMinutes?: unknown; idleBias?: unknown }
+    // B06：偏置表随载荷下发（absent = 旧驱动保持现状；null = 显式关闭）。
+    if ('idleBias' in record) {
+      const value = record.idleBias
+      if (typeof value === 'object' && value !== null) {
+        const candidate = value as { hours?: unknown; weights?: unknown }
+        if (Array.isArray(candidate.hours) && candidate.hours.length === 2
+          && typeof candidate.weights === 'object' && candidate.weights !== null) {
+          idleBias = {
+            hours: [candidate.hours[0] as number, candidate.hours[1] as number],
+            weights: candidate.weights as Record<string, number>,
+          }
+        } else {
+          idleBias = undefined
+        }
+      } else {
+        idleBias = undefined
+      }
+    }
     const enabled = typeof record.idleAnimation === 'boolean' ? record.idleAnimation : theater.enabled
     const gapMinutes = typeof record.gapMinutes === 'number' && Number.isFinite(record.gapMinutes)
       ? Math.min(120, Math.max(1, Math.round(record.gapMinutes)))

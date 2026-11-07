@@ -63,6 +63,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every(item => typeof item === 'string')
 
+const isRect = (value: unknown): value is [number, number, number, number] =>
+  Array.isArray(value) && value.length === 4
+  && value.every(n => typeof n === 'number' && Number.isFinite(n))
+
 const invalid = (reason: string): BodyNormalization => ({ kind: 'legacy', reason })
 
 /** Validate the body/1 envelope; preserve every unknown field. A missing or
@@ -89,8 +93,11 @@ export function normalizeBody(raw: unknown): BodyNormalization {
     if (raw.hitboxes.rects !== undefined) {
       if (!isRecord(raw.hitboxes.rects)) return invalid('hitboxes.rects must be an object')
       for (const [part, rect] of Object.entries(raw.hitboxes.rects)) {
-        if (!Array.isArray(rect) || rect.length !== 4 || rect.some(value => typeof value !== 'number' || !Number.isFinite(value))) {
-          return invalid(`hitboxes.rects.${part} must be four finite numbers`)
+        // 一个分区可以是单个矩形 [x1,y1,x2,y2]，也可以是多个矩形（如尾巴的
+        // 双侧尾鳍）。两种形状都校验为有限四元组。
+        const rects = isRect(rect) ? [rect] : Array.isArray(rect) ? rect : null
+        if (rects === null || rects.some(r => !isRect(r))) {
+          return invalid(`hitboxes.rects.${part} must be a rect or an array of rects (four finite numbers each)`)
         }
       }
     }
