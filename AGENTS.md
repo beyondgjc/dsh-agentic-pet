@@ -2,6 +2,8 @@
 
 > 给后续接手的人（和 agent）：这个插件有两套仓库、两条构建链、一处本地安装点，
 > 2026-11-07 的记忆召回系统开发在上面踩过一圈坑。本文记录现状与纪律，改动前先读。
+> 全景技术文档（协议栈/端点契约/各模块深读）= Obsidian `DSH-PET 技术实现.md`（§6.9 = 记忆系统）；
+> 记忆系统需求与修订台账 = `C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`。
 
 ## 1. 双仓结构（最重要）
 
@@ -103,6 +105,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；"回忆不是新事实"边界声明 |
 | `src/driver.ts` | 工具注册（`pet_journal` 六个 op、`pet_recall`）、唤醒路径接线 |
 | 需求文档 | 仓外（不在 git 里）：`C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`（§11.1 是三轮实测修订台账） |
+| 全景技术文档 | Obsidian：`C:\Users\beyondguo\Documents\Obsidian Vault\DSH-PET 技术实现.md`（协议栈/八端点契约/各模块深读；§6.9 记忆系统；本手册是它的操作面补充） |
 
 ## 8. 本地安装点速查
 
