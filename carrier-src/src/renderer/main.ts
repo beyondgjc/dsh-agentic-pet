@@ -22,6 +22,9 @@ interface PetGlobals {
     onState(listener: (state: unknown) => void): void
     onAction(listener: (action: unknown) => void): void
     onCatalog(listener: (catalog: unknown) => void): void
+    /** B01 朝向：main 的 click-through 轮询顺带算好的光标偏移（光标 x −
+     * 窗口中心 x，px；右为正）。迟滞/去抖在渲染层。 */
+    onCursor(listener: (cursor: { offsetX: number }) => void): void
     onInteraction(listener: (request: unknown) => void): void
     onInteractionCancel(listener: (notice: { id: string }) => void): void
     answerInteraction(id: string, answer: unknown): void
@@ -80,6 +83,44 @@ video.addEventListener('error', () => {
 })
 const stage = requireElement<HTMLCanvasElement>('#stage')
 const bubble = requireElement<HTMLDivElement>('#bubble')
+
+// ── B01 朝向（镜像语义见 body 契约 §3.1 + 需求 REQ-B01）────────────────────
+// 基准朝向 = 素材原始朝向 right；facing=left → 舞台画布 scaleX(-1)（气泡是
+// 独立元素，不随镜像）。迟滞 ±20px、时间去抖 40ms；one-shot 播放期间锁定。
+
+type Facing = 'left' | 'right'
+
+let facing: Facing = 'right'
+let lastFacingDecisionAt = 0
+let lastCursorOffsetX: number | undefined
+let facingLocked = false
+
+/** 空间迟滞判定（与 pet-app idle-selector.facingForOffset 同语义——渲染层
+ * 无法跨包导入，此处镜像实现，行为由验收清单钉住）。 */
+function facingForOffset(offsetPx: number, current: Facing, hysteresisPx = 20): Facing {
+  if (Math.abs(offsetPx) <= hysteresisPx) return current
+  return offsetPx > 0 ? 'right' : 'left'
+}
+
+function applyFacing(): void {
+  stage.style.transform = facing === 'left' ? 'scaleX(-1)' : ''
+  reportStatus()
+}
+
+function decideFacing(offsetX: number): void {
+  lastCursorOffsetX = offsetX
+  if (facingLocked) return
+  const now = Date.now()
+  if (now - lastFacingDecisionAt < 40) return
+  lastFacingDecisionAt = now
+  const next = facingForOffset(offsetX, facing)
+  if (next !== facing) {
+    facing = next
+    applyFacing()
+  }
+}
+
+globals.petDesktop?.onCursor?.((cursor) => { decideFacing(cursor.offsetX) })
 
 function animationSource(key: string): string {
   const names = ANIMATION[key]
@@ -208,11 +249,16 @@ function setBase(state: BaseState): void {
   if (baseState === state) return
   const finishedWork = baseState === 'working' && state === 'idle'
   baseState = state
-  if (state !== 'idle' && theaterTimer !== undefined) {
-    // Leaving idle cancels the pending theater clip; re-entering idle
-    // re-arms through render().
-    clearTimeout(theaterTimer)
-    theaterTimer = undefined
+  if (state !== 'idle') {
+    // 离开 idle：待机计时取消，bodyRuntime.idleNextAt 一并清零（过期值
+    // 留在 /status 里会误导"她下一次自己动是什么时候"）。
+    idleNextAt = 0
+    if (theaterTimer !== undefined) {
+      // Leaving idle cancels the pending theater clip; re-entering idle
+      // re-arms through render().
+      clearTimeout(theaterTimer)
+      theaterTimer = undefined
+    }
   }
   if (finishedWork) {
     // One celebration hop when a turn lands back at idle.
@@ -233,14 +279,33 @@ function playOneShot(key: string, requestId?: string): void {
   playOneShotAt(ANIMATION[key]?.[0] ?? { dir: 'click', file: key }, requestId)
 }
 
-function playOneShotAt(name: AnimationName, requestId?: string): void {
+function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirror?: boolean }): void {
   const source = `pet-asset:///${CHARACTER}/videos/${name.dir}/${encodeURIComponent(name.file)}.webm`
   if (video.src === source) return
   oneShotActive = true
+  // B01：播放期间朝向锁定。文字片段（noMirror）在 facing=left 时临时锁
+  // right（素材朝向即 right，镜像会反写文字），播完按最后已知光标偏移重判。
+  facingLocked = true
+  const facingBeforeLock = facing
+  if (opts?.noMirror === true && facing !== 'right') {
+    facing = 'right'
+    applyFacing()
+  }
   const handBack = (): void => {
     video.onended = null
     video.onerror = null
     oneShotActive = false
+    facingLocked = false
+    if (lastCursorOffsetX !== undefined) {
+      const restored = facingForOffset(lastCursorOffsetX, facingBeforeLock)
+      if (restored !== facing) {
+        facing = restored
+        applyFacing()
+      }
+    } else if (facing !== facingBeforeLock) {
+      facing = facingBeforeLock
+      applyFacing()
+    }
     // Report completion with the clip's own duration — the one observable
     // trace that a one-shot actually FINISHED (override/animation are not).
     globals.petDesktop?.reportActionDone({
@@ -268,17 +333,26 @@ function flashError(): void {
 /** The pet's playable clips, scanned by the main process at boot and pushed
  * over IPC: what /action names resolve against and where the idle theater
  * draws from. Populated by the `pet:catalog` push (main sends it once the
- * page has loaded). */
-const actionCatalog = new Map<string, AnimationName>()
+ * page has loaded). Entries carry the body 迭代的两个池标记：idleEligible
+ * （B02 待机白名单）与 noMirror（B01 文字镜像豁免，来源 text_clips.json）。 */
+type CatalogClip = AnimationName & { id: string; idleEligible?: boolean; noMirror?: boolean }
+
+const actionCatalog = new Map<string, CatalogClip>()
 
 globals.petDesktop?.onCatalog?.((catalog) => {
   const entries = (catalog as { actions?: unknown }).actions
   if (!Array.isArray(entries)) return
   actionCatalog.clear()
   for (const entry of entries) {
-    const record = entry as { id?: unknown; dir?: unknown; file?: unknown }
+    const record = entry as { id?: unknown; dir?: unknown; file?: unknown; idleEligible?: unknown; noMirror?: unknown }
     if (typeof record.id !== 'string' || typeof record.dir !== 'string' || typeof record.file !== 'string') continue
-    actionCatalog.set(record.id, { dir: record.dir, file: record.file })
+    actionCatalog.set(record.id, {
+      id: record.id,
+      dir: record.dir,
+      file: record.file,
+      ...(record.idleEligible === true ? { idleEligible: true } : {}),
+      ...(record.noMirror === true ? { noMirror: true } : {}),
+    })
   }
   scheduleTheater()
 })
@@ -286,47 +360,94 @@ globals.petDesktop?.onCatalog?.((catalog) => {
 /**
  * The idle theater (the animation half of the settings page's 自主表达):
  * while idle — no override bubble, no error flash, no one-shot in flight —
- * the pet occasionally plays a clip drawn from its own catalog's random
- * pool. Config arrives on /state pushes (`autonomy`, read by the driver
- * from pet-settings.json); a pet that never receives a push keeps the
- * theater off, so behavior is unchanged until the driver speaks.
+ * the pet occasionally plays a clip. 双模式（B02 定案）：
+ *  - bodyIdle（body.json capabilities.idle.supported=true）：40–120s 随机
+ *    节奏 + noRepeat 2，池 = catalog 的 idleEligible 白名单（facing=left 时
+ *    排除 noMirror 片段）；**autonomy 的 GapMinutes 退役**（设置页开关仍管
+ *    总开关）。
+ *  - legacy（无 body idle 能力）：现状行为，autonomy.gapMinutes 节奏、
+ *    random 池减 THEATER_EXCLUDED。
+ * Config arrives on /state pushes (`autonomy`); a pet that never receives a
+ * push keeps the theater off, so behavior is unchanged until the driver
+ * speaks. bodyIdle 由 body.json 自述（boot 时经 pet-asset:// 拉取）。
  */
 interface TheaterConfig {
   enabled: boolean
   gapMinutes: number
 }
 
+interface BodyIdleConfig {
+  intervalMs: readonly [number, number]
+  noRepeat: number
+}
+
 let theater: TheaterConfig = { enabled: false, gapMinutes: 10 }
+let bodyIdle: BodyIdleConfig | undefined
 let theaterTimer: ReturnType<typeof setTimeout> | undefined
 let theaterLastFile: string | undefined
+let idleRecent: string[] = []
+let idleNextAt = 0
 // A one-shot in flight (touch reaction, /action, a theater clip itself): the
 // pending timer must not hijack the stage mid-clip.
 let oneShotActive = false
 
-function theaterPool(): AnimationName[] {
+function theaterPool(): CatalogClip[] {
   return [...actionCatalog.values()].filter(entry =>
     entry.dir === 'random'
     && !THEATER_EXCLUDED.has(entry.file)
     && entry.file !== theaterLastFile)
 }
 
+/** B02 池：idleEligible 白名单；facing=left 排除 noMirror；noRepeat 排除
+ * 最近 2 个（排除后空则回落全白名单——软化不锁死）。与 pet-app
+ * idle-selector.eligibleIdlePool 同语义（渲染层镜像实现）。 */
+function bodyIdlePool(): CatalogClip[] {
+  if (bodyIdle === undefined) return []
+  const eligible = [...actionCatalog.values()].filter(entry => entry.idleEligible === true)
+  const facingPool = facing === 'left'
+    ? eligible.filter(entry => entry.noMirror !== true)
+    : eligible
+  const excluded = new Set(idleRecent.slice(0, bodyIdle.noRepeat))
+  const fresh = facingPool.filter(entry => !excluded.has(entry.id))
+  return fresh.length > 0 ? fresh : facingPool
+}
+
+const sampleIdleInterval = (bounds: readonly [number, number]): number => {
+  const [min, max] = bounds
+  const base = min + Math.random() * (max - min)
+  return Math.round(Math.min(max, Math.max(min, base * (1 + (Math.random() * 2 - 1) * 0.2))))
+}
+
 function scheduleTheater(): void {
   if (theaterTimer !== undefined) return
   if (!theater.enabled || baseState !== 'idle' || override !== null || Date.now() < errorUntil) return
-  if (theaterPool().length === 0) return
+  const bodyIdleConfig = bodyIdle
+  const bodyMode = bodyIdleConfig !== undefined && bodyIdlePool().length > 0
+  if (!bodyMode && theaterPool().length === 0) return
+  const delay = bodyMode ? sampleIdleInterval(bodyIdleConfig.intervalMs) : Math.max(1, theater.gapMinutes) * 60_000
+  idleNextAt = Date.now() + delay
+  reportStatus()
   theaterTimer = setTimeout(() => {
     theaterTimer = undefined
     if (!theater.enabled || baseState !== 'idle' || override !== null || oneShotActive || Date.now() < errorUntil) {
       scheduleTheater() // conditions changed while pending: re-arm from now
       return
     }
-    const pool = theaterPool()
+    const pool = bodyIdle !== undefined ? bodyIdlePool() : theaterPool()
+    if (bodyIdle !== undefined && pool.length === 0) {
+      scheduleTheater()
+      return
+    }
     const pick = pool[Math.floor(Math.random() * pool.length)]
     if (pick !== undefined) {
       theaterLastFile = pick.file
-      playOneShotAt(pick)
+      idleRecent.unshift(pick.id)
+      idleRecent = idleRecent.slice(0, Math.max(2, bodyIdle?.noRepeat ?? 2))
+      playOneShotAt(pick, undefined, pick.noMirror === true ? { noMirror: true } : undefined)
     }
-  }, Math.max(1, theater.gapMinutes) * 60_000)
+    // The next interval arms inside playOneShotAt's handback (render →
+    // scheduleTheater); nothing to do here.
+  }, delay)
 }
 
 // ── bubbles ─────────────────────────────────────────────────────────────────
@@ -477,9 +598,38 @@ const interactionQueue: Array<{ id: string; message: InteractionMessage }> = []
 
 // ── boot ────────────────────────────────────────────────────────────────────
 
+/** B02：拉取身体自述，capabilities.idle.supported 时以身体节奏接管 idle
+ * theater（autonomy 的 GapMinutes 退役，总开关仍归设置页）。失败 = legacy。 */
+async function loadBodyDescription(): Promise<void> {
+  try {
+    const response = await fetch(`pet-asset:///${CHARACTER}/body.json`)
+    if (!response.ok) return
+    const raw = await response.json() as {
+      capabilities?: Record<string, { kind?: unknown; supported?: unknown; intervalMs?: unknown; noRepeat?: unknown }>
+    }
+    const idle = raw.capabilities?.idle
+    if (idle?.kind !== 'idle' || idle.supported !== true) return
+    const interval = Array.isArray(idle.intervalMs) ? idle.intervalMs : []
+    const min = interval[0]
+    const max = interval[1]
+    if (typeof min !== 'number' || !Number.isFinite(min)
+      || typeof max !== 'number' || !Number.isFinite(max) || min >= max) return
+    bodyIdle = {
+      intervalMs: [min, max],
+      noRepeat: typeof idle.noRepeat === 'number' && Number.isInteger(idle.noRepeat) && idle.noRepeat >= 1
+        ? idle.noRepeat
+        : 2,
+    }
+    scheduleTheater()
+  } catch {
+    // 没有 body.json 或拉取失败：维持 legacy theater（0.4.13 行为）。
+  }
+}
+
 function boot(): void {
   setupStage(video, stage)
   render()
+  void loadBodyDescription()
 }
 
 // ── window drag ─────────────────────────────────────────────────────────────
@@ -699,7 +849,15 @@ globals.petDesktop?.onSay((notice) => {
 
 let reportedSnapshot = ''
 const reportStatus = (): void => {
-  const snapshot = JSON.stringify({ state: baseState, override, animation: decodeURIComponent(video.src.split('/').pop() ?? '') })
+  // B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段（与 animation
+  // 同源）。transitionMs 等 B04 落地后再加。
+  const clip = decodeURIComponent(video.src.split('/').pop() ?? '')
+  const bodyRuntime = {
+    facing,
+    ...(idleNextAt > 0 ? { idleNextAt } : {}),
+    ...(clip !== '' ? { lastClip: clip } : {}),
+  }
+  const snapshot = JSON.stringify({ state: baseState, override, animation: clip, bodyRuntime })
   if (snapshot === reportedSnapshot) return
   reportedSnapshot = snapshot
   globals.petDesktop?.reportStatus(JSON.parse(snapshot) as Record<string, unknown>)
@@ -741,7 +899,7 @@ globals.petDesktop?.onAction((message) => {
     // catalog before forwarding, so an unresolvable id here can only come
     // from a stale catalog — ignoring it keeps the state machine intact.
     const hit = actionCatalog.get(action)
-    if (hit !== undefined) playOneShotAt(hit, requestId)
+    if (hit !== undefined) playOneShotAt(hit, requestId, hit.noMirror === true ? { noMirror: true } : undefined)
   }
 })
 /** Keep the queue badge (`.bubble-queue`, appended inside the bubble) in

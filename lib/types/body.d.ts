@@ -1,8 +1,12 @@
 /**
  * body/1 — the body's own description of what it is and what it can do.
  * The driver owns this envelope (shapes, validation); the body owns the
- * values (ids, tags, usage, fallbacks). Unknown fields and capability kinds
- * are preserved, never interpreted here.
+ * values (ids, tags, usage, fallbacks). Unknown fields are preserved, never
+ * interpreted here. Capability kinds: listing capabilities (actions,
+ * expressions, …) follow the catalog/tags/count shape; the three known
+ * BEHAVIOR kinds (`kind: "facing" | "idle" | "transition"`, body iteration
+ * Phase 0) carry their own typed shape instead — they describe HOW the body
+ * moves, not what it lists.
  * @module dsh-agentic-pet/body
  */
 export interface BodyCapability {
@@ -52,6 +56,10 @@ export type BodyNormalization = {
     readonly kind: 'legacy';
     readonly reason: string;
 };
+/** The three known behavior capabilities (body iteration Phase 0). A
+ * capability entry declaring one of these kinds follows its typed shape;
+ * anything else falls through to the generic catalog/tags/count shape. */
+export type BodyBehaviorKind = 'facing' | 'idle' | 'transition';
 /** Validate the body/1 envelope; preserve every unknown field. A missing or
  * foreign schema is legacy, not an error: old bodies keep working. */
 export declare function normalizeBody(raw: unknown): BodyNormalization;

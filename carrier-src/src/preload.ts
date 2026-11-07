@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('petDesktop', {
   onCatalog(listener: (catalog: unknown) => void): void {
     ipcRenderer.on('pet:catalog', (_event, catalog) => { listener(catalog) })
   },
+  /** B01 朝向反馈：main 的 click-through 轮询顺带算好的光标偏移（光标 x −
+   * 窗口中心 x，px；右为正）。渲染层做迟滞/去抖，main 只供数。 */
+  onCursor(listener: (cursor: { offsetX: number }) => void): void {
+    ipcRenderer.on('pet:cursor', (_event, cursor) => { listener(cursor) })
+  },
   onInteraction(listener: (request: unknown) => void): void {
     ipcRenderer.on('pet:interaction', (_event, request) => { listener(request) })
   },

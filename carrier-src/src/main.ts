@@ -55,10 +55,15 @@ interface CatalogEntry {
   durationHintMs?: number
   textInFrame?: boolean
   loop?: boolean
+  /** B02：待机白名单（actions.tags.json 标注）——idle theater 的池。 */
+  idleEligible?: boolean
+  /** B01：文字镜像豁免，唯一来源 = text_clips.json 的 no_mirror（单一来源
+   * 裁定；actions.tags.json 的 textInFrame 读取保留但数据侧禁新增）。 */
+  noMirror?: boolean
 }
 
 /** The body-owned tag file: keyed by clip id, authored next to the media. */
-type ActionTagMeta = Pick<CatalogEntry, 'tags' | 'energy' | 'durationHintMs' | 'textInFrame' | 'loop'>
+type ActionTagMeta = Pick<CatalogEntry, 'tags' | 'energy' | 'durationHintMs' | 'textInFrame' | 'loop' | 'idleEligible'>
 
 async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
   const file = join(resolveAssetsRoot(), CHARACTER, 'actions.tags.json')
@@ -79,12 +84,14 @@ async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
         : undefined
       const textInFrame = typeof record.textInFrame === 'boolean' ? record.textInFrame : undefined
       const loop = record.loop === true ? true : undefined
+      const idleEligible = record.idleEligible === true ? true : undefined
       map.set(id, {
         tags,
         ...(energy === undefined ? {} : { energy }),
         ...(durationHintMs === undefined ? {} : { durationHintMs }),
         ...(textInFrame === undefined ? {} : { textInFrame }),
         ...(loop === undefined ? {} : { loop }),
+        ...(idleEligible === undefined ? {} : { idleEligible }),
       })
     }
     return map
@@ -116,6 +123,22 @@ async function readBodyDocument(): Promise<Record<string, unknown> | null> {
  * change. Failure degrades to an empty catalog — the pet then advertises
  * only the universal `celebrate` alias, i.e. yesterday's behavior.
  */
+/** 文字镜像豁免的唯一来源（body 契约 §3.1 裁定）：videos/text_clips.json 的
+ * no_mirror 数组。缺文件/缺键 = 空集（未登记任何豁免）。 */
+async function readNoMirrorClips(videosRoot: string): Promise<Set<string>> {
+  const raw = await readFile(join(videosRoot, 'text_clips.json'), 'utf8').catch(() => null)
+  if (raw === null) return new Set()
+  try {
+    const parsed = JSON.parse(raw) as { no_mirror?: unknown }
+    const list = Array.isArray(parsed.no_mirror)
+      ? parsed.no_mirror.filter((item): item is string => typeof item === 'string')
+      : []
+    return new Set(list)
+  } catch {
+    return new Set()
+  }
+}
+
 async function scanActionCatalog(): Promise<CatalogEntry[]> {
   const videosRoot = join(resolveAssetsRoot(), CHARACTER, 'videos')
   const entries: CatalogEntry[] = []
@@ -141,7 +164,11 @@ async function scanActionCatalog(): Promise<CatalogEntry[]> {
     if (category.isDirectory()) await collect(join(videosRoot, category.name), category.name)
   }
   const tags = await readActionTags()
-  return entries.map(entry => ({ ...entry, ...(tags.get(entry.id) ?? {}) }))
+  const noMirror = await readNoMirrorClips(videosRoot)
+  return entries.map(entry => {
+    const merged = { ...entry, ...(tags.get(entry.id) ?? {}) }
+    return noMirror.has(entry.id) ? { ...merged, noMirror: true } : merged
+  })
 }
 
 /**
@@ -621,6 +648,8 @@ async function main(): Promise<void> {
   // null until one is set.
   let activeWorld: Rect | null = readSavedWorld()
   let lastIgnore: boolean | undefined
+  // B01：上一次发给渲染层的光标偏移——变化 ≥4px 才重发，压 IPC 噪音。
+  let lastCursorOffset = Number.POSITIVE_INFINITY
   const updateClickThrough = (): void => {
     try {
       const bounds = window.getBounds()
@@ -639,6 +668,13 @@ async function main(): Promise<void> {
         lastIgnore = overInteractive
       }
       window.setIgnoreMouseEvents(!overInteractive)
+      // B01 朝向：同一个 120ms 轮询顺带喂光标偏移（右为正）。渲染层做
+      // 迟滞（±20px）与 40ms 去抖，main 只供数不判定。
+      const offsetX = cursor.x - (bounds.x + bounds.width / 2)
+      if (Math.abs(offsetX - lastCursorOffset) >= 4) {
+        lastCursorOffset = offsetX
+        window.webContents.send('pet:cursor', { offsetX })
+      }
     } catch (error) {
       console.error(`[pet] click-through poll failed: ${String(error)}`)
     }

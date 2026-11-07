@@ -37,14 +37,6 @@ const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh');
  * character the renderer can actually play).
  */
 const CHARACTER = 'whale';
-/**
- * Derive the action catalog from the media tree: categories are the
- * directories under characters/<id>/videos, clips are the .webm files inside
- * them (one nested level is flattened — events/balance). Scanning disk (not
- * a checked-in index) keeps an asset-package update from requiring a code
- * change. Failure degrades to an empty catalog — the pet then advertises
- * only the universal `celebrate` alias, i.e. yesterday's behavior.
- */
 async function readActionTags() {
     const file = join(resolveAssetsRoot(), CHARACTER, 'actions.tags.json');
     try {
@@ -55,7 +47,7 @@ async function readActionTags() {
                 continue;
             const record = value;
             const tags = Array.isArray(record.tags)
-                ? record.tags.filter(tag => typeof tag === 'string' && tag !== '')
+                ? record.tags.filter((tag) => typeof tag === 'string' && tag !== '')
                 : [];
             const energy = record.energy === 'low' || record.energy === 'mid' || record.energy === 'high'
                 ? record.energy
@@ -65,32 +57,62 @@ async function readActionTags() {
                 : undefined;
             const textInFrame = typeof record.textInFrame === 'boolean' ? record.textInFrame : undefined;
             const loop = record.loop === true ? true : undefined;
+            const idleEligible = record.idleEligible === true ? true : undefined;
             map.set(id, {
                 tags,
                 ...(energy === undefined ? {} : { energy }),
                 ...(durationHintMs === undefined ? {} : { durationHintMs }),
                 ...(textInFrame === undefined ? {} : { textInFrame }),
                 ...(loop === undefined ? {} : { loop }),
+                ...(idleEligible === undefined ? {} : { idleEligible }),
             });
         }
         return map;
     }
     catch {
-        return new Map();
+        return new Map(); // tags are optional: the id catalog still works
     }
 }
+/** The body's own description (body/1), next to the media. Missing or
+ * unreadable is the legacy path: /body 404s and the v4 contract is untouched. */
 async function readBodyDocument() {
     const file = join(resolveAssetsRoot(), CHARACTER, 'body.json');
     try {
         const raw = JSON.parse(await readFile(file, 'utf8'));
         if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
             return null;
-        if (typeof raw.bodyId !== 'string')
-            raw.bodyId = CHARACTER;
-        return raw;
+        const body = raw;
+        if (typeof body.bodyId !== 'string')
+            body.bodyId = CHARACTER;
+        return body;
     }
     catch {
         return null;
+    }
+}
+/**
+ * Derive the action catalog from the media tree: categories are the
+ * directories under characters/<id>/videos, clips are the .webm files inside
+ * them (one nested level is flattened — events/balance). Scanning disk (not
+ * a checked-in index) keeps an asset-package update from requiring a code
+ * change. Failure degrades to an empty catalog — the pet then advertises
+ * only the universal `celebrate` alias, i.e. yesterday's behavior.
+ */
+/** 文字镜像豁免的唯一来源（body 契约 §3.1 裁定）：videos/text_clips.json 的
+ * no_mirror 数组。缺文件/缺键 = 空集（未登记任何豁免）。 */
+async function readNoMirrorClips(videosRoot) {
+    const raw = await readFile(join(videosRoot, 'text_clips.json'), 'utf8').catch(() => null);
+    if (raw === null)
+        return new Set();
+    try {
+        const parsed = JSON.parse(raw);
+        const list = Array.isArray(parsed.no_mirror)
+            ? parsed.no_mirror.filter((item) => typeof item === 'string')
+            : [];
+        return new Set(list);
+    }
+    catch {
+        return new Set();
     }
 }
 async function scanActionCatalog() {
@@ -123,7 +145,11 @@ async function scanActionCatalog() {
             await collect(join(videosRoot, category.name), category.name);
     }
     const tags = await readActionTags();
-    return entries.map(entry => ({ ...entry, ...(tags.get(entry.id) ?? {}) }));
+    const noMirror = await readNoMirrorClips(videosRoot);
+    return entries.map((entry) => {
+        const merged = { ...entry, ...(tags.get(entry.id) ?? {}) };
+        return noMirror.has(entry.id) ? { ...merged, noMirror: true } : merged;
+    });
 }
 /**
  * The window's one canonical size: creation and every drag setBounds pin it.
@@ -580,6 +606,8 @@ async function main() {
     // null until one is set.
     let activeWorld = readSavedWorld();
     let lastIgnore;
+    // B01：上一次发给渲染层的光标偏移——变化 ≥4px 才重发，压 IPC 噪音。
+    let lastCursorOffset = Number.POSITIVE_INFINITY;
     const updateClickThrough = () => {
         try {
             const bounds = window.getBounds();
@@ -597,6 +625,13 @@ async function main() {
                 lastIgnore = overInteractive;
             }
             window.setIgnoreMouseEvents(!overInteractive);
+            // B01 朝向：同一个 120ms 轮询顺带喂光标偏移（右为正）。渲染层做
+            // 迟滞（±20px）与 40ms 去抖，main 只供数不判定。
+            const offsetX = cursor.x - (bounds.x + bounds.width / 2);
+            if (Math.abs(offsetX - lastCursorOffset) >= 4) {
+                lastCursorOffset = offsetX;
+                window.webContents.send('pet:cursor', { offsetX });
+            }
         }
         catch (error) {
             console.error(`[pet] click-through poll failed: ${String(error)}`);
@@ -904,6 +939,8 @@ async function main() {
                 // The pet's own action menu, scanned from the media tree at boot —
                 // celebrate first (the universal alias), then every playable clip.
                 actions: actionIds,
+                // Body-owned catalog: tags are whatever this body declares in
+                // characters/whale/actions.tags.json; no cross-body vocabulary.
                 actionCatalog: actionCatalog.map(entry => ({
                     id: entry.id,
                     tags: entry.tags ?? [],
@@ -936,13 +973,30 @@ async function main() {
                 send(422, { ok: false, error: 'expression layer not supported' });
                 return;
             }
-            const expression = typeof body.expression === 'string' ? body.expression.trim() : '';
-            if (expression === '') {
-                send(422, { ok: false, error: 'expression required' });
-                return;
-            }
-            console.log(`[pet] expression test: ${expression}`);
-            send(200, { ok: true, expression });
+            // The /expression stub sits before the shared POST body reader below,
+            // so it reads and parses its own request body (event style — this
+            // handler is not async).
+            let raw = '';
+            req.setEncoding('utf8');
+            req.on('data', (chunk) => { raw += chunk; });
+            req.on('error', () => { send(400, { error: 'request error' }); });
+            req.on('end', () => {
+                let body;
+                try {
+                    body = JSON.parse(raw);
+                }
+                catch {
+                    send(400, { error: 'invalid json' });
+                    return;
+                }
+                const expression = typeof body.expression === 'string' ? body.expression.trim() : '';
+                if (expression === '') {
+                    send(422, { ok: false, error: 'expression required' });
+                    return;
+                }
+                console.log(`[pet] expression test: ${expression}`);
+                send(200, { ok: true, expression });
+            });
             return;
         }
         if (url.pathname === '/status') {
@@ -1086,13 +1140,12 @@ async function main() {
         const address = control.address();
         const port = typeof address === 'object' && address !== null ? address.port : 0;
         console.log(`[pet] control interface on 127.0.0.1:${String(port)}`);
-        // Registry publish: one file per pet under pet-http.d/ — no shared name,
-        // no last-writer-wins race (the incident class that produced repeated
-        // swap blindness). The legacy single file keeps being written during the
-        // transition so pre-registry readers still see this carrier.
+        // Registry publish: one file per pet under whale598/pet-http.d/ — no
+        // shared name, no last-writer-wins race (the incident class that produced
+        // repeated swap blindness). The registry is the SINGLE discovery source:
+        // the legacy root pet-http.d/ and the single-file manifests are retired
+        // on both the write and the read side.
         const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: 'electron' })}\n`;
-        // Namespaced under whale598/ (collision avoidance); the driver scans
-        // the legacy pet-http.d/ as a read fallback for older pet builds.
         const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d');
         try {
             mkdirSync(registryDir, { recursive: true });
@@ -1103,7 +1156,6 @@ async function main() {
         const writeManifest = () => {
             void writeFile(join(registryDir, 'electron.json'), manifest, 'utf8')
                 .catch((error) => { console.error('[pet] could not write the registry entry:', String(error)); });
-            // legacy 根镜像（pet-http-electron.json）停写：读侧双目录扫描已覆盖
         };
         writeManifest();
         // Re-assert on a cadence so a stale publisher cannot shadow a live pet.
