@@ -533,6 +533,9 @@ export function moodOf(affection: number): 'happy' | 'content' | 'neutral' {
 export function touchPartWording(part: string): string | undefined {
   if (part === 'head') return '头'
   if (part === 'body') return '身体'
+  // B03 触感分区（tail/hand）：文案 Phase 0 先定稿；载体在 Phase 2 才会发这些 part。
+  if (part === 'tail') return '尾巴'
+  if (part === 'hand') return '手'
   return undefined
 }
 

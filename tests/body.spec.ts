@@ -223,3 +223,88 @@ describe('pet_express resolution', () => {
     expect(formatMissingExpression()).toContain('body/1')
   })
 })
+
+describe('behavior capabilities (kind 分流，Phase 0)', () => {
+  const facing = {
+    kind: 'facing',
+    supported: true,
+    usage: '身体会随光标左右转向。',
+    modes: ['left', 'right'],
+    method: 'mirror',
+  }
+  const idle = {
+    kind: 'idle',
+    supported: true,
+    intervalMs: [40000, 120000],
+    noRepeat: 2,
+  }
+  const transition = {
+    kind: 'transition',
+    supported: true,
+    defaultMs: 180,
+    toIdleMs: 240,
+  }
+
+  it('accepts the three behavior kinds with usage optional', () => {
+    const result = normalizeBody({
+      ...base,
+      capabilities: { ...base.capabilities, facing, idle, transition },
+    })
+    expect(result.kind).toBe('body')
+  })
+
+  it('keeps the generic usage-required rule for behavior kinds out of the way', () => {
+    // usage is optional prose on typed behavior capabilities (the kind is
+    // the declaration); a bare facing without usage normalizes fine.
+    const bare = normalizeBody({ ...base, capabilities: { ...base.capabilities, facing: { ...facing, usage: undefined } } })
+    expect(bare.kind).toBe('body')
+  })
+
+  it('rejects a behavior capability carrying the listing shape', () => {
+    const mixed = normalizeBody({
+      ...base,
+      capabilities: { ...base.capabilities, facing: { ...facing, catalog: ['写代码'] } },
+    })
+    expect(mixed).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('must not carry catalog') })
+  })
+
+  it('rejects malformed facing payloads', () => {
+    const noModes = normalizeBody({ ...base, capabilities: { ...base.capabilities, facing: { kind: 'facing', supported: true, method: 'mirror' } } })
+    expect(noModes).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('modes') })
+    const badMethod = normalizeBody({ ...base, capabilities: { ...base.capabilities, facing: { ...facing, method: 'flip' } } })
+    expect(badMethod).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('method') })
+    const badMode = normalizeBody({ ...base, capabilities: { ...base.capabilities, facing: { ...facing, modes: ['up'] } } })
+    expect(badMode).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('modes') })
+  })
+
+  it('rejects malformed idle payloads', () => {
+    const reversed = normalizeBody({ ...base, capabilities: { ...base.capabilities, idle: { kind: 'idle', supported: true, intervalMs: [120000, 40000], noRepeat: 2 } } })
+    expect(reversed).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('intervalMs') })
+    const noNoRepeat = normalizeBody({ ...base, capabilities: { ...base.capabilities, idle: { kind: 'idle', supported: true, intervalMs: [40000, 120000] } } })
+    expect(noNoRepeat).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('noRepeat') })
+  })
+
+  it('rejects malformed transition payloads', () => {
+    const over = normalizeBody({ ...base, capabilities: { ...base.capabilities, transition: { kind: 'transition', supported: true, defaultMs: 800 } } })
+    expect(over).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('defaultMs') })
+    const inverted = normalizeBody({ ...base, capabilities: { ...base.capabilities, transition: { kind: 'transition', supported: true, defaultMs: 240, toIdleMs: 180 } } })
+    expect(inverted).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('toIdleMs') })
+  })
+
+  it('keeps supported:false behavior entries bare and rejects payloads', () => {
+    const bare = normalizeBody({ ...base, capabilities: { ...base.capabilities, facing: { kind: 'facing', supported: false } } })
+    expect(bare.kind).toBe('body')
+    const withPayload = normalizeBody({ ...base, capabilities: { ...base.capabilities, idle: { kind: 'idle', supported: false, intervalMs: [40000, 120000], noRepeat: 2 } } })
+    expect(withPayload).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('unsupported but carries') })
+  })
+
+  it('falls through unknown kind values to the generic listing shape', () => {
+    // Forward compat: a future body declaring an unknown behavior kind with
+    // no catalog still has to satisfy the generic rule (or the driver ahead
+    // of the assets ships the kind first — the contract registers kinds).
+    const unknown = normalizeBody({ ...base, capabilities: { ...base.capabilities, pose: { kind: 'pose', supported: true, usage: '未来能力。' } } })
+    expect(unknown).toMatchObject({ kind: 'legacy', reason: expect.stringContaining('describes no catalog') })
+    const withCatalog = normalizeBody({ ...base, capabilities: { ...base.capabilities, pose: { kind: 'pose', supported: true, usage: '未来能力。', catalog: ['a'], count: 1 } } })
+    expect(withCatalog.kind).toBe('body')
+  })
+})

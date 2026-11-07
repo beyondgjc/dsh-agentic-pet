@@ -483,3 +483,18 @@ describe('checkPetMessageRate (定向消息分档限频)', () => {
     if (!third.ok) expect(third.windowMinutes).toBe(60)
   })
 })
+
+describe('touch part wording (B03 触感分区，Phase 0 定稿)', () => {
+  it('words the extended parts and keeps unknown unworded', () => {
+    expect(touchPartWording('head')).toBe('头')
+    expect(touchPartWording('body')).toBe('身体')
+    expect(touchPartWording('tail')).toBe('尾巴')
+    expect(touchPartWording('hand')).toBe('手')
+    expect(touchPartWording('unknown')).toBeUndefined()
+  })
+
+  it('uses the part wording in the touch prompt when the body reports it', () => {
+    const prompt = buildTouchPrompt({ part: 'tail', touchesToday: 1, affection: 0 })
+    expect(prompt).toContain('尾巴')
+  })
+})
