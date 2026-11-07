@@ -121,7 +121,10 @@ function applyFacing(): void {
   reportStatus()
 }
 
-function decideFacing(offsetX: number): void {
+function decideFacing(rawOffsetX: number): void {
+  // 【用户感知校准 2026-11-07】素材原始帧的视觉朝向读作"朝左"——光标在右
+  // （offsetX > 0）时镜像后才算"扭向光标"，故取负号进判定。
+  const offsetX = -rawOffsetX
   lastCursorOffsetX = offsetX
   if (facingLocked) return
   const now = Date.now()

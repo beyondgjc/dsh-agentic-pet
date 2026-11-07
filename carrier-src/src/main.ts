@@ -573,15 +573,23 @@ async function main(): Promise<void> {
   window.on('resize', () => {
     console.log(`[pet] resized: ${JSON.stringify(window.getBounds())}`)
   })
+  // 拖拽/位置诊断落文件（stdio: 'ignore' 会吞掉 stdout 日志——2026-11-07
+  // 拖拽振荡排查时发现的盲区）。
+  const runtimeLog = (line: string): void => {
+    try { __afs(join(DSH_HOME, 'whale598', 'carrier-runtime.log'), `${new Date().toISOString()} ${line}\n`) } catch { /* ignore */ }
+  }
   window.on('moved', () => {
-    console.log(`[pet] moved: ${JSON.stringify(window.getBounds())}`)
+    const line = `[pet] moved: ${JSON.stringify(window.getBounds())}`
+    console.log(line)
+    runtimeLog(line)
   })
   const primary = screen.getPrimaryDisplay()
   console.log(`[pet] window bounds: ${JSON.stringify(window.getBounds())} scaleFactor=${primary.scaleFactor} workarea=${JSON.stringify(primary.workArea)}`)
   // Forward the renderer console: the pet page's own diagnostics (connection,
   // shader, video failures) never reach a terminal otherwise.
-  window.webContents.on('console-message', (_event, _level, message, line, source) => {
+  window.webContents.on('console-message', (_event, level, message, line, source) => {
     console.log(`[pet-renderer] ${source}:${line} ${message}`)
+    if (level >= 2) runtimeLog(`[pet-renderer:${String(level)}] ${message} (${source}:${String(line)})`)
   })
   window.webContents.on('did-fail-load', (_event, code, description, url) => {
     console.log(`[pet-renderer] did-fail-load ${code} ${description} ${url}`)
@@ -606,7 +614,13 @@ async function main(): Promise<void> {
   // Hand the renderer the action catalog (its /action name resolution and
   // idle theater both consume it). The page has finished loading here, so
   // its listener is registered and nothing is lost.
-  window.webContents.send('pet:catalog', { character: CHARACTER, actions: actionCatalog })
+  // B02/B03：body 自述随 catalog 一起推（渲染层的 bodyIdle/命中区消费它）——
+  // 不依赖渲染层 pet-asset fetch（该路径在实机上不稳，2026-11-07 实测）。
+  window.webContents.send('pet:catalog', {
+    character: CHARACTER,
+    actions: actionCatalog,
+    ...(bodyDocument === null ? {} : { body: bodyDocument }),
+  })
 
   // Click-through is decided by the MAIN process: setIgnoreMouseEvents(forward)
   // does not deliver forwarded moves on this Electron/Windows combination, so
