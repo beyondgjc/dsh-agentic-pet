@@ -5,16 +5,18 @@
 > 全景技术文档（协议栈/端点契约/各模块深读）= Obsidian `DSH-PET 技术实现.md`（§6.9 = 记忆系统）；
 > 记忆系统需求与修订台账 = `C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`。
 
-## 1. 双仓结构（最重要）
+## 1. 三仓结构（最重要）
 
 | 仓 | 路径 | 角色 |
 | --- | --- | --- |
 | **发布仓**（本仓） | `Agents/dsh-pet/dsh-agentic-pet` | npm 包 `dsh-agentic-pet` 的家；拥有版本号；`lib/` 构建产物入库；README/AGENTS 在这 |
-| **monorepo**（dev upstream） | `Agents/dsh-pet/dsh/deepseek-harness` | 插件源码的 monorepo 副本：`packages/bundle/pet-app`（插件）+ `apps/pet`（carrier 源码）；workspace 版本号（0.2.1-rc.3），tsdown/tsconfig 是 monorepo 版（**别互相覆盖这两个文件**） |
+| **monorepo**（dev upstream） | `Agents/dsh-pet/dsh/deepseek-harness` | 插件源码的 monorepo 副本：`packages/bundle/pet-app`（插件）+ `apps/pet`（carrier 源码）；workspace 版本号（0.2.1-rc.3），tsdown/tsconfig 是 monorepo 版（**别互相覆盖这两个文件**）；remote 是 deepseek-ai 上游，**feat/pet-surface 分支只能本地提交** |
+| **素材源**（legacy 仓） | `Agents/dsh-pet/dsh-pet-indesktop` | **媒体与清单的真源**：`assets/characters/shenshen/`（body.json / actions.tags.json / videos）。remote 是上游作者（MerZlin），同样只能本地提交 |
+| **素材发布仓** | `Agents/dsh-pet/dsh-pet-assets` | npm 包 `dsh-agentic-pet-assets`；**`assets/` 整树被自己的 .gitignore 忽略**（build-payload.cmd 的暂存区，shenshen→whale 改名在铺送时发生）——**改素材必须改 indesktop 源，再跑 build-payload.cmd 重铺**，直接改 assets/ 会在下次重铺时丢失（2026-11-08 实测踩过） |
 
 - `scripts/sync-from-monorepo.cmd` 单向镜像 monorepo → 发布仓（src/client/tests/cordis/package.json 字段/lib/presets/carrier 产物/carrier-src）。**它不认识发布仓新写的代码——monorepo 落后时跑它会把发布仓覆盖回旧稿。**
 - 反向同步没有脚本，手工镜像：发布仓的 `src/*.ts`、`tests/*.ts`、`client/`、`presets/`、`carrier-src/src` → monorepo 对应位置；`package.json`（版本差异是设计）、`tsdown.config.ts`、`tsconfig.json` 不带过去。
-- **纪律：改完任一侧，另一侧立刻跟上，用逐字节 diff 核验**（2026-11-07 之前 monorepo 落后了整整一个 0.4.x 周期，差点被 sync 脚本清掉）。
+- **纪律（三条，全部实测踩过）**：① 改完任一侧，另一侧立刻跟上，用逐字节 diff 核验（2026-11-07 之前 monorepo 落后了整整一个 0.4.x 周期）；② **每批改动只允许一个镜像方向**——release↔monorepo 两侧都有未同步改动时，先对齐再开工，末尾的收尾 cp 会把先做的改动冲掉（body.ts 多矩形、B06 渲染层消费都被这样冲过一次）；③ 镜像完成后 grep 抽查关键标记（如 `readIdleBias`）确认双向都在。
 
 ## 2. 本地开发（发布仓直连）
 
@@ -96,21 +98,47 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 - pre-commit 是 lefthook：oxlint（`scripts/run-oxlint.ts --config .oxlintrc.staged.json`，带 `--fix`）+ whitespace 检查 + vendor manifest guard。**lint --fix 会让第一次 commit 失败**——`git add -A` 再 commit 一次即可；whitespace 失败优先怀疑行尾。
 - 单仓提交前跑一遍 `vitest run`；动了 src 就重建 lib。
 
-## 7. 代码地图（记忆系统相关）
+## 7. 代码地图（记忆系统 + 身体系统）
 
 | 文件 | 职责 |
 | --- | --- |
 | `src/journal.ts` | 哈希链 journal 存储：条目格式（tags/entities/echo/voids/window）、append（防回声）、rotate（保留 pin + 置位 pendingEpoch）、meta（pin 名单/epoch 记账，跨重写保留） |
 | `src/journal-recall.ts` | 召回半边：CJK bigram 分词、派生索引（digest 快检+确定性重建）、recallJournal（min(2,词数) 门槛/自动降级/去重/matchedBy/excluded/belowThreshold/totalMatched）、epochs、pin/void、注入预算制（budgetWake）、last-recall 留痕 |
-| `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；"回忆不是新事实"边界声明 |
-| `src/driver.ts` | 工具注册（`pet_journal` 六个 op、`pet_recall`）、唤醒路径接线 |
-| 需求文档 | 仓外（不在 git 里）：`C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`（§11.1 是三轮实测修订台账） |
+| `src/body.ts` | body/1 自述校验：behavior 能力 kind 分流（facing/idle/transition）、hitboxes 单矩形/多矩形（tail 双尾鳍）、resolveExpressionRequest/suggestExpressionFallback |
+| `src/idle-selector.ts` | 待机选择器纯函数：白名单池过滤（idleEligible/facing 排 noMirror/noRepeat 回落）、加权随机 + 时段偏置（max-not-product）、区间采样抖动、朝向迟滞判定；RNG 可注入（mulberry32） |
+| `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；touchPartWording（head/body/tail/hand）；"回忆不是新事实"边界声明 |
+| `src/driver.ts` | 工具注册（`pet_journal` 六个 op、`pet_recall`）、唤醒路径接线、readAutonomy（autonomy + idleBias 载荷） |
+| `src/rhythm.ts` | 静默时段 + B06 时辰偏置表（readIdleBias：默认 凌晨安静系×1.5/活跃系×0.5，可配可 null 关） |
+| carrier `apps/pet/src/renderer/main.ts` | 身体的呈现半边：WebGL stage 绘制、镜像（scaleX(-1) + 命中折返）、idle theater 双模式（bodyIdle 接管/legacy）、touchPartOf（body.json 驱动 + 特定优先）、**双缓冲已回退**（单元素直换，见 §9） |
+| carrier `apps/pet/src/main.ts` | 光标轮询喂 pet:cursor（click-through 轮询顺带）、readActionTags（_meta 守卫 + idleEligible）、text_clips no_mirror 合入 catalog、/status 透传 bodyRuntime、runtimeLog 诊断落盘 |
+| 需求文档 | 仓外（不在 git 里）：`C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`（§11.1 三轮实测修订）、`pet-body-requirements-v0.2.md`（§13 变更记录） |
 | 全景技术文档 | Obsidian：`C:\Users\beyondguo\Documents\Obsidian Vault\DSH-PET 技术实现.md`（协议栈/八端点契约/各模块深读；§6.9 记忆系统；本手册是它的操作面补充） |
 
 ## 8. 本地安装点速查
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/.dsh/profiles/desktop/node_modules/dsh-agentic-pet` | 已安装插件（0.4.9 manifest + 0.4.12 lib，待下次插件页更新对齐） |
+| `~/.dsh/profiles/desktop/node_modules/dsh-agentic-pet` | 已安装插件（lib/carrier 手工部署到最新；manifest 0.4.9 待下次插件页更新对齐） |
 | `~/.dsh/profiles/desktop/node_modules/dsh-agentic-pet.bak-0.4.9-20261107` | 0.4.9 回滚点 |
+| `~/.dsh/profiles/desktop/node_modules/dsh-agentic-pet-assets/assets/characters/whale` | 已安装素材（body.json/actions.tags.json 手工同步到最新） |
+| `~/.dsh/profiles/desktop/vendor/dsh-pet-app/lib` | carrier main 的另一个部署位（历史遗留；当前运行体 = 插件包 carrier/，见进程命令行） |
 | `~/.dsh/whale598/pet-settings.json`（+.bak-20261107） | 运行配置（注入预算已开启） |
+| `~/.dsh/whale598/carrier-runtime.log` | **载体诊断主日志**（渲染层 console ≥info + 窗口移动 bounds）——排查触摸命中/朝向/待机的第一现场 |
+| `~/.dsh/whale598/carrier-boot.log` | 载体启动标记（`[pet] boot: … body=body/1` = 跑的哪一版） |
+
+## 9. 实战坑单（2026-11-07/08 身体迭代汇总，按杀伤力排序）
+
+1. **部署后必须验包内容**：`lib/` 与 `carrier/dist-renderer` 的 chunk 是内容哈希命名——部署完 `grep` 一个本轮新符号（如 `readIdleBias`、`idleNextAt`）确认真的进了包。三次事故（断链 chunk、覆盖回旧版、lib 未重部署）都是"改了/构建了但没验"造成的。
+2. **单向批量**：release↔monorepo 的收尾 cp 只能有一个方向；两侧都有改动时先对齐（body.ts 多矩形、B06 渲染层消费都被收尾 cp 冲掉过）。
+3. **素材改源不改暂存**：`dsh-pet-assets/assets/` 整树 gitignored，是 build-payload 的暂存区——改 `dsh-pet-indesktop/assets/characters/shenshen/` 源，再跑 build-payload.cmd 重铺（shenshen→whale 改名发生在铺送时）。
+4. **Electron 44 console-message 双签名**：事件对象（level 为字符串）与旧位置参数并存，按位置取值会全 undefined——诊断日志被静默过滤的事故根源。两种签名都接。
+5. **渲染层 boot 报告竞态**：渲染层模块执行早于 main 注册 `pet:status-report`——首份报告必丢，idle 会话里没有后续 render 就永远不补。修复 = catalog（带 body）到达时强制补报（清 `reportedSnapshot` 去重位）。同类模式：任何"启动即发"的 IPC 都要确认对端 handler 已注册。
+6. **oxlint 三连**：禁非空断言（bigram 用 slice().join('')）、行宽 140、prefer-const 对"声明后闭包内首赋值"误报（加 `= undefined` 初始化器）。
+7. **heredoc 长脚本会断**：>150 行的 python 补丁用 Write 写文件再 `python file.py`，别用 `<<'EOF'`（实际行为不稳）；python 打补丁必须先做 CRLF 规范化。
+
+## 10. 已知边界（身体迭代，2026-11-08）
+
+- B04 双缓冲交叉淡入**已整体回退**（两轮实机失败：交叉期重影透底 + 单动作后冻结）——`capabilities.transition` 仍解析，渲染路径待带测试环境重做。
+- tail/hand 命中区坐标来自单帧标注（`docs/body-hitboxes-preview.png`），未逐帧校准；`method: "clips"`（按朝向选片段）留作升级路径。
+- B06 默认表对现白名单是统计性差异（10 片段中 3 个 ×1.5），观感 subtle——可调 `pet-settings.json rhythm.idleBias.weights`。
+- carrier 的 `stdio: 'ignore'` 吞 stdout——诊断靠 `carrier-runtime.log`（§8），别再找 stdout。
