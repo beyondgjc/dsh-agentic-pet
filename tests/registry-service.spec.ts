@@ -201,3 +201,22 @@ describe('isActionComplete (wait must not mistake acceptance for completion)', (
     expect(isActionComplete({ ...completed, durationMs: null }, 'req-1')).toBe(true)
   })
 })
+
+describe('normalizeStatus bodyRuntime（B08，身体迭代 Phase 1）', () => {
+  it('extracts the runtime fields defensively and tolerates partial shapes', () => {
+    const full = normalizeStatus('electron', {
+      state: 'idle',
+      bodyRuntime: { facing: 'left', idleNextAt: 1794040800000, lastClip: '悠闲哼歌' },
+    }, true)
+    expect(full.bodyRuntime).toEqual({ facing: 'left', idleNextAt: 1794040800000, lastClip: '悠闲哼歌' })
+    const partial = normalizeStatus('electron', { bodyRuntime: { facing: 'right' } }, true)
+    expect(partial.bodyRuntime).toEqual({ facing: 'right' })
+    const garbage = normalizeStatus('electron', { bodyRuntime: { facing: 'up' } }, true)
+    expect(garbage.bodyRuntime).toBeUndefined()
+  })
+
+  it('omits the key entirely for legacy bodies (no bodyRuntime on the wire)', () => {
+    const legacy = normalizeStatus('pure', { state: 'idle' }, true)
+    expect('bodyRuntime' in legacy).toBe(false)
+  })
+})

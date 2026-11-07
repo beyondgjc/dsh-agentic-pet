@@ -1,5 +1,18 @@
-import { describe, expect, it } from 'vitest'
-import { isQuietAt, parseClock } from '../src/rhythm.ts'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { isQuietAt, parseClock, readIdleBias } from '../src/rhythm.ts'
+
+const homes: string[] = []
+const makeHome = async (): Promise<string> => {
+  const home = await mkdtemp(join(tmpdir(), 'pet-rhythm-'))
+  homes.push(home)
+  return home
+}
+afterEach(async () => {
+  await Promise.all(homes.splice(0).map(home => rm(home, { recursive: true, force: true })))
+})
 
 const at = (hour: number, minute: number): Date => new Date(2026, 10, 5, hour, minute)
 
@@ -46,5 +59,38 @@ describe('isQuietAt', () => {
     expect(isQuietAt(at(3, 0), null)).toBe(false)
     expect(isQuietAt(at(3, 0), { from: '03:00', to: '03:00', allowTouchReply: true })).toBe(false)
     expect(isQuietAt(at(3, 0), { from: 'bad', to: '09:00', allowTouchReply: true })).toBe(false)
+  })
+})
+
+describe('readIdleBias（B06 时辰偏置，Phase 3）', () => {
+  it('returns the default table when pet-settings has no rhythm.idleBias', async () => {
+    const home = await makeHome()
+    const bias = await readIdleBias(home)
+    expect(bias).toEqual({
+      hours: [1, 6],
+      weights: { 疲惫: 1.5, 待机: 1.5, 放松: 1.5, 运动: 0.5, 娱乐: 0.5, 才艺: 0.5 },
+    })
+  })
+
+  it('honors an explicit override and an explicit null (off)', async () => {
+    const home = await makeHome()
+    await mkdir(join(home, 'whale598'), { recursive: true })
+    const settings = join(home, 'whale598', 'pet-settings.json')
+    await writeFile(settings, JSON.stringify({
+      rhythm: { idleBias: { hours: [22, 2], weights: { 工作: 0.2 } } },
+    }), 'utf8')
+    expect(await readIdleBias(home)).toEqual({ hours: [22, 2], weights: { 工作: 0.2 } })
+    await writeFile(settings, JSON.stringify({ rhythm: { idleBias: null } }), 'utf8')
+    expect(await readIdleBias(home)).toBeUndefined()
+  })
+
+  it('falls back to the default table on malformed config', async () => {
+    const home = await makeHome()
+    await mkdir(join(home, 'whale598'), { recursive: true })
+    await writeFile(join(home, 'whale598', 'pet-settings.json'), JSON.stringify({
+      rhythm: { idleBias: { hours: [25], weights: 'x' } },
+    }), 'utf8')
+    const bias = await readIdleBias(home)
+    expect(bias?.hours).toEqual([1, 6])
   })
 })

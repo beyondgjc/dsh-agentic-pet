@@ -77,10 +77,24 @@ function requireElement<T extends Element>(selector: string): T {
   return element
 }
 
-const video = requireElement<HTMLVideoElement>('#video')
-video.addEventListener('error', () => {
-  console.error(`[pet-video] source failed: ${video.src} ${String(video.error?.message ?? '')}`)
-})
+let video = requireElement<HTMLVideoElement>('#video')
+const logVideoError = (el: HTMLVideoElement): void => {
+  el.addEventListener('error', () => {
+    console.error(`[pet-video] source failed: ${el.src} ${String(el.error?.message ?? '')}`)
+  })
+}
+logVideoError(video)
+// B04 双缓冲：A/B 两个离屏 video 元素，GL 交叉淡入时同时上传两路纹理；
+// 切换 = 新片段进闲置层 → 交叉 → 旧的暂停。defaultMs=0 = 无交叉直接换。
+const videoB = document.createElement('video')
+videoB.muted = true
+videoB.playsInline = true
+videoB.crossOrigin = 'anonymous'
+logVideoError(videoB)
+let prevVideo: HTMLVideoElement | undefined
+let fadeStart = 0
+let fadeMs = 0
+let glFailed = false
 const stage = requireElement<HTMLCanvasElement>('#stage')
 const bubble = requireElement<HTMLDivElement>('#bubble')
 
@@ -97,7 +111,7 @@ let facingLocked = false
 
 /** 空间迟滞判定（与 pet-app idle-selector.facingForOffset 同语义——渲染层
  * 无法跨包导入，此处镜像实现，行为由验收清单钉住）。 */
-function facingForOffset(offsetPx: number, current: Facing, hysteresisPx = 20): Facing {
+function facingForOffset(offsetPx: number, current: Facing, hysteresisPx = 40): Facing {
   if (Math.abs(offsetPx) <= hysteresisPx) return current
   return offsetPx > 0 ? 'right' : 'left'
 }
@@ -140,12 +154,14 @@ function animationSource(key: string): string {
  * inside the key band and turned semi-transparent). Chroma-keying is only the
  * fallback for an opaque source.
  */
-function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
+function setupStage(initial: HTMLVideoElement, canvas: HTMLCanvasElement): void {
   const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false })
   if (gl === null) {
     // No WebGL: fall back to the raw video (white matte visible, still usable).
-    canvas.replaceWith(video)
-    video.style.display = 'block'
+    // B04：无 GL = 无交叉淡入，switchClip 走 replaceWith 直换。
+    glFailed = true
+    canvas.replaceWith(initial)
+    initial.style.display = 'block'
     return
   }
   const compile = (type: number, source: string): WebGLShader => {
@@ -164,8 +180,8 @@ function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
     'attribute vec2 p; varying vec2 v;'
     + 'void main(){ v = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }'))
   gl.attachShader(program, compile(gl.FRAGMENT_SHADER,
-    'precision highp float; varying vec2 v; uniform sampler2D t;'
-    + 'void main(){ gl_FragColor = texture2D(t, v); }'))
+    'precision highp float; varying vec2 v; uniform sampler2D t; uniform float uAlpha;'
+    + 'void main(){ vec4 c = texture2D(t, v); gl_FragColor = vec4(c.rgb, c.a * uAlpha); }'))
   gl.linkProgram(program)
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw new Error(`pet renderer: program link failed: ${String(gl.getProgramInfoLog(program))}`)
@@ -177,38 +193,60 @@ function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
   const position = gl.getAttribLocation(program, 'p')
   gl.enableVertexAttribArray(position)
   gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
-  const texture = gl.createTexture()
-  gl.bindTexture(gl.TEXTURE_2D, texture)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  const uAlpha = gl.getUniformLocation(program, 'uAlpha')
+  const textures = new WeakMap<object, WebGLTexture>()
+  const textureFor = (el: HTMLVideoElement): WebGLTexture => {
+    const existing = textures.get(el)
+    if (existing !== undefined) return existing
+    const texture = gl.createTexture()
+    if (texture === null) throw new Error('pet renderer: texture allocation failed')
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    textures.set(el, texture)
+    return texture
+  }
   gl.enable(gl.BLEND)
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
   gl.clearColor(0, 0, 0, 0)
 
   const draw = (): void => {
-    if (video.readyState < 2 || video.videoWidth === 0) return
+    // B04：交叉淡入期间两层混绘（旧帧淡出、新帧淡入）；淡完暂停旧元素。
+    const now = performance.now()
+    const prev = prevVideo
+    const fading = prev !== undefined && fadeMs > 0 && now - fadeStart < fadeMs
+    // under-lay 交叉：旧层保持 alpha 1（桌面不透出），新层按进度盖上来——
+    // 双层各半透明会让桌面从身体里透出（实测"闪现两个身位"的根因）。
+    const layers: Array<{ el: HTMLVideoElement; alpha: number }> = fading && prev !== undefined
+      ? [
+        { el: prev, alpha: 1 },
+        { el: video, alpha: Math.min(1, (now - fadeStart) / fadeMs) },
+      ]
+      : [{ el: video, alpha: 1 }]
+    if (!fading && prev !== undefined) {
+      prev.pause()
+      prevVideo = undefined
+    }
+    if (video.videoWidth === 0) return
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth
       canvas.height = video.videoHeight
     }
     gl.viewport(0, 0, canvas.width, canvas.height)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
     gl.clear(gl.COLOR_BUFFER_BIT)
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-  }
-  type FrameScheduler = HTMLVideoElement & {
-    requestVideoFrameCallback?: (callback: () => void) => number
-  }
-  const scheduled = video as FrameScheduler
-  const schedule = (): void => {
-    if (typeof scheduled.requestVideoFrameCallback === 'function') {
-      // Draw per decoded frame; no work between frames.
-      scheduled.requestVideoFrameCallback(() => { draw(); schedule() })
-    } else {
-      requestAnimationFrame(() => { draw(); schedule() })
+    for (const { el, alpha } of layers) {
+      if (el.readyState < 2 || el.videoWidth === 0) continue
+      gl.bindTexture(gl.TEXTURE_2D, textureFor(el))
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el)
+      gl.uniform1f(uAlpha, alpha)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     }
+  }
+  // 双缓冲后 rVFC 只能挂一个元素——统一 rAF 驱动（两层都要喂）。
+  const schedule = (): void => {
+    requestAnimationFrame(() => { draw(); schedule() })
   }
   schedule()
 }
@@ -219,15 +257,36 @@ let baseState: BaseState = 'idle'
 let override: 'waiting_approval' | 'waiting_question' | null = null
 let errorUntil = 0
 
+function transitionMsFor(toIdle: boolean): number {
+  const t = bodyTransitions
+  if (t === undefined) return 0
+  return Math.max(0, toIdle ? t.toIdleMs : t.defaultMs)
+}
+
+function switchClip(source: string, loop: boolean, transitionMs: number): void {
+  if (video.src === source) return
+  const outgoing = video
+  const incoming = outgoing === videoB ? video : videoB
+  incoming.src = source
+  incoming.loop = loop
+  void incoming.play().catch(() => { /* autoplay muted: always allowed */ })
+  if (glFailed) {
+    // 无 GL 的降级：可见节点直换（无交叉能力）。
+    incoming.style.display = 'block'
+    outgoing.replaceWith(incoming)
+  } else if (transitionMs > 0) {
+    prevVideo = outgoing
+    fadeStart = performance.now()
+    fadeMs = transitionMs
+  } else {
+    outgoing.pause()
+  }
+  video = incoming
+}
+
 function play(key: string): void {
   const source = animationSource(key)
-  if (video.src !== source) {
-    video.src = source
-    // State animations loop (a state persists until an event changes it);
-    // the celebration is a one-shot that hands back via its ended event.
-    video.loop = key !== 'celebrate'
-    void video.play().catch(() => { /* autoplay muted: always allowed */ })
-  }
+  switchClip(source, key !== 'celebrate', key === 'idle' ? transitionMsFor(true) : transitionMsFor(false))
 }
 
 function render(): void {
@@ -291,6 +350,7 @@ function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirro
     facing = 'right'
     applyFacing()
   }
+  switchClip(source, false, transitionMsFor(false))
   const handBack = (): void => {
     video.onended = null
     video.onerror = null
@@ -317,9 +377,6 @@ function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirro
   }
   video.onended = handBack
   video.onerror = handBack
-  video.loop = false
-  video.src = source
-  void video.play().catch(() => { /* autoplay muted: always allowed */ })
 }
 
 function flashError(): void {
@@ -335,7 +392,7 @@ function flashError(): void {
  * draws from. Populated by the `pet:catalog` push (main sends it once the
  * page has loaded). Entries carry the body 迭代的两个池标记：idleEligible
  * （B02 待机白名单）与 noMirror（B01 文字镜像豁免，来源 text_clips.json）。 */
-type CatalogClip = AnimationName & { id: string; idleEligible?: boolean; noMirror?: boolean }
+type CatalogClip = AnimationName & { id: string; tags?: string[]; idleEligible?: boolean; noMirror?: boolean }
 
 const actionCatalog = new Map<string, CatalogClip>()
 
@@ -344,12 +401,14 @@ globals.petDesktop?.onCatalog?.((catalog) => {
   if (!Array.isArray(entries)) return
   actionCatalog.clear()
   for (const entry of entries) {
-    const record = entry as { id?: unknown; dir?: unknown; file?: unknown; idleEligible?: unknown; noMirror?: unknown }
+    const record = entry as { id?: unknown; dir?: unknown; file?: unknown; tags?: unknown; idleEligible?: unknown; noMirror?: unknown }
     if (typeof record.id !== 'string' || typeof record.dir !== 'string' || typeof record.file !== 'string') continue
+    const entryTags = Array.isArray(record.tags) ? record.tags.filter((t): t is string => typeof t === 'string') : undefined
     actionCatalog.set(record.id, {
       id: record.id,
       dir: record.dir,
       file: record.file,
+      ...(entryTags !== undefined && entryTags.length > 0 ? { tags: entryTags } : {}),
       ...(record.idleEligible === true ? { idleEligible: true } : {}),
       ...(record.noMirror === true ? { noMirror: true } : {}),
     })
@@ -383,6 +442,9 @@ interface BodyIdleConfig {
 
 let theater: TheaterConfig = { enabled: false, gapMinutes: 10 }
 let bodyIdle: BodyIdleConfig | undefined
+let idleBias: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> } | undefined
+let bodyTransitions: { defaultMs: number; toIdleMs: number } | undefined
+let bodyRects: Record<string, readonly number[]> | undefined
 let theaterTimer: ReturnType<typeof setTimeout> | undefined
 let theaterLastFile: string | undefined
 let idleRecent: string[] = []
@@ -401,6 +463,25 @@ function theaterPool(): CatalogClip[] {
 /** B02 池：idleEligible 白名单；facing=left 排除 noMirror；noRepeat 排除
  * 最近 2 个（排除后空则回落全白名单——软化不锁死）。与 pet-app
  * idle-selector.eligibleIdlePool 同语义（渲染层镜像实现）。 */
+/** B06 偏置权重（与 pet-app idle-selector.biasWeightOf 同语义——渲染层镜像
+ * 实现）：最强匹配标签的乘数；无表/窗外 = ×1。 */
+function biasWeightOf(
+  entry: CatalogClip,
+  bias: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> } | undefined,
+  hour: number,
+): number {
+  if (bias === undefined) return 1
+  const [from, to] = bias.hours
+  const inWindow = from <= to ? hour >= from && hour < to : hour >= from || hour < to
+  if (!inWindow) return 1
+  let weight = 1
+  for (const tag of entry.tags ?? []) {
+    const w = bias.weights[tag]
+    if (typeof w === 'number' && Number.isFinite(w) && w > weight) weight = w
+  }
+  return weight
+}
+
 function bodyIdlePool(): CatalogClip[] {
   if (bodyIdle === undefined) return []
   const eligible = [...actionCatalog.values()].filter(entry => entry.idleEligible === true)
@@ -408,8 +489,12 @@ function bodyIdlePool(): CatalogClip[] {
     ? eligible.filter(entry => entry.noMirror !== true)
     : eligible
   const excluded = new Set(idleRecent.slice(0, bodyIdle.noRepeat))
+  // 正在循环播放的 idle 状态片段也排除——抽到它会在 playOneShotAt 里因
+  // src 相同被早退，theater 计时器不再重铺（Phase 1 实测死亡路径）。
+  const playingFile = decodeURIComponent(video.src.split('/').pop() ?? '').replace(/\.webm$/, '')
+  if (playingFile !== '') excluded.add(playingFile)
   const fresh = facingPool.filter(entry => !excluded.has(entry.id))
-  return fresh.length > 0 ? fresh : facingPool
+  return fresh.length > 0 ? fresh : facingPool.filter(entry => entry.id !== playingFile)
 }
 
 const sampleIdleInterval = (bounds: readonly [number, number]): number => {
@@ -438,7 +523,24 @@ function scheduleTheater(): void {
       scheduleTheater()
       return
     }
-    const pick = pool[Math.floor(Math.random() * pool.length)]
+    // B06：时段偏置加权（max-not-product；权重表随 /state 载荷下发）。
+    let pick: CatalogClip | undefined
+    if (bodyIdle !== undefined) {
+      const hour = new Date().getHours()
+      const weights = pool.map(entry => biasWeightOf(entry, idleBias, hour))
+      const total = weights.reduce((sum, w) => sum + w, 0)
+      let roll = Math.random() * total
+      pick = pool[pool.length - 1]
+      for (let i = 0; i < pool.length; i += 1) {
+        roll -= weights[i] ?? 0
+        if (roll < 0) {
+          pick = pool[i]
+          break
+        }
+      }
+    } else {
+      pick = pool[Math.floor(Math.random() * pool.length)]
+    }
     if (pick !== undefined) {
       theaterLastFile = pick.file
       idleRecent.unshift(pick.id)
@@ -604,8 +706,37 @@ async function loadBodyDescription(): Promise<void> {
   try {
     const response = await fetch(`pet-asset:///${CHARACTER}/body.json`)
     if (!response.ok) return
+    type BodyCapabilityWire = {
+      kind?: unknown
+      supported?: unknown
+      intervalMs?: unknown
+      noRepeat?: unknown
+      defaultMs?: unknown
+      toIdleMs?: unknown
+    }
     const raw = await response.json() as {
-      capabilities?: Record<string, { kind?: unknown; supported?: unknown; intervalMs?: unknown; noRepeat?: unknown }>
+      capabilities?: Record<string, BodyCapabilityWire>
+      hitboxes?: { rects?: unknown }
+    }
+    const transition = raw.capabilities?.transition
+    if (transition?.kind === 'transition' && transition.supported === true
+      && typeof transition.defaultMs === 'number' && Number.isFinite(transition.defaultMs)) {
+      bodyTransitions = {
+        defaultMs: Math.min(500, Math.max(0, transition.defaultMs)),
+        toIdleMs: typeof transition.toIdleMs === 'number' && Number.isFinite(transition.toIdleMs)
+          ? Math.min(500, Math.max(0, transition.toIdleMs))
+          : Math.min(500, Math.max(0, transition.defaultMs)),
+      }
+    }
+    const rects = (raw.hitboxes as { rects?: unknown } | undefined)?.rects
+    if (typeof rects === 'object' && rects !== null) {
+      const cleaned: Record<string, readonly number[]> = {}
+      for (const [part, box] of Object.entries(rects as Record<string, unknown>)) {
+        if (Array.isArray(box) && box.length === 4 && box.every(n => typeof n === 'number' && Number.isFinite(n))) {
+          cleaned[part] = box as readonly number[]
+        }
+      }
+      if (Object.keys(cleaned).length > 0) bodyRects = cleaned
     }
     const idle = raw.capabilities?.idle
     if (idle?.kind !== 'idle' || idle.supported !== true) return
@@ -651,13 +782,39 @@ function touchPartOf(clientX: number, clientY: number): string {
   const scale = Math.min(rect.width / 640, rect.height / 360)
   const drawWidth = 640 * scale
   const drawHeight = 360 * scale
-  const videoX = (clientX - rect.left - (rect.width - drawWidth) / 2) / scale
+  const visualX = (clientX - rect.left - (rect.width - drawWidth) / 2) / scale
   const videoY = (clientY - rect.top - (rect.height - drawHeight) / 2) / scale
+  // B01/B03：舞台镜像后，视觉坐标先折回原始帧坐标，再比对 body.json 的矩形
+  //（缺 body.json 回落 head/body 两个既有矩形）。判定顺序 = 特定分区优先。
+  const frameX = facing === 'left' ? 640 - visualX : visualX
+  const rects: Record<string, readonly number[] | readonly (readonly number[])[]> = bodyRects ?? {
+    head: [185, 60, 436, 195],
+    body: [212, 60, 428, 330],
+  }
+  const isRect = (box: readonly unknown[]): boolean =>
+    box.length === 4 && box.every(n => typeof n === 'number' && Number.isFinite(n))
   const inBox = (box: readonly number[]): boolean =>
-    videoX >= box[0] && videoX <= box[2] && videoY >= box[1] && videoY <= box[3]
-  if (inBox([185, 60, 436, 195])) return 'head'
-  if (inBox([212, 60, 428, 330])) return 'body'
-  return 'unknown'
+    frameX >= box[0] && frameX <= box[2] && videoY >= box[1] && videoY <= box[3]
+  // 判定顺序 = 特定分区优先；一个分区允许多矩形（尾巴的双侧尾鳍）。
+  for (const part of ['tail', 'hand', 'head', 'body']) {
+    const shape = rects[part]
+    if (shape === undefined) continue
+    if (isRect(shape as readonly unknown[])) {
+      if (inBox(shape as readonly number[])) return part
+      continue
+    }
+    for (const box of shape as readonly (readonly number[])[]) {
+      if (inBox(box)) return part
+    }
+  }
+  return 'body' // B03 有意变更：unknown 兜底改按 body
+}
+
+/** B03 分区专属反应：尾巴 → 吐泡泡（吐魂近似），手 → 元气挥手；其余走通用
+ * 点击回应组。片段经 catalog 解析，未收录时回落通用组。 */
+const PART_REACTIONS: Record<string, readonly string[]> = {
+  tail: ['鲸鱼吐泡泡特效'],
+  hand: ['点击回应-元气挥手'],
 }
 
 /** A completed gesture that never moved far nor lasted long is a touch. */
@@ -672,9 +829,17 @@ const CLICK_MAX_MS = 500
 let touchReportTimer: ReturnType<typeof setTimeout> | undefined
 function handleTouch(clientX: number, clientY: number): void {
   const part = touchPartOf(clientX, clientY)
-  const reactions = ANIMATION.touch
-  if (reactions !== undefined && reactions.length > 0 && override === null && Date.now() >= errorUntil) {
-    playOneShotAt(reactions[Math.floor(Math.random() * reactions.length)])
+  const named = PART_REACTIONS[part]
+    ?.map(name => actionCatalog.get(name))
+    .filter((entry): entry is CatalogClip => entry !== undefined)
+  const reactions: CatalogClip[] = named !== undefined && named.length > 0
+    ? named
+    : ANIMATION.touch.map(entry => ({ ...entry, id: entry.file }))
+  if (reactions.length > 0 && override === null && Date.now() >= errorUntil) {
+    const pick = reactions[Math.floor(Math.random() * reactions.length)]
+    if (pick !== undefined) {
+      playOneShotAt(pick, undefined, pick.noMirror === true ? { noMirror: true } : undefined)
+    }
   }
   if (touchReportTimer !== undefined) clearTimeout(touchReportTimer)
   touchReportTimer = setTimeout(() => {
@@ -698,6 +863,9 @@ petBody.addEventListener('pointerdown', (event) => {
     petBody.removeEventListener('pointerup', onUp)
     petBody.removeEventListener('pointercancel', onUp)
     globals.petDesktop?.dragEnd()
+    // B07 落定回弹：释放后 340ms 的轻微压缩-恢复，不引入物理。
+    petBody.classList.add('settle')
+    setTimeout(() => { petBody.classList.remove('settle') }, 380)
     const moved = Math.hypot(up.screenX - startX, up.screenY - startY)
     if (moved <= CLICK_MAX_DISTANCE && Date.now() - startAt <= CLICK_MAX_MS) {
       handleTouch(up.clientX, up.clientY)

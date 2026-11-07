@@ -66,3 +66,47 @@ export async function readRhythmConfig(home: string): Promise<RhythmConfig> {
     return {}
   }
 }
+
+// ── B06 时辰偏置（身体迭代 Phase 3）：待机选片的时段权重表 ──────────────────
+// 单一来源 = driver rhythm（REQ-B06 裁定）；渲染层只消费随 /state 载荷下发的
+// 表，自身不判"凌晨"。默认表：凌晨（01:00–06:00）安静系 ×1.5、活跃系 ×0.5。
+
+export interface IdleBiasConfig {
+  /** 本地小时窗口 [from, to)，from > to 表示跨午夜。 */
+  readonly hours: readonly [number, number]
+  /** 标签 → 权重乘数（≥0）；表外标签 ×1；片段取最强匹配（max，非乘积）。 */
+  readonly weights: Readonly<Record<string, number>>
+}
+
+/** B06 默认表：凌晨安静系 ×1.5、活跃系 ×0.5。 */
+export const DEFAULT_IDLE_BIAS: IdleBiasConfig = {
+  hours: [1, 6],
+  weights: { 疲惫: 1.5, 待机: 1.5, 放松: 1.5, 运动: 0.5, 娱乐: 0.5, 才艺: 0.5 },
+}
+
+const isWeightTable = (value: unknown): value is Record<string, number> =>
+  typeof value === 'object' && value !== null
+  && Object.entries(value).every(([key, w]) => key !== '' && typeof w === 'number' && Number.isFinite(w) && w >= 0)
+
+/** Read `rhythm.idleBias` from pet-settings.json. Absent/invalid = 默认表；
+ * 显式 `null` = 关闭（渲染层均匀随机）。 */
+export async function readIdleBias(home: string): Promise<IdleBiasConfig | undefined> {
+  try {
+    const raw = await readGlobalJson(home, 'pet-settings.json') as {
+      rhythm?: { idleBias?: unknown }
+    }
+    const configured = raw.rhythm?.idleBias
+    if (configured === null) return undefined
+    if (typeof configured !== 'object' || configured === null) return DEFAULT_IDLE_BIAS
+    const record = configured as { hours?: unknown; weights?: unknown }
+    const hours = Array.isArray(record.hours)
+      && record.hours.length === 2
+      && record.hours.every(h => typeof h === 'number' && Number.isInteger(h) && h >= 0 && h <= 23)
+      ? ([record.hours[0] as number, record.hours[1] as number] as const)
+      : undefined
+    if (hours === undefined || !isWeightTable(record.weights)) return DEFAULT_IDLE_BIAS
+    return { hours, weights: record.weights }
+  } catch {
+    return DEFAULT_IDLE_BIAS
+  }
+}

@@ -101,7 +101,7 @@ import {
   type PresenceCounts,
   type PresenceFacts,
 } from './presence.ts'
-import { isQuietAt, readRhythmConfig } from './rhythm.ts'
+import { isQuietAt, readIdleBias, readRhythmConfig } from './rhythm.ts'
 import { isActionComplete, type PetService } from './service.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -1096,7 +1096,11 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
    * change reaches the pet on the next push without any cache) and folded
    * into the dedup key so a changed payload re-pushes.
    */
-  const readAutonomy = async (): Promise<{ idleAnimation: boolean; gapMinutes: number }> => {
+  const readAutonomy = async (): Promise<{
+    idleAnimation: boolean
+    gapMinutes: number
+    idleBias?: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> }
+  }> => {
     try {
       const raw = await petdata.readGlobalJson(home, 'pet-settings.json') as {
         proactivity?: { idleAnimation?: unknown; idleAnimationGapMinutes?: unknown }
@@ -1105,9 +1109,16 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
       const gap = typeof p?.idleAnimationGapMinutes === 'number' && Number.isFinite(p.idleAnimationGapMinutes)
         ? Math.min(120, Math.max(1, Math.round(p.idleAnimationGapMinutes)))
         : 10
-      return { idleAnimation: p?.idleAnimation !== false, gapMinutes: gap }
+      // B06：时段偏置表随载荷下发（单一来源 = rhythm 配置，渲染层只消费）。
+      const idleBias = await readIdleBias(home)
+      return {
+        idleAnimation: p?.idleAnimation !== false,
+        gapMinutes: gap,
+        ...(idleBias === undefined ? {} : { idleBias }),
+      }
     } catch {
-      return { idleAnimation: true, gapMinutes: 10 }
+      const idleBias = await readIdleBias(home)
+      return { idleAnimation: true, gapMinutes: 10, ...(idleBias === undefined ? {} : { idleBias }) }
     }
   }
 
@@ -1123,7 +1134,11 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
   const sendState = async (
     target: PetEntry,
     state: 'idle' | 'thinking' | 'working' | 'error',
-    autonomy: { idleAnimation: boolean; gapMinutes: number },
+    autonomy: {
+      idleAnimation: boolean
+      gapMinutes: number
+      idleBias?: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> }
+    },
     autonomyKey: string,
   ): Promise<void> => {
     const last = lastPushedByPet.get(target.id)

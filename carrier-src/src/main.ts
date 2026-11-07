@@ -71,6 +71,7 @@ async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
     const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
     const map = new Map<string, ActionTagMeta>()
     for (const [id, value] of Object.entries(raw)) {
+      if (id.startsWith('_')) continue // B05：_meta 容器不是片段
       if (typeof value !== 'object' || value === null) continue
       const record = value as Record<string, unknown>
       const tags = Array.isArray(record.tags)
@@ -165,7 +166,7 @@ async function scanActionCatalog(): Promise<CatalogEntry[]> {
   }
   const tags = await readActionTags()
   const noMirror = await readNoMirrorClips(videosRoot)
-  return entries.map(entry => {
+  return entries.map((entry) => {
     const merged = { ...entry, ...(tags.get(entry.id) ?? {}) }
     return noMirror.has(entry.id) ? { ...merged, noMirror: true } : merged
   })

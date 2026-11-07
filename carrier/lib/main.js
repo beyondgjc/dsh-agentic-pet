@@ -43,6 +43,8 @@ async function readActionTags() {
         const raw = JSON.parse(await readFile(file, 'utf8'));
         const map = new Map();
         for (const [id, value] of Object.entries(raw)) {
+            if (id.startsWith('_'))
+                continue; // B05：_meta 容器不是片段
             if (typeof value !== 'object' || value === null)
                 continue;
             const record = value;

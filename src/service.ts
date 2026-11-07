@@ -55,7 +55,17 @@ export interface PetSnapshot {
    * applies); object = in effect. The invariant holds per implementation:
    * location always sits inside a set world. */
   readonly world?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null | undefined
+  /** body 迭代 B08：身体的实时自感状态（carrier 产出，防御提取——老身体整键缺席）。 */
+  readonly bodyRuntime?: PetBodyRuntime | undefined
   readonly pid?: number | undefined
+}
+
+/** B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段。所有字段可选——
+ * 载体按能力逐项上报。 */
+export interface PetBodyRuntime {
+  readonly facing?: 'left' | 'right' | undefined
+  readonly idleNextAt?: number | undefined
+  readonly lastClip?: string | undefined
 }
 
 /** The v3 action witness: accepted-on-write four fields, completion backfilled
@@ -157,6 +167,7 @@ export function normalizeStatus(id: string, raw: Record<string, unknown>, online
   // v2 three-state world: the KEY's absence means "unsupported" (a distinct
   // value from an explicit null = "unset, defaults apply").
   const world = !('world' in raw) ? undefined : (rectOf(raw.world) ?? null)
+  const bodyRuntime = normalizeBodyRuntime(raw)
   return {
     id,
     online,
@@ -168,7 +179,26 @@ export function normalizeStatus(id: string, raw: Record<string, unknown>, online
     lastAction: normalizeLastAction(raw),
     location,
     world,
+    ...(bodyRuntime === undefined ? {} : { bodyRuntime }),
     pid: typeof raw.pid === 'number' ? raw.pid : undefined,
+  }
+}
+
+/** B08 bodyRuntime 防御提取：三字段逐个判型，全空 = 老身体（键缺席）。 */
+function normalizeBodyRuntime(raw: Record<string, unknown>): PetBodyRuntime | undefined {
+  const value = raw.bodyRuntime
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const facing = record.facing === 'left' || record.facing === 'right' ? record.facing : undefined
+  const idleNextAt = typeof record.idleNextAt === 'number' && Number.isFinite(record.idleNextAt)
+    ? record.idleNextAt
+    : undefined
+  const lastClip = typeof record.lastClip === 'string' && record.lastClip !== '' ? record.lastClip : undefined
+  if (facing === undefined && idleNextAt === undefined && lastClip === undefined) return undefined
+  return {
+    ...(facing === undefined ? {} : { facing }),
+    ...(idleNextAt === undefined ? {} : { idleNextAt }),
+    ...(lastClip === undefined ? {} : { lastClip }),
   }
 }
 
