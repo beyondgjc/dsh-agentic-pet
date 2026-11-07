@@ -365,7 +365,12 @@ globals.petDesktop?.onCatalog?.((catalog) => {
   if (typeof pushedBody === 'object' && pushedBody !== null) {
     applyBodyDescription(pushedBody as Record<string, unknown>)
   }
-  scheduleTheater()
+  // 启动竞速修复：渲染层 boot 时的首份 status 报告早于 main 注册
+  // 'pet:status-report'，会丢——且 reportedSnapshot 已被置位，等值补报会被
+  // 去重静默跳过（实测：/status 冻结在初始值、bodyRuntime 消失的根因）。
+  // 清掉去重位强制重发。
+  reportedSnapshot = ''
+  reportStatus()
 })
 
 /**
