@@ -494,7 +494,9 @@ async function main() {
     const actionTagVocabulary = [...new Set(actionCatalog.flatMap(entry => entry.tags ?? []))];
     const tagged = actionCatalog.some(entry => (entry.tags?.length ?? 0) > 0);
     const bodyDocument = await readBodyDocument();
-    console.log(`[pet] assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)} body=${bodyDocument === null ? 'none' : String(bodyDocument.schema ?? 'missing-schema')}`);
+    const bootLine = `[pet] boot: assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)} body=${bodyDocument === null ? 'none' : String(bodyDocument.schema ?? 'missing-schema')}`;
+    console.log(bootLine);
+    __bootLog(bootLine); // carrier-boot.log：启动标记 = "跑的是哪一版"的地面真值
     let handle;
     const attachUrl = process.env.DSH_PET_URL ?? await readLocatorUrl();
     let authenticated;

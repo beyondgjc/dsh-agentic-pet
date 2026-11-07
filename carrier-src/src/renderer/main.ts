@@ -705,12 +705,13 @@ function applyBodyDescription(raw: Record<string, unknown>): void {
     if (Object.keys(cleaned).length > 0) bodyRects = cleaned
   }
   const idle = capabilities?.idle
-  if (idle?.kind !== 'idle' || idle.supported !== true) return
-  const interval = Array.isArray(idle.intervalMs) ? idle.intervalMs : []
-  const min = interval[0]
-  const max = interval[1]
-  if (typeof min !== 'number' || !Number.isFinite(min)
-    || typeof max !== 'number' || !Number.isFinite(max) || min >= max) return
+  const interval: readonly unknown[] = Array.isArray(idle?.intervalMs) ? idle.intervalMs : []
+  const min = typeof interval[0] === 'number' && Number.isFinite(interval[0]) ? interval[0] : undefined
+  const max = typeof interval[1] === 'number' && Number.isFinite(interval[1]) ? interval[1] : undefined
+  const idleOk = idle?.kind === 'idle' && idle.supported === true
+    && min !== undefined && max !== undefined && min < max
+  console.info(`[pet-body] 应用完成：idle=${idleOk ? `${String(min)}-${String(max)}ms` : '未声明（待机走 legacy 节奏）'}，hitboxes=${Object.keys(bodyRects ?? {}).join('+') || '无'}`)
+  if (!idleOk) return
   bodyIdle = {
     intervalMs: [min, max],
     noRepeat: typeof idle.noRepeat === 'number' && Number.isInteger(idle.noRepeat) && idle.noRepeat >= 1
