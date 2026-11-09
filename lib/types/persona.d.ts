@@ -25,6 +25,13 @@
  * @module dsh-agentic-pet/persona
  */
 import type { Context } from '@deepseek-ai/cordis';
+/** Cordis plugin name. */
+export declare const name = "persona";
+/** The prompt registry this row contributes to. Without this declaration the
+ * traceable proxy rejects `ctx.systemPrompt` ("cannot get property ... without
+ * inject") and the whole preset fails to mount — taking every pet session's
+ * resume down with it. */
+export declare const inject: string[];
 /**
  * The default character card: the identity sentence both preset prefixes
  * shipped, minus the `（由 {{model}} 驱动）` parenthetical (a strict

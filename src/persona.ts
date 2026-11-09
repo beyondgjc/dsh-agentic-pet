@@ -30,6 +30,15 @@ import type { Context } from '@deepseek-ai/cordis'
 import { globalPaths } from './petdata.ts'
 import { petHome } from './service.ts'
 
+/** Cordis plugin name. */
+export const name = 'persona'
+
+/** The prompt registry this row contributes to. Without this declaration the
+ * traceable proxy rejects `ctx.systemPrompt` ("cannot get property ... without
+ * inject") and the whole preset fails to mount — taking every pet session's
+ * resume down with it. */
+export const inject = ['systemPrompt']
+
 /**
  * Structural face of the host's prompt registry — only the two members this
  * row needs. The authoritative declarations live in
