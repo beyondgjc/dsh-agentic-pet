@@ -518,13 +518,18 @@ window.__ModuleLoader__.load({
               var book = (affection && affection[id]) || { affection: 0, total: 0 }
               var name = petName(id)
               var revealed = !!affectionReveal[id]
-              var bondDays = book.bond ? (book.bond.value ?? book.bond.days ?? 0) : 0
+              // 羁绊两个字段分开显示（与账本的双写者设计对齐）：value 是模型
+              // 的判断分（tier 由它推导），days 是一起过过的天数（系统事实）。
+              // 此前 value ?? days 混取一格再标「天」——模型的判断分被读成
+              // 相处天数，真正的天数反而看不见。
+              var bondValue = book.bond ? (book.bond.value ?? 0) : 0
+              var bondDays = book.bond ? (book.bond.days ?? 0) : 0
               return h('div', { key: id, style: row },
                 h('span', { style: { fontWeight: 700 } }, name),
                 h('span', { style: revealed ? { fontSize: 18, fontWeight: 700 } : { fontSize: 16, letterSpacing: 4, color: 'rgba(127,127,127,.95)' } },
                   revealed ? String(book.affection ?? 0) : '★★★★★★'),
-                revealed ? h('span', { style: muted }, '/ 100 · ' + moodOf(book.affection ?? 0) + ' · 羁绊：' + bondTier(bondDays) + '（' + String(bondDays) + ' 天）') : null,
-                revealed ? h('span', { style: muted }, '累计 ' + String(book.total ?? 0) + ' 次') : null,
+                revealed ? h('span', { style: muted }, '/ 100 · ' + moodOf(book.affection ?? 0) + ' · 羁绊：' + bondTier(bondValue) + '（羁绊 ' + String(bondValue) + ' · 一起过 ' + String(bondDays) + ' 天）') : null,
+                revealed ? h('span', { style: muted }, '累计触摸 ' + String(book.total ?? 0) + ' 次') : null,
                 h('button', {
                   type: 'button',
                   title: revealed ? '隐藏好感度' : '显示好感度',
