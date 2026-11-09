@@ -322,6 +322,10 @@ function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirro
   video.onerror = handBack
   video.loop = false
   video.src = source
+  // past the same-src early return above: the stage really changed — record
+  // it for bodyRuntime.lastClip (the "最近播放的片段" the B08 docstring
+  // promises; a video.src snapshot structurally misses the gesture window).
+  lastPlayedClip = `${name.file}.webm`
   void video.play().catch(() => { /* autoplay muted: always allowed */ })
 }
 
@@ -406,6 +410,12 @@ let theaterTimer: ReturnType<typeof setTimeout> | undefined
 let theaterLastFile: string | undefined
 let idleRecent: string[] = []
 let idleNextAt = 0
+// bodyRuntime.lastClip 的来源：最近一次换上舞台的 one-shot 片段（小动作/
+// 触摸反应//action/celebrate）。基础循环的换回（handback → play(baseState)）
+// 不改写它——否则 lastClip 会退回"当前 src 快照"，小动作的几秒窗口外取
+// 样永远只拍到 待机呼吸休闲（2026-11-10 实测诊断：idleNextAt 在跳、
+// lastClip 18 秒纹丝不动）。存 `.webm` 全名，与旧快照格式一致。
+let lastPlayedClip = ''
 // A one-shot in flight (touch reaction, /action, a theater clip itself): the
 // pending timer must not hijack the stage mid-clip.
 let oneShotActive = false
@@ -1001,13 +1011,15 @@ globals.petDesktop?.onSay((notice) => {
 
 let reportedSnapshot = ''
 const reportStatus = (): void => {
-  // B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段（与 animation
-  // 同源）。transitionMs 等 B04 落地后再加。
+  // B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段。lastClip 读
+  // lastPlayedClip（最近一次 one-shot，不被基础循环的换回覆盖）——`clip`
+  // 是当前 src 快照，只供 animation 字段用；快照口径曾让 lastClip 在小动
+  // 作窗口外永远显示基础循环，失去"她刚才做了什么"的信息量。
   const clip = decodeURIComponent(video.src.split('/').pop() ?? '')
   const bodyRuntime = {
     facing,
     ...(idleNextAt > 0 ? { idleNextAt } : {}),
-    ...(clip !== '' ? { lastClip: clip } : {}),
+    ...(lastPlayedClip !== '' ? { lastClip: lastPlayedClip } : {}),
   }
   const snapshot = JSON.stringify({ state: baseState, override, animation: clip, bodyRuntime })
   if (snapshot === reportedSnapshot) return
