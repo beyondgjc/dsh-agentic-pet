@@ -244,6 +244,12 @@ export interface WakePromptFacts {
         fromName: string;
         count: number;
     }>;
+    /** 客厅记事板新字（多宠设计 §5，反收音机）：只报数与来源——全文在
+     * pet_board read 后面；注入即已读，不重复注入，也不打断。 */
+    boardUnread?: {
+        count: number;
+        fromNames: string[];
+    };
     /** 静默时段：只压制世界时钟；自主唤醒仍触发，prompt 说明用户可能已睡。 */
     quiet?: boolean;
     /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */

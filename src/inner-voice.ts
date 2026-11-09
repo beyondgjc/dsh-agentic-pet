@@ -613,6 +613,9 @@ export interface WakePromptFacts {
   /** 收件箱未读（按来源宠聚合）：prompt 只报数不携全文——想看就调
    * pet_inbox，读不读由她决定（宠物间消息的排队投递侧）。 */
   unread?: Array<{ fromName: string; count: number }>
+  /** 客厅记事板新字（多宠设计 §5，反收音机）：只报数与来源——全文在
+   * pet_board read 后面；注入即已读，不重复注入，也不打断。 */
+  boardUnread?: { count: number; fromNames: string[] }
   /** 静默时段：只压制世界时钟；自主唤醒仍触发，prompt 说明用户可能已睡。 */
   quiet?: boolean
   /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */
@@ -683,6 +686,13 @@ export function buildWakePrompt(facts: WakePromptFacts): string {
   if (unreadTotal > 0) {
     lines.push(
       `你有 ${String(unreadTotal)} 条未读消息（来自${unread.map(entry => ` ${entry.fromName}×${String(entry.count)}`).join('、')}），想看就调 pet_inbox，不理也行。`,
+    )
+  }
+  const boardUnread = facts.boardUnread
+  if (boardUnread !== undefined && boardUnread.count > 0) {
+    const froms = boardUnread.fromNames.join('、')
+    lines.push(
+      `客厅记事板上有 ${String(boardUnread.count)} 条新字${froms === '' ? '' : `（来自 ${froms}）`}，想看就调 pet_board op:"read"，不理也行。`,
     )
   }
   if (facts.quiet === true) {
