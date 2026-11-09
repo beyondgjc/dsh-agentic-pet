@@ -13,11 +13,21 @@
  * @module dsh-agentic-pet/instances
  */
 
+import { join } from 'node:path'
 import { WHALE_DIR, readGlobalJson, writeGlobalJson } from './petdata.ts'
 
 export const INSTANCES_FILE = 'multi-instances.json'
 export const PRIMARY_PET_ID = 'electron'
 export const DEFAULT_MAX_INSTANCES = 3
+
+/** The desktop placement stagger ordinal: electron = 0, electron-N = N-1.
+ * THE shape knowledge for extra-instance ids lives here (isExtraInstanceId /
+ * instanceSlotOf / nextInstanceId) — call sites must not re-parse the id. */
+export function instanceSlotOf(petId: string): number {
+  if (petId === PRIMARY_PET_ID) return 0
+  const ordinal = Number(petId.split('-')[1] ?? Number.NaN)
+  return Number.isInteger(ordinal) && ordinal >= 2 ? ordinal - 1 : 0
+}
 
 export interface InstancePlan {
   maxInstances: number
@@ -48,6 +58,34 @@ export async function writeInstancePlan(home: string, plan: InstancePlan): Promi
     maxInstances: plan.maxInstances,
     instances: plan.instances,
   } as unknown as Record<string, unknown>)
+}
+
+/** Serialize desired-set read-modify-writes per home (board.ts lock
+ * precedent): two concurrent summons both read the plan, both push, and the
+ * last write would drop the other's instance from the desired set. The
+ * callback receives the freshly-read plan, mutates it, and returns
+ * `{ value, plan }` — the plan is written back inside the lock. */
+const planQueues = new Map<string, Promise<unknown>>()
+
+export function withInstancePlanLock<T>(
+  home: string,
+  fn: (plan: InstancePlan) => { value: T; plan: InstancePlan },
+): Promise<T> {
+  const key = join(home, WHALE_DIR, INSTANCES_FILE)
+  const previous = planQueues.get(key) ?? Promise.resolve()
+  const run = previous.then(async () => {
+    const plan = await readInstancePlan(home)
+    const outcome = fn(plan)
+    await writeInstancePlan(home, outcome.plan)
+    return outcome.value
+  }, async () => {
+    const plan = await readInstancePlan(home)
+    const outcome = fn(plan)
+    await writeInstancePlan(home, outcome.plan)
+    return outcome.value
+  })
+  planQueues.set(key, run.then(() => undefined, () => undefined))
+  return run
 }
 
 /** Next free instance id: electron-2, electron-3… — the lowest ordinal that

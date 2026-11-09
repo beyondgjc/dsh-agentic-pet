@@ -105,4 +105,7 @@ export declare function isPetWorkspace(cwd: string | undefined | null, root: str
 export declare function sessionOccupiedBy(sessionId: string, selfPetId: string, boundSessions: Record<string, string>, storeSessions: Record<string, {
     sessionId?: string;
 }>): string | undefined;
+/** The machine token for an occupied-session refusal (one spelling for the
+ * reconcile error, the test answer, and the client's prefix parse). */
+export declare function sessionOccupiedTag(occupiedBy: string): string;
 //# sourceMappingURL=binding.d.ts.map

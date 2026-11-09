@@ -40,6 +40,7 @@ import {
   type VoiceBindingSnapshot,
   type VoiceBindingView,
   sessionOccupiedBy,
+  sessionOccupiedTag,
 } from './binding.ts'
 import {
   BOARD_TEXT_LIMIT,
@@ -112,6 +113,7 @@ import {
   type PresenceFacts,
 } from './presence.ts'
 import { isQuietAt, readIdleBias, readRhythmConfig } from './rhythm.ts'
+import { PRIMARY_PET_ID } from './instances.ts'
 import { isActionComplete, type PetService } from './service.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -827,14 +829,14 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
   // pet-window.json is a single object (no petId keys) — it IS the electron
   // carrier's window position; the split hands it to the per-pet file.
   void petdata.migrateGlobalSplits(home, 'pet-window.json', (global, petId) => {
-    if (petId !== 'electron' || Object.keys(global).length === 0) return undefined
+    if (petId !== PRIMARY_PET_ID || Object.keys(global).length === 0) return undefined
     return { ...global }
   })
   // The known-pet-id sweep: allKnownPetIds() must not hardcode pet kinds —
   // ids are discovered from the registry and the pet directories, then kept
   // fresh on a slow cadence (new instances join without a restart).
   const refreshKnownPetIds = async (): Promise<void> => {
-    const ids = new Set<string>(['electron'])
+    const ids = new Set<string>([PRIMARY_PET_ID])
     try {
       for (const id of await petdata.existingPetIds(home)) ids.add(id)
     } catch { /* directory scan is best-effort */ }
@@ -1475,7 +1477,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
         }
         if (occupiedBy !== undefined) {
           state.usable = false
-          state.lastError = `session-occupied-by:${occupiedBy}`
+          state.lastError = sessionOccupiedTag(occupiedBy)
           attach = {
             ok: false,
             errorCode: 'session-occupied',
@@ -1546,7 +1548,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
       // speaking via its own session, but the page must show WHY the manual
       // binding was refused.
       if (occupiedBy !== undefined) {
-        state.lastError = `session-occupied-by:${occupiedBy}`
+        state.lastError = sessionOccupiedTag(occupiedBy)
         state.fallback = true
       }
       if (effective !== undefined) {
@@ -2592,7 +2594,7 @@ ${text}`
         if (occupiedBy !== undefined) {
           const binding = voiceBindingView(petId)
           binding.usable = false
-          binding.lastError = `session-occupied-by:${occupiedBy}`
+          binding.lastError = sessionOccupiedTag(occupiedBy)
           return { ok: false, petId, sessionId: configured, binding }
         }
         attachRetryAfter.delete(configured)

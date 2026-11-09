@@ -47,6 +47,23 @@ const PET_SLOT = Number.isFinite(Number(process.env.DSH_PET_SLOT))
 /** This pet's per-pet state file (whale598/<PET_ID>/<name>) — the carrier's
  * own state follows the plugin's whale598 ownership rule. */
 const petStateFile = (name) => join(DSH_HOME, 'whale598', PET_ID, name);
+/** First parseable JSON file in a layout chain (per-pet file → whale598 root
+ * → ~/.dsh root). The per-site `parse` validates the shape; a layer that
+ * parses but fails validation yields undefined and the next layer answers —
+ * same contract as the plugin's petStatePaths/readPetStateJson chain. */
+function readFirstJson(files, parse) {
+    for (const file of files) {
+        try {
+            const parsed = parse(JSON.parse(readFileSync(file, 'utf8')));
+            if (parsed !== undefined)
+                return parsed;
+        }
+        catch {
+            // Missing or unreadable layout: try the next one.
+        }
+    }
+    return undefined;
+}
 /**
  * The character the pet page displays. Keep in sync with
  * src/renderer/main.ts (no shared module: the renderer is a separate vite
@@ -228,18 +245,12 @@ process.on('unhandledRejection', (reason) => {
 let cdpRequested = process.env.DSH_PET_CDP === '1';
 try {
     // pet-settings.json is plugin-level global state: the whale598 copy is
-    // current, the ~/.dsh root copy is the pre-migration legacy layer.
-    for (const file of [join(DSH_HOME, 'whale598', 'pet-settings.json'), join(DSH_HOME, 'pet-settings.json')]) {
-        try {
-            const settings = JSON.parse(readFileSync(file, 'utf8'));
-            if (settings.debug?.cdp === true)
-                cdpRequested = true;
-            break;
-        }
-        catch {
-            // Try the next layout.
-        }
-    }
+    // current, the ~/.dsh root copy is the pre-migration legacy layer. The
+    // first parseable layer wins, whatever the flag says (matches the
+    // settings-page's own read order).
+    const settings = readFirstJson([join(DSH_HOME, 'whale598', 'pet-settings.json'), join(DSH_HOME, 'pet-settings.json')], (raw) => (typeof raw === 'object' && raw !== null ? raw : undefined));
+    if (settings?.debug?.cdp === true)
+        cdpRequested = true;
 }
 catch {
     // Absent or unreadable settings: env is the only request channel.
@@ -444,43 +455,31 @@ function petSurfaceUrl(authenticated) {
 function readSavedPosition() {
     // Per-pet file first (whale598/<PET_ID>/), then the two migration layers
     // (whale598 root, ~/.dsh root) — pre-split writes still answer.
-    for (const file of [petStateFile('pet-window.json'), join(DSH_HOME, 'whale598', 'pet-window.json'), join(DSH_HOME, 'pet-window.json')]) {
-        try {
-            const parsed = JSON.parse(readFileSync(file, 'utf8'));
-            const x = typeof parsed.x === 'number' ? Math.round(parsed.x) : Number.NaN;
-            const y = typeof parsed.y === 'number' ? Math.round(parsed.y) : Number.NaN;
-            if (!Number.isFinite(x) || !Number.isFinite(y))
-                continue;
-            const fits = (area) => x >= area.x && y >= area.y
-                && x + WINDOW_SIZE.width <= area.x + area.width
-                && y + WINDOW_SIZE.height <= area.y + area.height;
-            if (screen.getAllDisplays().some(display => fits(display.workArea)))
-                return { x, y };
-            const primary = screen.getPrimaryDisplay().workArea;
-            return {
-                x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
-                y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
-            };
-        }
-        catch {
-            // Missing or unreadable layout: try the next one.
-        }
-    }
-    return undefined;
+    const coords = readFirstJson([petStateFile('pet-window.json'), join(DSH_HOME, 'whale598', 'pet-window.json'), join(DSH_HOME, 'pet-window.json')], (raw) => {
+        const record = raw;
+        const x = typeof record.x === 'number' ? Math.round(record.x) : Number.NaN;
+        const y = typeof record.y === 'number' ? Math.round(record.y) : Number.NaN;
+        return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined;
+    });
+    if (coords === undefined)
+        return undefined;
+    const { x, y } = coords;
+    const fits = (area) => x >= area.x && y >= area.y
+        && x + WINDOW_SIZE.width <= area.x + area.width
+        && y + WINDOW_SIZE.height <= area.y + area.height;
+    if (screen.getAllDisplays().some(display => fits(display.workArea)))
+        return { x, y };
+    const primary = screen.getPrimaryDisplay().workArea;
+    return {
+        x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
+        y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
+    };
 }
 /** The persisted roaming area (§6 /world): `pet-world.json` holds the
  * effective rect or an explicit null (unset). Anything unreadable or
  * mistyped degrades to unset — the default work-area clamping applies. */
 function readSavedWorld() {
-    for (const file of [petStateFile('pet-world.json'), join(DSH_HOME, 'whale598', 'pet-world.json'), join(DSH_HOME, 'pet-world.json')]) {
-        try {
-            return rectOf(JSON.parse(readFileSync(file, 'utf8')));
-        }
-        catch {
-            // Missing or unreadable layout: try the next one.
-        }
-    }
-    return null;
+    return readFirstJson([petStateFile('pet-world.json'), join(DSH_HOME, 'whale598', 'pet-world.json'), join(DSH_HOME, 'pet-world.json')], (raw) => rectOf(raw)) ?? null;
 }
 function createPetWindow() {
     const saved = readSavedPosition();

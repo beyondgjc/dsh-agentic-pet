@@ -36,6 +36,7 @@ export interface Board {
 export declare function parseBoard(raw: Record<string, unknown>): Board;
 export declare function readBoard(home: string): Promise<Board>;
 export declare function writeBoard(home: string, board: Board): Promise<void>;
+export declare function withBoardLock<T>(home: string, fn: () => Promise<T>): Promise<T>;
 /** Leave one note (from = the writing pet). Newest first; the board rolls
  * past the cap (oldest notes drop — a corkboard, not an archive). */
 export declare function leaveNote(home: string, petId: string, text: string, at?: number): Promise<BoardNote>;

@@ -15,6 +15,10 @@
 export declare const INSTANCES_FILE = "multi-instances.json";
 export declare const PRIMARY_PET_ID = "electron";
 export declare const DEFAULT_MAX_INSTANCES = 3;
+/** The desktop placement stagger ordinal: electron = 0, electron-N = N-1.
+ * THE shape knowledge for extra-instance ids lives here (isExtraInstanceId /
+ * instanceSlotOf / nextInstanceId) — call sites must not re-parse the id. */
+export declare function instanceSlotOf(petId: string): number;
 export interface InstancePlan {
     maxInstances: number;
     instances: string[];
@@ -24,6 +28,10 @@ export interface InstancePlan {
 export declare function parseInstancePlan(raw: Record<string, unknown>): InstancePlan;
 export declare function readInstancePlan(home: string): Promise<InstancePlan>;
 export declare function writeInstancePlan(home: string, plan: InstancePlan): Promise<void>;
+export declare function withInstancePlanLock<T>(home: string, fn: (plan: InstancePlan) => {
+    value: T;
+    plan: InstancePlan;
+}): Promise<T>;
 /** Next free instance id: electron-2, electron-3… — the lowest ordinal that
  * collides with neither the taken ids nor the running ones. */
 export declare function nextInstanceId(taken: Iterable<string>): string;

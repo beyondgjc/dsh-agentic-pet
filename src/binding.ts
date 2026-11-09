@@ -159,3 +159,9 @@ export function sessionOccupiedBy(
   }
   return undefined
 }
+
+/** The machine token for an occupied-session refusal (one spelling for the
+ * reconcile error, the test answer, and the client's prefix parse). */
+export function sessionOccupiedTag(occupiedBy: string): string {
+  return `session-occupied-by:${occupiedBy}`
+}

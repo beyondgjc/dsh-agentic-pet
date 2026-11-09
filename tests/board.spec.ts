@@ -5,6 +5,7 @@
  * per-pet state in the pet's own directory (whale598/<petId>/).
  */
 
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +14,7 @@ import {
   BOARD_NOTE_LIMIT,
   leaveNote,
   parseBoard,
+  readBoard,
   readBoardCursor,
   replyNote,
   unseenBoardItems,
@@ -49,11 +51,6 @@ describe('parseBoard', () => {
 })
 
 describe('notes and replies', () => {
-  it('caps the board at 20 notes (oldest drops) and clamps text to 200', () => {
-    const home = homes[0] ?? ''
-    // filled lazily in the test below via tempHome — use a dedicated one
-  })
-
   it('leaves notes newest-first and rolls the oldest past the cap', async () => {
     const home = await tempHome()
     for (let i = 0; i < BOARD_NOTE_LIMIT + 2; i += 1) {
@@ -124,6 +121,29 @@ describe('unseen and cursor', () => {
     await writeBoardCursor(home, 'electron', 42)
     const raw = await import('../src/petdata.ts').then(m => m.readPetStateJson(home, 'electron', 'pet-board-cursor.json'))
     expect(raw).toEqual({ seenAt: 42 })
-    expect(join(home, 'whale598', 'electron')).toContain('whale598')
+    // The cursor FILE lives in the pet's own directory (whale598/<petId>/) —
+    // the layout is the assertion, not the path string we built it from.
+    expect(existsSync(join(home, 'whale598', 'electron', 'pet-board-cursor.json'))).toBe(true)
+    expect(existsSync(join(home, 'whale598', 'pet-board-cursor.json'))).toBe(false)
+  })
+
+  it('serializes concurrent writes (two pets posting at once all land)', async () => {
+    const home = await tempHome()
+    const first = await leaveNote(home, 'electron', '原文', 1_000)
+    // The lockless version lost writes to last-writer-wins here: both reads
+    // completed before either write, and one note/reply vanished. The
+    // per-file lock (journal withJournalLock precedent) makes all of them
+    // land, whichever microtask order the interleaving picks.
+    await Promise.all([
+      leaveNote(home, 'electron-2', '并发留字 A'),
+      leaveNote(home, 'pure', '并发留字 B'),
+      replyNote(home, 'pure', first.id, '并发回复'),
+    ])
+    const board = await readBoard(home)
+    const texts = board.notes.map(note => note.text)
+    expect(texts).toContain('并发留字 A')
+    expect(texts).toContain('并发留字 B')
+    const replied = board.notes.find(note => note.id === first.id)
+    expect(replied?.replies.map(reply => reply.text)).toContain('并发回复')
   })
 })

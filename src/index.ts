@@ -30,7 +30,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { planSummon, type SummonOutcome } from './carrier-summon.ts'
-import { admitSummon, isExtraInstanceId, nextInstanceId, PRIMARY_PET_ID, readInstancePlan, writeInstancePlan } from './instances.ts'
+import { admitSummon, instanceSlotOf, isExtraInstanceId, nextInstanceId, PRIMARY_PET_ID, readInstancePlan, withInstancePlanLock } from './instances.ts'
 import { installPetDriver } from './driver.ts'
 import { installLockStale, isProcessAlive, parseInstallLock } from './electron-lock.ts'
 import { writeElectronRuntimeStatus, type ElectronRuntimeStatus } from './electron-runtime-status.ts'
@@ -581,7 +581,7 @@ export function apply(ctx: Context): void {
             DSH_PET_ID: petId,
             // Desktop placement stagger for fresh instances (no saved
             // position): the slot ordinal offsets the default spawn point.
-            DSH_PET_SLOT: String(Number(petId.split('-')[1] ?? '1') - 1),
+            DSH_PET_SLOT: String(instanceSlotOf(petId)),
             // The carrier's liveness anchor: dispose-time kill never runs when
             // the runtime is terminated (only on graceful shutdown), and a
             // detached child escapes OS tree-kills — the carrier polls this pid
@@ -816,10 +816,14 @@ export function apply(ctx: Context): void {
           petId: candidate,
         }
       }
-      if (!plan.instances.includes(candidate)) {
-        plan.instances.push(candidate)
-        await writeInstancePlan(petHome(), plan)
-      }
+      // Desired-set RMW rides the plan lock (并发防呆): a lost update here
+      // would silently forget a summoned instance across desktop restarts.
+      await withInstancePlanLock(petHome(), (locked) => {
+        const instances = locked.instances.includes(candidate)
+          ? locked.instances
+          : [...locked.instances, candidate]
+        return { value: undefined, plan: { maxInstances: locked.maxInstances, instances } }
+      })
       void petDriver.refreshPetIds?.()
       return { ok: true, started: true, petId: candidate }
     },
@@ -829,9 +833,13 @@ export function apply(ctx: Context): void {
       const child = carrierInstances.get(petId)
       if (child !== undefined) child.kill()
       carrierInstances.delete(petId)
-      const plan = await readInstancePlan(petHome())
-      plan.instances = plan.instances.filter(id => id !== petId)
-      await writeInstancePlan(petHome(), plan)
+      await withInstancePlanLock(petHome(), (locked) => ({
+        value: undefined,
+        plan: {
+          maxInstances: locked.maxInstances,
+          instances: locked.instances.filter(id => id !== petId),
+        },
+      }))
       // A killed carrier cannot run its before-quit withdrawal — clear the
       // stale manifest here (readers also filter dead pids; this keeps the
       // registry tidy).
