@@ -179,3 +179,10 @@ body {
 .bubble-chat-input::placeholder {
   color: #9aa7b4;
 }
+
+
+/* B01 反馈：镜像翻转加 180ms 过渡（scaleX 穿过零点 = 卡片式压扁转身），
+   替换瞬间的生硬切换。200ms 验收口径不变。 */
+#stage {
+  transition: transform 180ms ease-in-out;
+}

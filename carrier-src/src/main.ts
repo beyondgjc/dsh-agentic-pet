@@ -40,10 +40,35 @@ const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
  * registry manifest name (pet-http.d/<id>.json). The default keeps manual
  * launches (`electron <carrier-dir>`) on the electron identity. */
 const PET_ID = process.env.DSH_PET_ID ?? 'electron'
+/** The asset/behavior family: all electron-kind instances (electron,
+ * electron-2, …) share one body.json and one clip catalog; the id is the
+ * instance, the kind is what it looks like. */
+const PET_KIND = PET_ID.replace(/-\d+$/, '')
+/** Desktop placement stagger: fresh instances (no saved position) offset by
+ * slot so N pets do not stack on the same spot. */
+const PET_SLOT = Number.isFinite(Number(process.env.DSH_PET_SLOT))
+  ? Math.max(0, Math.floor(Number(process.env.DSH_PET_SLOT)))
+  : 0
 
 /** This pet's per-pet state file (whale598/<PET_ID>/<name>) — the carrier's
  * own state follows the plugin's whale598 ownership rule. */
 const petStateFile = (name: string): string => join(DSH_HOME, 'whale598', PET_ID, name)
+
+/** First parseable JSON file in a layout chain (per-pet file → whale598 root
+ * → ~/.dsh root). The per-site `parse` validates the shape; a layer that
+ * parses but fails validation yields undefined and the next layer answers —
+ * same contract as the plugin's petStatePaths/readPetStateJson chain. */
+function readFirstJson<T>(files: string[], parse: (raw: unknown) => T | undefined): T | undefined {
+  for (const file of files) {
+    try {
+      const parsed = parse(JSON.parse(readFileSync(file, 'utf8')))
+      if (parsed !== undefined) return parsed
+    } catch {
+      // Missing or unreadable layout: try the next one.
+    }
+  }
+  return undefined
+}
 
 /**
  * The character the pet page displays. Keep in sync with
@@ -250,18 +275,14 @@ process.on('unhandledRejection', (reason) => {
 let cdpRequested = process.env.DSH_PET_CDP === '1'
 try {
   // pet-settings.json is plugin-level global state: the whale598 copy is
-  // current, the ~/.dsh root copy is the pre-migration legacy layer.
-  for (const file of [join(DSH_HOME, 'whale598', 'pet-settings.json'), join(DSH_HOME, 'pet-settings.json')]) {
-    try {
-      const settings = JSON.parse(readFileSync(file, 'utf8')) as {
-        debug?: { cdp?: unknown }
-      }
-      if (settings.debug?.cdp === true) cdpRequested = true
-      break
-    } catch {
-      // Try the next layout.
-    }
-  }
+  // current, the ~/.dsh root copy is the pre-migration legacy layer. The
+  // first parseable layer wins, whatever the flag says (matches the
+  // settings-page's own read order).
+  const settings = readFirstJson(
+    [join(DSH_HOME, 'whale598', 'pet-settings.json'), join(DSH_HOME, 'pet-settings.json')],
+    (raw) => (typeof raw === 'object' && raw !== null ? raw as { debug?: { cdp?: unknown } } : undefined),
+  )
+  if (settings?.debug?.cdp === true) cdpRequested = true
 } catch {
   // Absent or unreadable settings: env is the only request channel.
 }
@@ -466,47 +487,53 @@ function petSurfaceUrl(authenticated: string): string {
 function readSavedPosition(): { x: number; y: number } | undefined {
   // Per-pet file first (whale598/<PET_ID>/), then the two migration layers
   // (whale598 root, ~/.dsh root) — pre-split writes still answer.
-  for (const file of [petStateFile('pet-window.json'), join(DSH_HOME, 'whale598', 'pet-window.json'), join(DSH_HOME, 'pet-window.json')]) {
-    try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { x?: unknown; y?: unknown }
-      const x = typeof parsed.x === 'number' ? Math.round(parsed.x) : Number.NaN
-      const y = typeof parsed.y === 'number' ? Math.round(parsed.y) : Number.NaN
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue
-      const fits = (area: Electron.Rectangle): boolean =>
-        x >= area.x && y >= area.y
-        && x + WINDOW_SIZE.width <= area.x + area.width
-        && y + WINDOW_SIZE.height <= area.y + area.height
-      if (screen.getAllDisplays().some(display => fits(display.workArea))) return { x, y }
-      const primary = screen.getPrimaryDisplay().workArea
-      return {
-        x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
-        y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
-      }
-    } catch {
-      // Missing or unreadable layout: try the next one.
-    }
+  const coords = readFirstJson(
+    [petStateFile('pet-window.json'), join(DSH_HOME, 'whale598', 'pet-window.json'), join(DSH_HOME, 'pet-window.json')],
+    (raw) => {
+      const record = raw as { x?: unknown; y?: unknown }
+      const x = typeof record.x === 'number' ? Math.round(record.x) : Number.NaN
+      const y = typeof record.y === 'number' ? Math.round(record.y) : Number.NaN
+      return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined
+    },
+  )
+  if (coords === undefined) return undefined
+  const { x, y } = coords
+  const fits = (area: Electron.Rectangle): boolean =>
+    x >= area.x && y >= area.y
+    && x + WINDOW_SIZE.width <= area.x + area.width
+    && y + WINDOW_SIZE.height <= area.y + area.height
+  if (screen.getAllDisplays().some(display => fits(display.workArea))) return { x, y }
+  const primary = screen.getPrimaryDisplay().workArea
+  return {
+    x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
+    y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
   }
-  return undefined
 }
 
 /** The persisted roaming area (§6 /world): `pet-world.json` holds the
  * effective rect or an explicit null (unset). Anything unreadable or
  * mistyped degrades to unset — the default work-area clamping applies. */
 function readSavedWorld(): Rect | null {
-  for (const file of [petStateFile('pet-world.json'), join(DSH_HOME, 'whale598', 'pet-world.json'), join(DSH_HOME, 'pet-world.json')]) {
-    try {
-      return rectOf(JSON.parse(readFileSync(file, 'utf8')))
-    } catch {
-      // Missing or unreadable layout: try the next one.
-    }
-  }
-  return null
+  return readFirstJson(
+    [petStateFile('pet-world.json'), join(DSH_HOME, 'whale598', 'pet-world.json'), join(DSH_HOME, 'pet-world.json')],
+    (raw) => rectOf(raw),
+  ) ?? null
 }
 
 function createPetWindow(): BrowserWindow {
   const saved = readSavedPosition()
+  // Fresh instances (no saved position) stagger by slot so N pets do not
+  // stack on the same spot; the primary (slot 0) keeps the OS default.
+  let placement: { x: number; y: number } | undefined = saved
+  if (placement === undefined && PET_SLOT > 0) {
+    const area = screen.getPrimaryDisplay().workArea
+    placement = {
+      x: Math.max(area.x, area.x + area.width - WINDOW_SIZE.width - 24 - PET_SLOT * 48),
+      y: Math.max(area.y, area.y + area.height - WINDOW_SIZE.height - 24 - PET_SLOT * 24),
+    }
+  }
   const window = new BrowserWindow({
-    ...(saved === undefined ? {} : { x: saved.x, y: saved.y }),
+    ...(placement === undefined ? {} : { x: placement.x, y: placement.y }),
     width: WINDOW_SIZE.width,
     height: WINDOW_SIZE.height,
     transparent: true,
@@ -1234,7 +1261,7 @@ async function main(): Promise<void> {
     // repeated swap blindness). The registry is the SINGLE discovery source:
     // the legacy root pet-http.d/ and the single-file manifests are retired
     // on both the write and the read side.
-    const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: PET_ID })}\n`
+    const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: PET_ID, kind: PET_KIND })}\n`
     const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d')
     try {
       mkdirSync(registryDir, { recursive: true })
