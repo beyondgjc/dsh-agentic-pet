@@ -158,6 +158,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 
 1. **部署后必须验包内容**：`lib/` 与 `carrier/dist-renderer` 的 chunk 是内容哈希命名——部署完 `grep` 一个本轮新符号（如 `readIdleBias`、`idleNextAt`）确认真的进了包。三次事故（断链 chunk、覆盖回旧版、lib 未重部署）都是"改了/构建了但没验"造成的。
 2. **单向批量**：release↔monorepo 的收尾 cp 只能有一个方向；两侧都有改动时先对齐（body.ts 多矩形、B06 渲染层消费都被收尾 cp 冲掉过）。
+   **carrier 的镜像位 = carrier-src/src**（apps/pet/src 的参考镜像）：改了 apps/pet/src 后只 cp carrier/lib+dist-renderer 产物、不同步 carrier-src，下轮从镜像重建会静默丢掉改动（Phase 1 的 kind/SLOT/readFirstJson 就是这么漏的，review 实证后补同步 6e2e76c）。
 3. **素材改源不改暂存**：`dsh-pet-assets/assets/` 整树 gitignored，是 build-payload 的暂存区——改 `dsh-pet-indesktop/assets/characters/shenshen/` 源，再跑 build-payload.cmd 重铺（shenshen→whale 改名发生在铺送时）。
 4. **Electron 44 console-message 双签名**：事件对象（level 为字符串）与旧位置参数并存，按位置取值会全 undefined——诊断日志被静默过滤的事故根源。两种签名都接。
 5. **渲染层 boot 报告竞态**：渲染层模块执行早于 main 注册 `pet:status-report`——首份报告必丢，idle 会话里没有后续 render 就永远不补。修复 = catalog（带 body）到达时强制补报（清 `reportedSnapshot` 去重位）。同类模式：任何"启动即发"的 IPC 都要确认对端 handler 已注册。
