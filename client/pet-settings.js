@@ -487,7 +487,8 @@ window.__ModuleLoader__.load({
             : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。'))),
 
         // ── 人设（可编辑角色卡；身体规则是宿主契约，不在此编辑） ──
-        personaInfo ? h(Section, { title: '人设' },
+        personaInfo ? h(Section, { title: h('span', null, '人设 ',
+          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '改动会击穿会话前缀缓存')) },
           h('textarea', {
             style: Object.assign({}, inputStyle, { width: '100%', minHeight: 120, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px' }),
             value: personaText,
