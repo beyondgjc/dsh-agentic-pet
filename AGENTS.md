@@ -117,7 +117,23 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | 需求文档 | 仓外（不在 git 里）：`C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`（§11.1 三轮实测修订）、`pet-body-requirements-v0.2.md`（§13 变更记录） |
 | 全景技术文档 | Obsidian：`C:\Users\beyondguo\Documents\Obsidian Vault\DSH-PET 技术实现.md`（协议栈/八端点契约/各模块深读；§6.9 记忆系统；本手册是它的操作面补充） |
 
-## 8. 本地安装点速查
+## 8. whale598 文件归属规则（2026-11-10 起，防劣化）与本地安装点速查
+
+**三层规则**——新状态落盘前先回答「这是哪一层的」：
+
+| 层 | 位置 | 放什么 | 例 |
+| --- | --- | --- | --- |
+| **宠物私有** | `whale598/<petId>/` | 单写者、按实例隔离的宠物状态 | journal/epochs/events/affection/pet-name（原有）+ pet-inner-voice / pet-wake-plans / pet-wake-state / pet-binding-status / pet-window / pet-world（2026-11-10 收口） |
+| **插件/宿主级** | `whale598/` 根 | 插件配置、宿主定位、跨宠比较性账本 | pet-settings.json、pet-surface-url.json、electron-runtime.json、pet-interactions.json、pet-messages.json、pet-http.d/、carrier-*.log、pet-driver.log |
+| **legacy 只读** | `~/.dsh/` 根 | 上一代布局的只读回退（readPetStateJson/readGlobalJson 兜底链的最末层） | 不要再往这里写 |
+
+**准入规则（硬性）**：禁止在 `whale598/` 根上**新增按 petId 分键的文件**；宠物私有状态一律走 `petdata.petStatePaths` / `readPetStateJson` / `writePetStateJson`（读走三层回退链，写直达宠物文件）。petId 来源：载体 spawn env `DSH_PET_ID`（现恒 `'electron'`，多实例时传不同 id）+ `petdata.existingPetIds()`。
+
+**已知例外（数据模型天然跨宠物，单写者 = driver，拆分无并发收益）**：pet-interactions.json（跨宠竞速账本，每条带 `pet` 字段）、pet-messages.json（跨宠投递）留根。
+
+**一次性迁移**：installPetDriver 里 `migrateGlobalSplits` 把旧的按 petId 分键根文件切片进宠物目录（已存在的宠物文件优先，绝不覆盖），根副本改名 `<name>.bak-migrated-<date>`——验证无误后可手工删除这些 .bak。守护测试：`tests/petdata-layout.spec.ts`（切分正确性 + **根目录不得残留 B 类文件**的自动化断言）。
+
+### 本地安装点速查
 
 | 路径 | 内容 |
 | --- | --- |
@@ -126,6 +142,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `~/.dsh/profiles/desktop/node_modules/dsh-agentic-pet-assets/assets/characters/whale` | 已安装素材（body.json/actions.tags.json 手工同步到最新） |
 | `~/.dsh/profiles/desktop/vendor/dsh-pet-app/lib` | carrier main 的另一个部署位（历史遗留；当前运行体 = 插件包 carrier/，见进程命令行） |
 | `~/.dsh/whale598/pet-settings.json`（+.bak-20261107） | 运行配置（注入预算已开启） |
+| `~/.dsh/whale598/<petId>/` | 各宠物私有状态目录（规则见上） |
 | `~/.dsh/whale598/carrier-runtime.log` | **载体诊断主日志**（渲染层 console ≥info + 窗口移动 bounds）——排查触摸命中/朝向/待机的第一现场 |
 | `~/.dsh/whale598/carrier-boot.log` | 载体启动标记（`[pet] boot: … body=body/1` = 跑的哪一版） |
 

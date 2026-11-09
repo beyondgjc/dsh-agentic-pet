@@ -7,8 +7,9 @@
  * @module dsh-agentic-pet/inner-voice
  */
 
+import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { WHALE_DIR, readGlobalJson, writeGlobalJson } from './petdata.ts'
+import { WHALE_DIR, existingPetIds, petDataDir, readGlobalJson, readPetStateJson, writeGlobalJson, writePetStateJson } from './petdata.ts'
 import { formatPresenceLine, type PresenceFacts } from './presence.ts'
 
 /** Durable petId → sessionId mapping for the inner-voice sessions. */
@@ -188,27 +189,44 @@ function plansOf(raw: unknown): WakePlan[] {
   return out
 }
 
-/** Load every pet's pending wake plans: current → legacy → {} (callers'
- * defensive checks treat {} exactly like a missing file). */
+/** Load every pet's pending wake plans: per-pet files
+ * (whale598/<petId>/pet-wake-plans.json, own-keyed map each) merged over the
+ * root-level legacy map (pre-split data / version skew). The in-memory shape
+ * is unchanged — callers keep seeing the whole petId → plans map. */
 export async function loadWakePlans(home: string): Promise<Record<string, WakePlan[]>> {
-  try {
-    const raw = await readGlobalJson(home, 'pet-wake-plans.json') as { plans?: unknown }
+  const out: Record<string, WakePlan[]> = {}
+  const ingest = (raw: { plans?: unknown }): void => {
     const byPet = typeof raw.plans === 'object' && raw.plans !== null ? raw.plans : {}
-    const out: Record<string, WakePlan[]> = {}
     for (const [petId, list] of Object.entries(byPet as Record<string, unknown>)) {
       if (petId === '') continue
       const plans = plansOf(list)
       if (plans.length > 0) out[petId] = plans
     }
-    return out
-  } catch {
-    return {}
   }
+  try {
+    ingest(await readGlobalJson(home, 'pet-wake-plans.json') as { plans?: unknown })
+  } catch { /* legacy absence is fine */ }
+  for (const petId of await existingPetIds(home)) {
+    try {
+      ingest(await readPetStateJson(home, petId, 'pet-wake-plans.json') as { plans?: unknown })
+    } catch { /* absent pet file is fine */ }
+  }
+  return out
 }
 
+/** Save per-pet slices: each pet's plans land in its own state file; keys
+ * dropped from the map have their pet file removed so the next load cannot
+ * resurrect them. */
 export async function saveWakePlans(home: string, plans: Record<string, WakePlan[]>): Promise<void> {
   try {
-    await writeGlobalJson(home, 'pet-wake-plans.json', { plans } as unknown as Record<string, unknown>)
+    for (const [petId, list] of Object.entries(plans)) {
+      if (petId === '') continue
+      await writePetStateJson(home, petId, 'pet-wake-plans.json', { plans: { [petId]: list } })
+    }
+    for (const petId of await existingPetIds(home)) {
+      if (petId in plans) continue
+      await rm(join(petDataDir(home, petId), 'pet-wake-plans.json'), { force: true })
+    }
   } catch (error: unknown) {
     console.error(`pet-surface inner-voice: could not write the wake plans: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -407,35 +425,66 @@ function generationsOf(raw: { generations?: unknown }): Record<string, number> {
   return out
 }
 
-export async function loadInnerVoiceStore(home: string): Promise<InnerVoiceStore> {
-  // readGlobalJson: whale598/ → legacy root → {} (the lazy-migration
-  // contract — the legacy root copy answers until the first save).
-  try {
-    const raw = await readGlobalJson(home, 'pet-inner-voice.json') as {
-      sessions?: unknown
-      generations?: unknown
-    }
-    const sessions: InnerVoiceStore['sessions'] = {}
-    for (const [petId, entry] of Object.entries(
-      typeof raw.sessions === 'object' && raw.sessions !== null ? raw.sessions : {},
-    )) {
-      const record = entry as { sessionId?: unknown; createdAt?: unknown }
-      if (typeof record?.sessionId === 'string' && record.sessionId !== '') {
-        sessions[petId] = {
-          sessionId: record.sessionId,
-          createdAt: typeof record.createdAt === 'number' ? record.createdAt : 0,
-        }
+/** Parse one store map (root-level legacy file or a per-pet slice — both
+ * carry the {sessions, generations} shape keyed by petId). */
+function parseStoreMap(raw: { sessions?: unknown; generations?: unknown }): InnerVoiceStore {
+  const sessions: InnerVoiceStore['sessions'] = {}
+  for (const [petId, entry] of Object.entries(
+    typeof raw.sessions === 'object' && raw.sessions !== null ? raw.sessions : {},
+  )) {
+    const record = entry as { sessionId?: unknown; createdAt?: unknown }
+    if (typeof record?.sessionId === 'string' && record.sessionId !== '') {
+      sessions[petId] = {
+        sessionId: record.sessionId,
+        createdAt: typeof record.createdAt === 'number' ? record.createdAt : 0,
       }
     }
-    return { sessions, generations: generationsOf(raw) }
-  } catch {
-    return { sessions: {}, generations: {} }
   }
+  return { sessions, generations: generationsOf(raw) }
+}
+
+/** Overlay merge: per-pet slice values win over the base per petId. */
+function mergeStoreMaps(base: InnerVoiceStore, next: InnerVoiceStore): InnerVoiceStore {
+  return {
+    sessions: { ...base.sessions, ...next.sessions },
+    generations: { ...base.generations, ...next.generations },
+  }
+}
+
+export async function loadInnerVoiceStore(home: string): Promise<InnerVoiceStore> {
+  // Per-pet files (whale598/<petId>/pet-inner-voice.json, own-keyed map each)
+  // merged over the root-level legacy map (pre-split data / version skew —
+  // migrateGlobalSplits converts it once at driver install). In-memory shape
+  // unchanged; callers keep seeing the whole petId-keyed store.
+  let store = parseStoreMap({})
+  try {
+    store = mergeStoreMaps(store, parseStoreMap(await readGlobalJson(home, 'pet-inner-voice.json') as { sessions?: unknown; generations?: unknown }))
+  } catch { /* legacy absence is fine */ }
+  for (const petId of await existingPetIds(home)) {
+    try {
+      store = mergeStoreMaps(store, parseStoreMap(await readPetStateJson(home, petId, 'pet-inner-voice.json') as { sessions?: unknown; generations?: unknown }))
+    } catch { /* absent pet file is fine */ }
+  }
+  return store
 }
 
 export async function saveInnerVoiceStore(home: string, store: InnerVoiceStore): Promise<void> {
   try {
-    await writeGlobalJson(home, 'pet-inner-voice.json', store as unknown as Record<string, unknown>)
+    const known = new Set([...Object.keys(store.sessions), ...Object.keys(store.generations)])
+    for (const petId of known) {
+      const session = store.sessions[petId]
+      const generation = store.generations[petId]
+      await writePetStateJson(home, petId, 'pet-inner-voice.json', {
+        ...(session === undefined ? {} : { sessions: { [petId]: session } }),
+        ...(generation === undefined ? {} : { generations: { [petId]: generation } }),
+      })
+    }
+    // Keys retired from the map: drop their per-pet files so the next load
+    // cannot resurrect them.
+    for (const petId of await existingPetIds(home)) {
+      if (known.has(petId)) continue
+      await rm(join(petDataDir(home, petId), 'pet-inner-voice.json'), { force: true })
+    }
   } catch (error: unknown) {
     console.error(`pet-surface inner-voice: could not write the store: ${error instanceof Error ? error.message : String(error)}`)
   }

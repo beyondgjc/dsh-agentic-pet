@@ -30,6 +30,14 @@ const ASSET_SCHEME = 'pet-asset';
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 /** The dsh home this carrier shares with the driver (manifest, settings). */
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh');
+/** This carrier's pet identity (env from the spawning plugin): scopes the
+ * per-pet state files (pet-window/pet-world under whale598/<id>/) and the
+ * registry manifest name (pet-http.d/<id>.json). The default keeps manual
+ * launches (`electron <carrier-dir>`) on the electron identity. */
+const PET_ID = process.env.DSH_PET_ID ?? 'electron';
+/** This pet's per-pet state file (whale598/<PET_ID>/<name>) — the carrier's
+ * own state follows the plugin's whale598 ownership rule. */
+const petStateFile = (name) => join(DSH_HOME, 'whale598', PET_ID, name);
 /**
  * The character the pet page displays. Keep in sync with
  * src/renderer/main.ts (no shared module: the renderer is a separate vite
@@ -210,9 +218,19 @@ process.on('unhandledRejection', (reason) => {
 // this runs pre-ready; the switch only takes hold on the next launch).
 let cdpRequested = process.env.DSH_PET_CDP === '1';
 try {
-    const settings = JSON.parse(readFileSync(join(DSH_HOME, 'pet-settings.json'), 'utf8'));
-    if (settings.debug?.cdp === true)
-        cdpRequested = true;
+    // pet-settings.json is plugin-level global state: the whale598 copy is
+    // current, the ~/.dsh root copy is the pre-migration legacy layer.
+    for (const file of [join(DSH_HOME, 'whale598', 'pet-settings.json'), join(DSH_HOME, 'pet-settings.json')]) {
+        try {
+            const settings = JSON.parse(readFileSync(file, 'utf8'));
+            if (settings.debug?.cdp === true)
+                cdpRequested = true;
+            break;
+        }
+        catch {
+            // Try the next layout.
+        }
+    }
 }
 catch {
     // Absent or unreadable settings: env is the only request channel.
@@ -415,37 +433,45 @@ function petSurfaceUrl(authenticated) {
  * display fits it, clamp fully into the primary work area. Undefined =
  * default placement. */
 function readSavedPosition() {
-    try {
-        const parsed = JSON.parse(readFileSync(join(DSH_HOME, 'pet-window.json'), 'utf8'));
-        const x = typeof parsed.x === 'number' ? Math.round(parsed.x) : Number.NaN;
-        const y = typeof parsed.y === 'number' ? Math.round(parsed.y) : Number.NaN;
-        if (!Number.isFinite(x) || !Number.isFinite(y))
-            return undefined;
-        const fits = (area) => x >= area.x && y >= area.y
-            && x + WINDOW_SIZE.width <= area.x + area.width
-            && y + WINDOW_SIZE.height <= area.y + area.height;
-        if (screen.getAllDisplays().some(display => fits(display.workArea)))
-            return { x, y };
-        const primary = screen.getPrimaryDisplay().workArea;
-        return {
-            x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
-            y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
-        };
+    // Per-pet file first (whale598/<PET_ID>/), then the two migration layers
+    // (whale598 root, ~/.dsh root) — pre-split writes still answer.
+    for (const file of [petStateFile('pet-window.json'), join(DSH_HOME, 'whale598', 'pet-window.json'), join(DSH_HOME, 'pet-window.json')]) {
+        try {
+            const parsed = JSON.parse(readFileSync(file, 'utf8'));
+            const x = typeof parsed.x === 'number' ? Math.round(parsed.x) : Number.NaN;
+            const y = typeof parsed.y === 'number' ? Math.round(parsed.y) : Number.NaN;
+            if (!Number.isFinite(x) || !Number.isFinite(y))
+                continue;
+            const fits = (area) => x >= area.x && y >= area.y
+                && x + WINDOW_SIZE.width <= area.x + area.width
+                && y + WINDOW_SIZE.height <= area.y + area.height;
+            if (screen.getAllDisplays().some(display => fits(display.workArea)))
+                return { x, y };
+            const primary = screen.getPrimaryDisplay().workArea;
+            return {
+                x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
+                y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
+            };
+        }
+        catch {
+            // Missing or unreadable layout: try the next one.
+        }
     }
-    catch {
-        return undefined;
-    }
+    return undefined;
 }
 /** The persisted roaming area (§6 /world): `pet-world.json` holds the
  * effective rect or an explicit null (unset). Anything unreadable or
  * mistyped degrades to unset — the default work-area clamping applies. */
 function readSavedWorld() {
-    try {
-        return rectOf(JSON.parse(readFileSync(join(DSH_HOME, 'pet-world.json'), 'utf8')));
+    for (const file of [petStateFile('pet-world.json'), join(DSH_HOME, 'whale598', 'pet-world.json'), join(DSH_HOME, 'pet-world.json')]) {
+        try {
+            return rectOf(JSON.parse(readFileSync(file, 'utf8')));
+        }
+        catch {
+            // Missing or unreadable layout: try the next one.
+        }
     }
-    catch {
-        return null;
-    }
+    return null;
 }
 function createPetWindow() {
     const saved = readSavedPosition();
@@ -745,9 +771,14 @@ async function main() {
             if (event.sender !== window.webContents)
                 return;
             dragAnchor = undefined;
-            // Remember where the user parked the pet; restored on the next launch
-            // and clearable from the settings page.
-            void writeFile(join(DSH_HOME, 'pet-window.json'), `${JSON.stringify(windowOrigin)}\n`, 'utf8')
+            // Remember where the user parked the pet (per-pet state file, per the
+            // whale598 ownership rule); restored on the next launch and clearable
+            // from the settings page.
+            try {
+                mkdirSync(join(DSH_HOME, 'whale598', PET_ID), { recursive: true });
+            }
+            catch { /* the directory usually exists; the write below reports */ }
+            void writeFile(petStateFile('pet-window.json'), `${JSON.stringify(windowOrigin)}\n`, 'utf8')
                 .catch((error) => { console.error('[pet] could not save the window position:', String(error)); });
         }
         catch (error) {
@@ -760,7 +791,11 @@ async function main() {
         return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
     };
     const writeWorld = () => {
-        void writeFile(join(DSH_HOME, 'pet-world.json'), `${JSON.stringify(activeWorld)}\n`, 'utf8')
+        try {
+            mkdirSync(join(DSH_HOME, 'whale598', PET_ID), { recursive: true });
+        }
+        catch { /* the directory usually exists; the write below reports */ }
+        void writeFile(petStateFile('pet-world.json'), `${JSON.stringify(activeWorld)}\n`, 'utf8')
             .catch((error) => { console.error('[pet] could not save the roaming area:', String(error)); });
     };
     // Pull the window rect fully inside the roaming area (a world smaller than
@@ -1192,7 +1227,7 @@ async function main() {
         // repeated swap blindness). The registry is the SINGLE discovery source:
         // the legacy root pet-http.d/ and the single-file manifests are retired
         // on both the write and the read side.
-        const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: 'electron' })}\n`;
+        const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: PET_ID })}\n`;
         const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d');
         try {
             mkdirSync(registryDir, { recursive: true });
@@ -1201,7 +1236,7 @@ async function main() {
             console.error('[pet] could not create the pet registry:', String(error));
         }
         const writeManifest = () => {
-            void writeFile(join(registryDir, 'electron.json'), manifest, 'utf8')
+            void writeFile(join(registryDir, `${PET_ID}.json`), manifest, 'utf8')
                 .catch((error) => { console.error('[pet] could not write the registry entry:', String(error)); });
         };
         writeManifest();
@@ -1240,7 +1275,7 @@ async function main() {
         // find a dead port in pet-http.d/ — stale entries were the "旧端点残留"
         // incident class. Best effort: a killed carrier leaves the file, and the
         // readers' pid+probe validation is the backstop.
-        for (const file of ['whale598/pet-http.d/electron.json', 'pet-http.d/electron.json', 'pet-http-electron.json']) {
+        for (const file of [`whale598/pet-http.d/${PET_ID}.json`, `pet-http.d/${PET_ID}.json`, `pet-http-${PET_ID}.json`, 'whale598/pet-http.d/electron.json']) {
             void rm(join(DSH_HOME, file), { force: true }).catch(() => { });
         }
         if (handle === undefined)

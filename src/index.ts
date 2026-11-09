@@ -567,6 +567,11 @@ export function apply(ctx: Context): void {
           env: {
             ...stripRunAsNode(process.env),
             DSH_PET_URL: url,
+            // The carrier's identity: scopes its per-pet state files
+            // (pet-window/pet-world under whale598/<id>/) and its registry
+            // manifest name (pet-http.d/<id>.json). Constant while there is
+            // exactly one carrier; multi-instance passes distinct ids.
+            DSH_PET_ID: 'electron',
             // The carrier's liveness anchor: dispose-time kill never runs when
             // the runtime is terminated (only on graceful shutdown), and a
             // detached child escapes OS tree-kills — the carrier polls this pid

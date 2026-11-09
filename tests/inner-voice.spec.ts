@@ -6,7 +6,7 @@
  * durable trigger marker lives in the leading tag).
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -140,17 +140,22 @@ describe('readInnerVoiceConfig', () => {
 })
 
 describe('inner-voice store', () => {
-  it('round-trips petId → sessionId entries (saved under whale598/)', async () => {
+  it('round-trips petId → sessionId entries (per-pet files, legacy fallbacks)', async () => {
     const home = await tempHome()
     expect(await loadInnerVoiceStore(home)).toEqual({ sessions: {}, generations: {} })
     const store = { sessions: { electron: { sessionId: 'whale598-electron-g0', createdAt: 12 } }, generations: { electron: 3 } }
     await saveInnerVoiceStore(home, store)
-    // New layout: the store lives under whale598/ (the legacy root copy is
-    // only a read fallback until the first save moves it).
-    expect(JSON.parse(await readFile(join(home, 'whale598', 'pet-inner-voice.json'), 'utf8'))).toEqual(store)
+    // Per-pet layout: each pet's slice lands in its own state file
+    // (whale598/<petId>/pet-inner-voice.json).
+    expect(JSON.parse(await readFile(join(home, 'whale598', 'electron', 'pet-inner-voice.json'), 'utf8')))
+      .toEqual({ sessions: { electron: store.sessions.electron }, generations: { electron: 3 } })
     expect(await loadInnerVoiceStore(home)).toEqual(store)
-    // Legacy root copy (pre-consolidation) still answers when the new
-    // file is absent — the lazy-migration contract.
+    // The legacy layers answer only while the pet file is absent: the
+    // whale598 root copy (pre-split global), then the pre-consolidation
+    // ~/.dsh root — the two-step lazy-migration contract.
+    await rm(join(home, 'whale598', 'electron', 'pet-inner-voice.json'), { force: true })
+    await writeFile(join(home, 'whale598', 'pet-inner-voice.json'), JSON.stringify(store), 'utf8')
+    expect(await loadInnerVoiceStore(home)).toEqual(store)
     await rm(join(home, 'whale598', 'pet-inner-voice.json'), { force: true })
     await writeFile(join(home, 'pet-inner-voice.json'), JSON.stringify(store), 'utf8')
     expect(await loadInnerVoiceStore(home)).toEqual(store)
@@ -158,9 +163,17 @@ describe('inner-voice store', () => {
 
   it('folds malformed entries instead of throwing', async () => {
     const home = await tempHome()
-    await writeFile(join(home, 'pet-inner-voice.json'), JSON.stringify({
-      sessions: { electron: { sessionId: 'whale598-electron-g0' }, pure: { sessionId: 7 }, ghost: 'nope' },
-      generations: { electron: 'five', pure: 2.9, '': 1, ok: 4 },
+    await mkdir(join(home, 'whale598', 'electron'), { recursive: true })
+    // The per-pet file (current layout)…
+    await writeFile(join(home, 'whale598', 'electron', 'pet-inner-voice.json'), JSON.stringify({
+      sessions: { electron: { sessionId: 'whale598-electron-g0' } },
+      generations: { electron: 'five' },
+    }), 'utf8')
+    // …and the root-level legacy map, folded in the same load: pet files win
+    // per petId; distinct petIds from either layer both survive.
+    await writeFile(join(home, 'whale598', 'pet-inner-voice.json'), JSON.stringify({
+      sessions: { pure: { sessionId: 7 }, ghost: 'nope' },
+      generations: { pure: 2.9, '': 1, ok: 4 },
     }), 'utf8')
     expect(await loadInnerVoiceStore(home)).toEqual({
       sessions: { electron: { sessionId: 'whale598-electron-g0', createdAt: 0 } },
@@ -251,15 +264,19 @@ describe('prompts and helpers', () => {
 describe('self wake plans (自主作息)', () => {
   const plan = (id: string, at: number, intent = `intent-${id}`): WakePlan => ({ id, at, intent, createdAt: 1_000 })
 
-  it('round-trips the plan store (saved under whale598/) and folds malformed entries', async () => {
+  it('round-trips the plan store (per-pet files, legacy fallback) and folds malformed entries', async () => {
     const home = await tempHome()
     expect(await loadWakePlans(home)).toEqual({})
     const plans = { electron: [plan('tea', 5_000)], pure: [plan('walk', 6_000, '出去走走')] }
     await saveWakePlans(home, plans)
-    expect(JSON.parse(await readFile(join(home, 'whale598', 'pet-wake-plans.json'), 'utf8'))).toEqual({ plans })
+    // Per-pet layout: each pet's plans land in its own state file.
+    expect(JSON.parse(await readFile(join(home, 'whale598', 'electron', 'pet-wake-plans.json'), 'utf8')))
+      .toEqual({ plans: { electron: plans.electron } })
+    expect(JSON.parse(await readFile(join(home, 'whale598', 'pure', 'pet-wake-plans.json'), 'utf8')))
+      .toEqual({ plans: { pure: plans.pure } })
     expect(await loadWakePlans(home)).toEqual(plans)
-    // Malformed plans fold out; empty lists and empty pet ids drop.
-    await writeFile(join(home, 'whale598', 'pet-wake-plans.json'), JSON.stringify({
+    // Malformed plans fold out of the per-pet file; empty lists drop.
+    await writeFile(join(home, 'whale598', 'electron', 'pet-wake-plans.json'), JSON.stringify({
       plans: {
         electron: [
           plan('ok', 1),
@@ -267,11 +284,23 @@ describe('self wake plans (自主作息)', () => {
           { id: '', at: 1, intent: 'x', createdAt: 1 },
           'nope',
         ],
-        '': [plan('ghost', 1)],
-        pure: [],
       },
     }), 'utf8')
-    expect(await loadWakePlans(home)).toEqual({ electron: [plan('ok', 1)] })
+    expect(await loadWakePlans(home)).toEqual({
+      electron: [plan('ok', 1)],
+      pure: [plan('walk', 6_000, '出去走走')],
+    })
+    // The root-level legacy map answers only for petIds whose pet file is
+    // absent (version-skew fallback): pet files win per petId, ghost ids
+    // fold, empty ids drop.
+    await writeFile(join(home, 'whale598', 'pet-wake-plans.json'), JSON.stringify({
+      plans: { legacy: [plan('old', 2)], '': [plan('ghost', 1)], pure: [] },
+    }), 'utf8')
+    expect(await loadWakePlans(home)).toEqual({
+      electron: [plan('ok', 1)],
+      pure: [plan('walk', 6_000, '出去走走')],
+      legacy: [plan('old', 2)],
+    })
   })
 
   it('upserts by id (re-schedule = 改时间) and cancels by id or all', () => {

@@ -71,9 +71,14 @@ export declare const VOICE_SESSION_PREFIX = "whale598-";
 export declare function readInnerVoiceConfig(home: string): Promise<InnerVoiceConfig>;
 export declare function innerVoiceStorePath(home: string): string;
 export declare function wakePlansStorePath(home: string): string;
-/** Load every pet's pending wake plans: current → legacy → {} (callers'
- * defensive checks treat {} exactly like a missing file). */
+/** Load every pet's pending wake plans: per-pet files
+ * (whale598/<petId>/pet-wake-plans.json, own-keyed map each) merged over the
+ * root-level legacy map (pre-split data / version skew). The in-memory shape
+ * is unchanged — callers keep seeing the whole petId → plans map. */
 export declare function loadWakePlans(home: string): Promise<Record<string, WakePlan[]>>;
+/** Save per-pet slices: each pet's plans land in its own state file; keys
+ * dropped from the map have their pet file removed so the next load cannot
+ * resurrect them. */
 export declare function saveWakePlans(home: string, plans: Record<string, WakePlan[]>): Promise<void>;
 /** Upsert by id: re-scheduling with a known id REPLACES the old plan —
  * "能定、能改、能撤" 的改。 */

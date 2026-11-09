@@ -56,4 +56,29 @@ export declare function readGlobalJson(home: string, name: string): Promise<Reco
 /** Write a global state file (current location only; pretty-printed — these
  * files are user-inspectable and hand-editable). */
 export declare function writeGlobalJson(home: string, name: string, obj: Record<string, unknown>): Promise<void>;
+export declare function petStatePaths(home: string, petId: string, name: string): {
+    current: string;
+    legacy: string[];
+};
+/** Read a per-pet state file: pet file → whale598 root → ~/.dsh root → {}
+ * (callers' defensive field checks treat {} exactly like a missing file). */
+export declare function readPetStateJson(home: string, petId: string, name: string): Promise<Record<string, unknown>>;
+/** Write a per-pet state file (pretty-printed, same user-inspectable
+ * contract as the globals). */
+export declare function writePetStateJson(home: string, petId: string, name: string, obj: Record<string, unknown>): Promise<void>;
+/** PetIds with a data directory on disk — the sweep basis for per-pet
+ * migrations and merged loads. Registry-only pets (live, never persisted)
+ * are absent; callers union their own id sources on top. */
+export declare function existingPetIds(home: string): Promise<string[]>;
+/** Read a root-level global that is a bare JSON array: whale598 root →
+ * ~/.dsh root → [] (the interaction ledger's shape — readGlobalJson's object
+ * check happens to admit arrays, but the array contract deserves its own
+ * helper). */
+export declare function readGlobalArrayJson(home: string, name: string): Promise<unknown[]>;
+/** One-time split of a petId-keyed root file into per-pet state files: each
+ * pet's slice is written (an existing pet file always wins — the split never
+ * overwrites), then the root copy is renamed to `<name>.bak-migrated-<date>`
+ * so the root stays clean without losing the original. Best-effort
+ * throughout; `extract` returns undefined for petIds with no slice. */
+export declare function migrateGlobalSplits(home: string, name: string, extract: (global: Record<string, unknown>, petId: string) => Record<string, unknown> | undefined): Promise<void>;
 //# sourceMappingURL=petdata.d.ts.map

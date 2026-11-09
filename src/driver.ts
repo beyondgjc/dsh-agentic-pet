@@ -560,12 +560,18 @@ const ensurePresencePet = (petId: string): PresencePetState => {
 }
 
 const persistPresenceState = (home: string): void => {
-  const pets: Record<string, PresencePetState> = {}
-  for (const [petId, state] of presencePets) pets[petId] = state
-  void petdata.writeGlobalJson(home, 'pet-wake-state.json', {
-    lastUserActivityAt: presenceLastUserActivityAt ?? null,
-    pets,
-  }).catch(() => { /* presence facts are best-effort */ })
+  // Per-pet files (whale598/<petId>/pet-wake-state.json): each pet's slice
+  // carries its own copy of lastUserActivityAt — noteUserPresence writes the
+  // same value for every known pet and loadPresenceState takes the max, so
+  // the copies cannot drift apart.
+  for (const [petId, state] of presencePets) {
+    void petdata.writePetStateJson(home, petId, 'pet-wake-state.json', {
+      lastUserActivityAt: presenceLastUserActivityAt ?? null,
+      counts: state.counts,
+      baseline: state.baseline,
+      baselineAt: state.baselineAt,
+    } as unknown as Record<string, unknown>).catch(() => { /* presence facts are best-effort */ })
+  }
 }
 
 const schedulePresencePersist = (home: string): void => {
@@ -579,21 +585,34 @@ const schedulePresencePersist = (home: string): void => {
 
 const loadPresenceState = async (home: string): Promise<void> => {
   try {
-    const raw = await petdata.readGlobalJson(home, 'pet-wake-state.json')
-    presenceLastUserActivityAt = typeof raw.lastUserActivityAt === 'number'
-      ? raw.lastUserActivityAt
+    const ingest = (petId: string, record: Record<string, unknown>): void => {
+      presencePets.set(petId, {
+        counts: normalizePresenceCounts(record.counts),
+        baseline: normalizePresenceCounts(record.baseline),
+        baselineAt: typeof record.baselineAt === 'number' ? record.baselineAt : Date.now(),
+      })
+    }
+    // Legacy root shape first ({lastUserActivityAt, pets:{...}}), then each
+    // pet's slice file ({lastUserActivityAt, counts, baseline, baselineAt}) —
+    // pet slices win per petId, and their lastUserActivityAt copies merge by
+    // max (they are written equal; the max only guards a skewed hand edit).
+    const legacy = await petdata.readGlobalJson(home, 'pet-wake-state.json')
+    presenceLastUserActivityAt = typeof legacy.lastUserActivityAt === 'number'
+      ? legacy.lastUserActivityAt
       : undefined
-    const pets = raw.pets
-    if (typeof pets === 'object' && pets !== null) {
-      for (const [petId, value] of Object.entries(pets as Record<string, unknown>)) {
+    const legacyPets = legacy.pets
+    if (typeof legacyPets === 'object' && legacyPets !== null) {
+      for (const [petId, value] of Object.entries(legacyPets as Record<string, unknown>)) {
         if (typeof value !== 'object' || value === null) continue
-        const record = value as Record<string, unknown>
-        presencePets.set(petId, {
-          counts: normalizePresenceCounts(record.counts),
-          baseline: normalizePresenceCounts(record.baseline),
-          baselineAt: typeof record.baselineAt === 'number' ? record.baselineAt : Date.now(),
-        })
+        ingest(petId, value as Record<string, unknown>)
       }
+    }
+    for (const petId of await petdata.existingPetIds(home)) {
+      const raw = await petdata.readPetStateJson(home, petId, 'pet-wake-state.json')
+      if (Object.keys(raw).length === 0) continue
+      ingest(petId, raw)
+      const at = typeof raw.lastUserActivityAt === 'number' ? raw.lastUserActivityAt : undefined
+      if (at !== undefined) presenceLastUserActivityAt = Math.max(presenceLastUserActivityAt ?? 0, at)
     }
     presenceLoaded = true
     if (presenceActivityBeforeLoad !== undefined) {
@@ -710,12 +729,17 @@ export function voiceBindingSnapshot(): VoiceBindingSnapshot {
 }
 
 function persistVoiceBindingStatus(home: string): void {
+  // Per-pet diagnostics: each pet writes its own view plus the failure
+  // entries that concern it. The file has no readers — a postmortem dump.
   const snapshot = voiceBindingSnapshot()
-  void petdata.writeGlobalJson(
-    home,
-    'pet-binding-status.json',
-    snapshot as unknown as Record<string, unknown>,
-  ).catch(() => { /* diagnostics are best-effort */ })
+  for (const petId of Object.keys(snapshot.pets)) {
+    const binding = snapshot.pets[petId]
+    void petdata.writePetStateJson(home, petId, 'pet-binding-status.json', {
+      updatedAt: snapshot.updatedAt,
+      binding,
+      failures: voiceBindingFailures.filter(item => item.petId === petId),
+    } as unknown as Record<string, unknown>).catch(() => { /* diagnostics are best-effort */ })
+  }
 }
 
 function recordVoiceBindingFailure(entry: VoiceBindingFailure): void {
@@ -754,6 +778,41 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
   // Global state files consolidated under whale598/ — rename legacy copies
   // once (best-effort; the read fallback covers a failed rename).
   void petdata.migrateGlobals(home)
+  // Per-pet state split (whale598/<petId>/): the petId-keyed root files move
+  // into the pets' own directories — slices written (existing pet files win),
+  // root copies renamed to .bak-migrated-<date>. Best-effort, same contract
+  // as migrateGlobals; the readers' fallback chains cover the skew window.
+  void petdata.migrateGlobalSplits(home, 'pet-inner-voice.json', (global, petId) => {
+    const sessions = (global.sessions as Record<string, unknown> | undefined)?.[petId]
+    const generations = (global.generations as Record<string, number> | undefined)?.[petId]
+    if (sessions === undefined && generations === undefined) return undefined
+    return {
+      ...(sessions === undefined ? {} : { sessions: { [petId]: sessions } }),
+      ...(generations === undefined ? {} : { generations: { [petId]: generations } }),
+    }
+  })
+  void petdata.migrateGlobalSplits(home, 'pet-wake-plans.json', (global, petId) => {
+    const plans = (global.plans as Record<string, unknown> | undefined)?.[petId]
+    if (plans === undefined || !Array.isArray(plans) || plans.length === 0) return undefined
+    return { plans: { [petId]: plans } }
+  })
+  void petdata.migrateGlobalSplits(home, 'pet-wake-state.json', (global, petId) => {
+    const state = (global.pets as Record<string, unknown> | undefined)?.[petId]
+    if (state === undefined || typeof state !== 'object') return undefined
+    return { lastUserActivityAt: global.lastUserActivityAt ?? null, ...(state as Record<string, unknown>) }
+  })
+  void petdata.migrateGlobalSplits(home, 'pet-binding-status.json', (global, petId) => {
+    const binding = (global.pets as Record<string, unknown> | undefined)?.[petId]
+    if (binding === undefined) return undefined
+    const failures = (global.failures as Array<Record<string, unknown>> | undefined)?.filter(item => item.petId === petId) ?? []
+    return { updatedAt: global.updatedAt ?? Date.now(), binding, failures }
+  })
+  // pet-window.json is a single object (no petId keys) — it IS the electron
+  // carrier's window position; the split hands it to the per-pet file.
+  void petdata.migrateGlobalSplits(home, 'pet-window.json', (global, petId) => {
+    if (petId !== 'electron' || Object.keys(global).length === 0) return undefined
+    return { ...global }
+  })
   // Inner-voice (re)initialization: a re-install must not inherit stale
   // owners from a previous driver generation. The store on disk is the
   // durable petId→sessionId truth; the maps are rebuilt from it.
@@ -1615,8 +1674,11 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
     const at = Date.now()
     void (async () => {
       try {
-        const list = JSON.parse(await readFile(interactionLedgerFile, 'utf8')) as unknown
-        const next = Array.isArray(list) ? list : []
+        // Legacy-aware read: the whale598 root copy first, then the ~/.dsh
+        // root copy — a failed migrateGlobals rename must not shadow the
+        // ledger history behind a fresh one-entry file (the read/write
+        // asymmetry this replaces).
+        const next = await petdata.readGlobalArrayJson(home, 'pet-interactions.json')
         // Constant-null normalization: `undefined` would be dropped by
         // JSON.stringify and the field matrix becomes conditional again.
         next.unshift({

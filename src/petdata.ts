@@ -11,7 +11,7 @@
  */
 
 import { rm } from 'node:fs/promises'
-import { mkdir, readFile, appendFile, writeFile, rename } from 'node:fs/promises'
+import { mkdir, readFile, appendFile, readdir, writeFile, rename } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -204,4 +204,107 @@ export async function writeGlobalJson(home: string, name: string, obj: Record<st
   const { current } = globalPaths(home, name)
   await mkdir(dirname(current), { recursive: true })
   await writeFile(current, `${JSON.stringify(obj, null, 2)}\n`, 'utf8')
+}
+
+// ── per-pet state files (the petId-scoped siblings of the globals) ──────────
+// Ownership rule (AGENTS.md §8「whale598 文件归属规则」): a pet's OWN state
+// lives in whale598/<petId>/; the whale598 root keeps plugin-level,
+// host-level, and cross-pet comparative state only. Reads fall back
+// current → whale598 root → ~/.dsh root (two migration layers), writes go
+// to the pet file only.
+
+export function petStatePaths(home: string, petId: string, name: string): { current: string; legacy: string[] } {
+  return {
+    current: join(petDataDir(home, petId), name),
+    legacy: [join(home, WHALE_DIR, name), join(home, name)],
+  }
+}
+
+/** Read a per-pet state file: pet file → whale598 root → ~/.dsh root → {}
+ * (callers' defensive field checks treat {} exactly like a missing file). */
+export async function readPetStateJson(home: string, petId: string, name: string): Promise<Record<string, unknown>> {
+  const { current, legacy } = petStatePaths(home, petId, name)
+  for (const file of [current, ...legacy]) {
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+      if (parsed && typeof parsed === 'object') return parsed
+    } catch { /* try the next location */ }
+  }
+  return {}
+}
+
+/** Write a per-pet state file (pretty-printed, same user-inspectable
+ * contract as the globals). */
+export async function writePetStateJson(home: string, petId: string, name: string, obj: Record<string, unknown>): Promise<void> {
+  const { current } = petStatePaths(home, petId, name)
+  await mkdir(dirname(current), { recursive: true })
+  await writeFile(current, `${JSON.stringify(obj, null, 2)}\n`, 'utf8')
+}
+
+/** PetIds with a data directory on disk — the sweep basis for per-pet
+ * migrations and merged loads. Registry-only pets (live, never persisted)
+ * are absent; callers union their own id sources on top. */
+export async function existingPetIds(home: string): Promise<string[]> {
+  try {
+    const entries = await readdir(join(home, WHALE_DIR), { withFileTypes: true })
+    return entries.filter(entry => entry.isDirectory() && entry.name !== 'pet-http.d').map(entry => entry.name)
+  } catch {
+    return []
+  }
+}
+
+/** Read a root-level global that is a bare JSON array: whale598 root →
+ * ~/.dsh root → [] (the interaction ledger's shape — readGlobalJson's object
+ * check happens to admit arrays, but the array contract deserves its own
+ * helper). */
+export async function readGlobalArrayJson(home: string, name: string): Promise<unknown[]> {
+  const { current, legacy } = globalPaths(home, name)
+  for (const file of [current, legacy]) {
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown
+      if (Array.isArray(parsed)) return parsed
+    } catch { /* try the next location */ }
+  }
+  return []
+}
+
+/** One-time split of a petId-keyed root file into per-pet state files: each
+ * pet's slice is written (an existing pet file always wins — the split never
+ * overwrites), then the root copy is renamed to `<name>.bak-migrated-<date>`
+ * so the root stays clean without losing the original. Best-effort
+ * throughout; `extract` returns undefined for petIds with no slice. */
+export async function migrateGlobalSplits(
+  home: string,
+  name: string,
+  extract: (global: Record<string, unknown>, petId: string) => Record<string, unknown> | undefined,
+): Promise<void> {
+  const global = await readGlobalJson(home, name)
+  if (Object.keys(global).length === 0) return
+  const mapKeys = (field: string): string[] => {
+    const value = global[field]
+    return typeof value === 'object' && value !== null ? Object.keys(value as Record<string, unknown>) : []
+  }
+  const petIds = [...new Set([
+    ...(await existingPetIds(home)),
+    ...mapKeys('pets'), ...mapKeys('sessions'), ...mapKeys('generations'), ...mapKeys('plans'),
+  ])]
+  let wrote = false
+  for (const petId of petIds) {
+    if (petId === '') continue
+    const slice = extract(global, petId)
+    if (slice === undefined) continue
+    const { current } = petStatePaths(home, petId, name)
+    if (existsSync(current)) continue
+    await writePetStateJson(home, petId, name, slice)
+    wrote = true
+  }
+  if (!wrote) return
+  const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '')
+  for (const file of [globalPaths(home, name).current, globalPaths(home, name).legacy]) {
+    try {
+      if (!existsSync(file)) continue
+      await rename(file, join(home, WHALE_DIR, `${name}.bak-migrated-${stamp}`))
+      break
+    } catch { /* best effort */ }
+  }
 }
