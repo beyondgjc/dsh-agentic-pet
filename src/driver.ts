@@ -776,6 +776,9 @@ export interface PetDriverControl {
     sessionId: string | null
     binding: VoiceBindingView
   }>
+  /** Re-run the known-pet-id sweep immediately (a summon/dismiss just
+   * changed the instance set; the 60s cadence would lag behind). */
+  refreshPetIds(): Promise<void>
 }
 
 export function installPetDriver(ctx: Context, home: string, pet: PetService): PetDriverControl {
@@ -2552,6 +2555,9 @@ ${text}`
   // one-click "ensure + attach" test that never sends a visible prompt.
   return {
     bindingSnapshot: voiceBindingSnapshot,
+    async refreshPetIds() {
+      await refreshKnownPetIds()
+    },
     async testBinding(petId: string) {
       await voiceBindingsReady
       // Explicit user action: bypass any backoff from an earlier failure.

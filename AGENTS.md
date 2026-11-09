@@ -110,6 +110,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；touchPartWording（head/body/tail/hand）；"回忆不是新事实"边界声明 |
 | `src/persona.ts` | 人设 row（两个 preset 挂载，替换 @deepseek-ai/dsh-persona 独占 deployment:persona-prefix 段）：角色卡读 pet-settings.json `persona`（readPersonaCard 同步读，空/缺回落 DEFAULT_PERSONA，8000 字截断），拼在 yml 静态身体规则前；interpolate:false + 每次组装重读，改人设下一轮即生效 |
 | `src/carrier-summon.ts` | 召唤决策纯函数（planSummon：no-webserver → NO_SPAWN → carrier 目录 → electron 可得性的优先级门）；副作用半边在 index.ts `summonCarrier`——child exit 复位 `carrierLaunched` 一次性闸后经 spawnPetCarrier 重拉，路由 `POST /api/pet-settings/summon`（settings-page），客户端召唤卡在 pet-settings.js（在线即隐藏 + 4s 轮询确认） |
+| `src/instances.ts` | 多实例注册表（Phase 1，设计文档 §12）：desired set 读写（whale598/multi-instances.json）、id 算术（nextInstanceId）、召唤准入（admitSummon：上限+去重）；index.ts `instanceControl`（summonInstance/dismissInstance）+ 路由 instance/summon|dismiss + carrier `--user-data-dir` 按实例隔离（锁作用域 = userData） |
 | `src/driver.ts` | 工具注册（`pet_journal` 六个 op、`pet_recall`）、唤醒路径接线、readAutonomy（autonomy + idleBias 载荷）；**绑定防呆**（`sessionOccupiedBy` 拒绝跨宠占用同会话——一只宠物一个脑子）+ **knownPetIds 动态清扫**（registry + 宠物目录，60s 一轮，不硬编码宠物种类） |
 | `src/rhythm.ts` | 静默时段 + B06 时辰偏置表（readIdleBias：默认 凌晨安静系×1.5/活跃系×0.5，可配可 null 关） |
 | carrier `apps/pet/src/renderer/main.ts` | 身体的呈现半边：WebGL stage 绘制、镜像（scaleX(-1) + 命中折返）、idle theater 双模式（bodyIdle 接管/legacy）、touchPartOf（body.json 驱动 + 特定优先）、**双缓冲已回退**（单元素直换，见 §9）、bodyRuntime.lastClip 记最近播放的 one-shot（非 src 快照——快照口径在动作窗口外永远拍到基础循环） |
@@ -124,7 +125,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | 层 | 位置 | 放什么 | 例 |
 | --- | --- | --- | --- |
 | **宠物私有** | `whale598/<petId>/` | 单写者、按实例隔离的宠物状态 | journal/epochs/events/affection/pet-name（原有）+ pet-inner-voice / pet-wake-plans / pet-wake-state / pet-binding-status / pet-window / pet-world（2026-11-10 收口） |
-| **插件/宿主级** | `whale598/` 根 | 插件配置、宿主定位、跨宠比较性账本 | pet-settings.json、pet-surface-url.json、electron-runtime.json、pet-interactions.json、pet-messages.json、pet-http.d/、carrier-*.log、pet-driver.log |
+| **插件/宿主级** | `whale598/` 根 | 插件配置、宿主定位、跨宠比较性账本、机器层键控目录 | pet-settings.json、pet-surface-url.json、electron-runtime.json、pet-interactions.json、pet-messages.json、multi-instances.json（多实例 desired set + 上限）、pet-http.d/（按实例清单）、carrier-instances/（每实例 Chromium userData——机器层，不进宠物数据目录）、carrier-*.log、pet-driver.log |
 | **legacy 只读** | `~/.dsh/` 根 | 上一代布局的只读回退（readPetStateJson/readGlobalJson 兜底链的最末层） | 不要再往这里写 |
 
 **准入规则（硬性）**：禁止在 `whale598/` 根上**新增按 petId 分键的文件**；宠物私有状态一律走 `petdata.petStatePaths` / `readPetStateJson` / `writePetStateJson`（读走三层回退链，写直达宠物文件）。petId 来源：载体 spawn env `DSH_PET_ID`（现恒 `'electron'`，多实例时传不同 id）+ `petdata.existingPetIds()`。

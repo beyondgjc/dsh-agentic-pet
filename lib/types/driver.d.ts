@@ -83,6 +83,9 @@ export interface PetDriverControl {
         sessionId: string | null;
         binding: VoiceBindingView;
     }>;
+    /** Re-run the known-pet-id sweep immediately (a summon/dismiss just
+     * changed the instance set; the 60s cadence would lag behind). */
+    refreshPetIds(): Promise<void>;
 }
 export declare function installPetDriver(ctx: Context, home: string, pet: PetService): PetDriverControl;
 /**

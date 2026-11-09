@@ -35,6 +35,15 @@ const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh');
  * registry manifest name (pet-http.d/<id>.json). The default keeps manual
  * launches (`electron <carrier-dir>`) on the electron identity. */
 const PET_ID = process.env.DSH_PET_ID ?? 'electron';
+/** The asset/behavior family: all electron-kind instances (electron,
+ * electron-2, …) share one body.json and one clip catalog; the id is the
+ * instance, the kind is what it looks like. */
+const PET_KIND = PET_ID.replace(/-\d+$/, '');
+/** Desktop placement stagger: fresh instances (no saved position) offset by
+ * slot so N pets do not stack on the same spot. */
+const PET_SLOT = Number.isFinite(Number(process.env.DSH_PET_SLOT))
+    ? Math.max(0, Math.floor(Number(process.env.DSH_PET_SLOT)))
+    : 0;
 /** This pet's per-pet state file (whale598/<PET_ID>/<name>) — the carrier's
  * own state follows the plugin's whale598 ownership rule. */
 const petStateFile = (name) => join(DSH_HOME, 'whale598', PET_ID, name);
@@ -475,8 +484,18 @@ function readSavedWorld() {
 }
 function createPetWindow() {
     const saved = readSavedPosition();
+    // Fresh instances (no saved position) stagger by slot so N pets do not
+    // stack on the same spot; the primary (slot 0) keeps the OS default.
+    let placement = saved;
+    if (placement === undefined && PET_SLOT > 0) {
+        const area = screen.getPrimaryDisplay().workArea;
+        placement = {
+            x: Math.max(area.x, area.x + area.width - WINDOW_SIZE.width - 24 - PET_SLOT * 48),
+            y: Math.max(area.y, area.y + area.height - WINDOW_SIZE.height - 24 - PET_SLOT * 24),
+        };
+    }
     const window = new BrowserWindow({
-        ...(saved === undefined ? {} : { x: saved.x, y: saved.y }),
+        ...(placement === undefined ? {} : { x: placement.x, y: placement.y }),
         width: WINDOW_SIZE.width,
         height: WINDOW_SIZE.height,
         transparent: true,
@@ -1227,7 +1246,7 @@ async function main() {
         // repeated swap blindness). The registry is the SINGLE discovery source:
         // the legacy root pet-http.d/ and the single-file manifests are retired
         // on both the write and the read side.
-        const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: PET_ID })}\n`;
+        const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: PET_ID, kind: PET_KIND })}\n`;
         const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d');
         try {
             mkdirSync(registryDir, { recursive: true });

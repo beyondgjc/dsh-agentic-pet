@@ -782,6 +782,14 @@ function openPathInFileManager(path: string): void {
 
  */
 
+/** The multi-instance face (multi-pet design §4): per-pet summon/dismiss
+ * backed by the plugin's spawn machinery. petId 'new' allocates the next
+ * free instance id; the primary summons through the plain summon face. */
+export interface InstanceControl {
+  summonInstance(petId?: string): Promise<SummonOutcome & { petId?: string }>
+  dismissInstance(petId: string): Promise<{ ok: boolean; reason?: string }>
+}
+
 export function installSettingsPage(
 
   ctx: Context,
@@ -793,6 +801,8 @@ export function installSettingsPage(
   control?: PetDriverControl,
 
   summon?: () => SummonOutcome,
+
+  instances?: InstanceControl,
 
 ): void {
 
@@ -1180,6 +1190,62 @@ export function installSettingsPage(
       ? { ok: false, started: false, reason: 'unsupported' }
 
       : summon()
+
+    writeJson(res, 200, outcome)
+
+  })
+
+
+
+  route('POST', '/api/pet-settings/instance/summon', async (req, res) => {
+
+    // Per-pet summon (multi-pet design §4): petId 'new' allocates the next
+
+    // free electron-N instance; a named extra id summons that instance; the
+
+    // primary rides the plain summon face. Admission (cap/duplicate) is the
+
+    // instance layer's job.
+
+    if (instances === undefined) {
+
+      writeJson(res, 200, { ok: false, started: false, reason: 'unsupported' })
+
+      return
+
+    }
+
+    const body = await readJsonBody(req)
+
+    const petId = typeof body?.petId === 'string' && body.petId !== '' ? body.petId : undefined
+
+    const outcome = await instances.summonInstance(petId)
+
+    writeJson(res, 200, outcome)
+
+  })
+
+
+
+  route('POST', '/api/pet-settings/instance/dismiss', async (req, res) => {
+
+    // 送走: kill the instance and drop it from the desired set. The primary
+
+    // refuses (it IS this bundle's carrier).
+
+    if (instances === undefined) {
+
+      writeJson(res, 200, { ok: false, reason: 'unsupported' })
+
+      return
+
+    }
+
+    const body = await readJsonBody(req)
+
+    const petId = typeof body?.petId === 'string' ? body.petId : ''
+
+    const outcome = await instances.dismissInstance(petId)
 
     writeJson(res, 200, outcome)
 

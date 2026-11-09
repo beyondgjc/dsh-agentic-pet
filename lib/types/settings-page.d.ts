@@ -140,6 +140,18 @@ export declare function mergeSettings(current: PetSettings, patch: Record<string
  * @param home - the dsh home holding the settings/ledger/manifest files.
 
  */
-export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl, summon?: () => SummonOutcome): void;
+/** The multi-instance face (multi-pet design §4): per-pet summon/dismiss
+ * backed by the plugin's spawn machinery. petId 'new' allocates the next
+ * free instance id; the primary summons through the plain summon face. */
+export interface InstanceControl {
+    summonInstance(petId?: string): Promise<SummonOutcome & {
+        petId?: string;
+    }>;
+    dismissInstance(petId: string): Promise<{
+        ok: boolean;
+        reason?: string;
+    }>;
+}
+export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl, summon?: () => SummonOutcome, instances?: InstanceControl): void;
 export {};
 //# sourceMappingURL=settings-page.d.ts.map

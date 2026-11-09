@@ -135,6 +135,10 @@ window.__ModuleLoader__.load({
       var summonMsgState = useState('')
       var summonMsg = summonMsgState[0]
       var setSummonMsg = summonMsgState[1]
+      // 多宠（Phase 1）：行内召唤/送走 + 再来一只。busy 记 petId——同一行转圈，其它行不受影响。
+      var instanceBusyIdState = useState('')
+      var instanceBusyId = instanceBusyIdState[0]
+      var setInstanceBusyId = instanceBusyIdState[1]
       // 人设卡片（data.persona 由 host 提供；旧 host 无此块时整卡隐藏）：
       // 草稿 null = 跟随 host 生效值；保存成功才交还，失败保留草稿供重试。
       var personaDraftState = useState(null)
@@ -244,6 +248,35 @@ window.__ModuleLoader__.load({
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
+      // 多宠实例操作（/api/pet-settings/instance/*）：electron 走主身召唤，
+      // electron-N 走实例召唤/送走，'new' 分配下一只。上限与去重由宿主裁决。
+      var INSTANCE_REASON = {
+        limit: '到多宠上限了（pet-settings.json 旁的 multi-instances.json 可调 maxInstances）',
+        duplicate: '它已经在桌面上',
+        'electron-installing': 'electron 还在准备，装完再试',
+        'electron-unavailable': 'electron 未安装且无法自动安装',
+        'spawn-disabled': 'DSH_PET_NO_SPAWN=1 已禁用拉起',
+        primary: '主身不能送走',
+        'unknown-instance': '不认识的实例 id',
+      }
+      var instanceAction = function (action, petId, doneText) {
+        if (instanceBusyId !== '') return
+        setInstanceBusyId(petId)
+        setMsg('')
+        fetch('/api/pet-settings/instance/' + action, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ petId: petId }),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (d && d.ok) setMsg(doneText)
+            else setMsg('失败: ' + (INSTANCE_REASON[d && d.reason] || (d && (d.reason || d.error)) || '未知原因'))
+            refresh()
+          })
+          .catch(function (e) { setMsg('请求失败: ' + ((e && e.message) || e)) })
+          .finally(function () { setInstanceBusyId('') })
+      }
       // 在线判断与 GET /read 的 pets[].online 同源；reason → 提示文案映射。
       var anyOnline = (pets || []).some(function (p) { return p.online })
       var SUMMON_HINTS = {
@@ -268,7 +301,12 @@ window.__ModuleLoader__.load({
       var moodOf = function (a) { return a >= 80 ? '开心' : a >= 40 ? '满足' : '平静' }
       // 显示名：用户自定义（settings.names）优先，缺省回落内置名；
       // 宠物区改名后好感度区自动跟随（同一状态、同一渲染趟）。
-      var defaultName = function (id) { return id === 'electron' ? '鲸鱼娘' : id === 'pure' ? 'Pure 宠物' : id }
+      var defaultName = function (id) {
+        if (id === 'electron') return '鲸鱼娘'
+        if (id === 'pure') return 'Pure 宠物'
+        if (/^electron-\d+$/.test(id)) return '鲸鱼娘·' + id.split('-')[1]
+        return id
+      }
       var BOND_TIERS = [[0, "陌生"], [5, "认识"], [15, "熟了"], [40, "亲近"], [90, "离不开"], [180, "只有你"]]
       var bondTier = function (days) {
         var name = "陌生"
@@ -487,10 +525,12 @@ window.__ModuleLoader__.load({
             summonMsg ? h('div', { style: { fontSize: 12, marginTop: 6, color: '#ff7369' } }, summonMsg) : null)
           : null,
 
-        // ── 状态（每宠一行） ──
-        h(Section, { title: '宠物' },
+        // ── 状态（每宠一行 + 行内召唤/送走，多宠 Phase 1） ──
+        h(Section, { title: h('span', null, '宠物 ',
+          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '同名同脸，各养各的记忆')) },
           pets.length
             ? pets.map(function (p) {
+              var isExtra = /^electron-\d+$/.test(p.id)
               return h('div', { key: p.id, style: row },
                 // Uncontrolled + commit-on-blur/Enter: typing is LOCAL until the
                 // edit completes — a per-keystroke update would fire a [改名]
@@ -505,9 +545,20 @@ window.__ModuleLoader__.load({
                     h('span', { style: muted }, 'pid ' + String(p.pid ?? '?')),
                     p.state ? h('span', { style: muted }, '状态: ' + String(p.state)) : null,
                     p.animation ? h('span', { style: muted }, String(p.animation)) : null)
-                  : h('span', { style: muted }, '离线'))
+                  : h('span', { style: muted }, '离线'),
+                p.online && isExtra
+                  ? h(SButton, { variant: 'danger', disabled: instanceBusyId === p.id, onClick: function () {
+                    if (window.confirm('送走 ' + petName(p.id) + '？它会从桌面消失，重启后也不再自动回来。')) instanceAction('dismiss', p.id, petName(p.id) + ' 已送走')
+                  } }, instanceBusyId === p.id ? '送别中…' : '送走')
+                  : null,
+                !p.online
+                  ? h(SButton, { disabled: instanceBusyId === p.id, onClick: function () { instanceAction('summon', p.id, petName(p.id) + ' 已召唤') } }, instanceBusyId === p.id ? '召唤中…' : '召唤')
+                  : null)
             })
-            : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。'))),
+            : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。')),
+          h('div', { style: row },
+            h(SButton, { disabled: instanceBusyId !== '' || busy, onClick: function () { instanceAction('summon', 'new', '新宠物已召唤上桌（可改名区分）') } }, instanceBusyId === 'new' ? '召唤中…' : '再来一只'),
+            h('span', { style: muted }, '同种同脸，各养各的记忆；上限 3 只（multi-instances.json 可调）'))),
 
         // ── 人设（可编辑角色卡；身体规则是宿主契约，不在此编辑） ──
         personaInfo ? h(Section, { title: h('span', null, '人设 ',

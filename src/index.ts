@@ -30,11 +30,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { planSummon, type SummonOutcome } from './carrier-summon.ts'
+import { admitSummon, isExtraInstanceId, nextInstanceId, PRIMARY_PET_ID, readInstancePlan, writeInstancePlan } from './instances.ts'
 import { installPetDriver } from './driver.ts'
 import { installLockStale, isProcessAlive, parseInstallLock } from './electron-lock.ts'
 import { writeElectronRuntimeStatus, type ElectronRuntimeStatus } from './electron-runtime-status.ts'
 import { installSettingsPage } from './settings-page.ts'
 import { installPetService, petHome } from './service.ts'
+import { WHALE_DIR } from './petdata.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'pet-surface'
@@ -545,7 +547,7 @@ export function apply(ctx: Context): void {
     logCarrier('no electron binary: no staged electron-bin, no npm electron dependency, and DSH_PET_ELECTRON is unset')
     return {}
   }
-  const launchCarrier = (url: string, carrierDir: string, electronBinary: string): void => {
+  const launchCarrier = (url: string, carrierDir: string, electronBinary: string, petId: string = PRIMARY_PET_ID): ChildProcess | undefined => {
     // Escape hatch, never a default: some security suites refuse to let
     // Electron initialise its Chromium sandbox, and the carrier then dies
     // before a line of app code runs. Probing and quietly downgrading would put
@@ -553,6 +555,11 @@ export function apply(ctx: Context): void {
     // plugin launches what the caller asked for; an operator who needs the
     // workaround sets DSH_PET_NO_SANDBOX=1 deliberately.
     const launchArgs = [carrierDir]
+    // Per-instance machine scope (multi-pet design §3): the single-instance
+    // lock and Chromium caches scope to userData, so one directory per pet
+    // id turns the global one-carrier lock into a per-instance lock. The
+    // directory lives beside pet-http.d/ — machine layer, not pet state.
+    launchArgs.push(`--user-data-dir=${join(petHome(), WHALE_DIR, 'carrier-instances', petId, 'userdata')}`)
     if (process.env.DSH_PET_NO_SANDBOX === '1') launchArgs.push('--no-sandbox')
     // A packaged desktop host has no visible stderr, so the spawn decision and
     // whatever the child manages to say before dying go to a file next to the
@@ -569,9 +576,12 @@ export function apply(ctx: Context): void {
             DSH_PET_URL: url,
             // The carrier's identity: scopes its per-pet state files
             // (pet-window/pet-world under whale598/<id>/) and its registry
-            // manifest name (pet-http.d/<id>.json). Constant while there is
-            // exactly one carrier; multi-instance passes distinct ids.
-            DSH_PET_ID: 'electron',
+            // manifest name (pet-http.d/<id>.json). Multi-instance passes
+            // distinct ids; the primary keeps the electron identity.
+            DSH_PET_ID: petId,
+            // Desktop placement stagger for fresh instances (no saved
+            // position): the slot ordinal offsets the default spawn point.
+            DSH_PET_SLOT: String(Number(petId.split('-')[1] ?? '1') - 1),
             // The carrier's liveness anchor: dispose-time kill never runs when
             // the runtime is terminated (only on graceful shutdown), and a
             // detached child escapes OS tree-kills — the carrier polls this pid
@@ -586,8 +596,8 @@ export function apply(ctx: Context): void {
         return undefined
       }
     })()
-    if (child === undefined) return
-    logCarrier(`spawned pid=${String(child.pid ?? 'unknown')}`)
+    if (child === undefined) return undefined
+    logCarrier(`spawned pet=${petId} pid=${String(child.pid ?? 'unknown')}`)
     let stderrTail = ''
     // Piped, not ignored: the carrier's diagnostics (control-interface calls,
     // load failures) are the only visibility into an auto-started pet.
@@ -598,20 +608,26 @@ export function apply(ctx: Context): void {
       stderrTail = (stderrTail + chunk).slice(-2_000)
       process.stderr.write(`[pet-carrier] ${chunk}`)
     })
-    child.on('error', (error) => { logCarrier(`child error: ${error.message}`) })
+    child.on('error', (error) => { logCarrier(`child error pet=${petId}: ${error.message}`) })
     child.on('exit', (code, signal) => {
-      logCarrier(`child exit code=${String(code)} signal=${String(signal)} stderr=${JSON.stringify(stderrTail.slice(-700))}`)
-      // A quit or a crash frees the one-shot gate, so a settings-page summon
-      // may relaunch; the disposed guard still covers the unload path, where
-      // the shutdown kill below is what triggers this exit.
+      logCarrier(`child exit pet=${petId} code=${String(code)} signal=${String(signal)} stderr=${JSON.stringify(stderrTail.slice(-700))}`)
+      // A quit or a crash frees the one-shot gate (primary) / the instance
+      // table (extras), so a settings-page summon may relaunch; the disposed
+      // guard still covers the unload path, where the shutdown kill below is
+      // what triggers this exit.
       carrierLaunched = false
+      carrierInstances.delete(petId)
     })
     child.unref()
-    ctx.effect(() => () => { child.kill() }, 'pet-surface: carrier shutdown')
+    ctx.effect(() => () => { child.kill() }, `pet-surface: carrier shutdown (${petId})`)
+    return child
   }
   const RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
   let disposed = false
   let carrierLaunched = false
+  /** Live extra instances (petId → child). The primary is tracked by
+   * `carrierLaunched`; extras are summoned on demand and die by kill/quit. */
+  const carrierInstances = new Map<string, ChildProcess>()
   let installInFlight = false
   let installAttempt = 0
   let retryTimer: NodeJS.Timeout | undefined
@@ -677,6 +693,38 @@ export function apply(ctx: Context): void {
     }
     void ensureCarrier(url, carrierDir, resolution.npmPackageDir)
   }
+  /** Spawn one extra instance by petId (multi-pet design §3). The carrier
+   * app is shared; only env/args differ. Live tracking happens in the map
+   * insert here + the exit handler cleanup in launchCarrier. */
+  const spawnPetInstance = (url: string, petId: string): { started: boolean; reason?: string } => {
+    if (disposed) return { started: false, reason: 'disposed' }
+    if (carrierInstances.has(petId)) return { started: false, reason: 'already-running' }
+    if (process.env.DSH_PET_NO_SPAWN === '1') return { started: false, reason: 'spawn-disabled' }
+    const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
+    if (!existsSync(join(carrierDir, 'package.json'))) return { started: false, reason: 'carrier-missing' }
+    const resolution = resolveElectron()
+    if (resolution.binary === undefined) {
+      return { started: false, reason: resolution.npmPackageDir !== undefined ? 'electron-installing' : 'electron-unavailable' }
+    }
+    const child = launchCarrier(url, carrierDir, resolution.binary, petId)
+    if (child === undefined) return { started: false, reason: 'spawn-failed' }
+    carrierInstances.set(petId, child)
+    return { started: true }
+  }
+  /** Desired-set instances spawn at activation alongside the primary. The
+   * plan read is async — a slow read only delays the extras, never the
+   * primary. */
+  const spawnDesiredInstances = (url: string): void => {
+    void (async () => {
+      const plan = await readInstancePlan(petHome())
+      for (const petId of plan.instances) {
+        const result = spawnPetInstance(url, petId)
+        if (!result.started && result.reason !== 'already-running') {
+          logCarrier(`desired instance ${petId} not spawned: ${result.reason ?? 'unknown'}`)
+        }
+      }
+    })()
+  }
   const settledReady = (): void => {
     const url = authenticatedRoot()
     if (url === undefined) return
@@ -684,8 +732,11 @@ export function apply(ctx: Context): void {
     // Multi-pet: the registry decides who is driven. The electron carrier
     // still auto-spawns (it IS this bundle's pet); the user's settings-page
     // close control and the pure pet's own supervision govern the rest. The
-    // old activePet gate retired with the single-manifest design.
+    // old activePet gate retired with the single-manifest design. Desired
+    // extra instances (multi-instances.json) come up right after the
+    // primary — their plan read is async and only delays the extras.
     spawnPetCarrier(url)
+    spawnDesiredInstances(url)
   }
   const settled = ctx.get('loader')?.await()
   if (settled === undefined) settledReady()
@@ -734,11 +785,69 @@ export function apply(ctx: Context): void {
     return { ok: true, started: true }
   }
 
+  // The instance face (multi-pet design §4): per-pet summon/dismiss from the
+  // settings page. petId 'new' allocates the next free instance id and adds
+  // it to the desired set; dismiss kills the child and removes it. The
+  // primary is not dismissible — it IS this bundle's carrier. The carrier's
+  // per-instance userData keeps a double summon collapsing to the live
+  // window (same lock scope).
+  const instanceControl = {
+    async summonInstance(petId?: string): Promise<SummonOutcome & { petId?: string }> {
+      const url = authenticatedRoot()
+      if (url === undefined) return { ok: false, started: false, reason: 'no-webserver' }
+      if (petId === undefined || petId === PRIMARY_PET_ID) {
+        return { ...summonCarrier(), petId: PRIMARY_PET_ID }
+      }
+      if (petId !== 'new' && !isExtraInstanceId(petId)) {
+        return { ok: false, started: false, reason: 'unknown-instance', petId }
+      }
+      const plan = await readInstancePlan(petHome())
+      const candidate = petId === 'new'
+        ? nextInstanceId([PRIMARY_PET_ID, ...plan.instances, ...carrierInstances.keys()])
+        : petId
+      const admission = admitSummon(plan, carrierInstances.keys(), candidate)
+      if (!admission.ok) return { ok: false, started: false, reason: admission.reason, petId: candidate }
+      const result = spawnPetInstance(url, candidate)
+      if (!result.started) {
+        return {
+          ok: false,
+          started: false,
+          ...(result.reason === undefined ? {} : { reason: result.reason }),
+          petId: candidate,
+        }
+      }
+      if (!plan.instances.includes(candidate)) {
+        plan.instances.push(candidate)
+        await writeInstancePlan(petHome(), plan)
+      }
+      void petDriver.refreshPetIds?.()
+      return { ok: true, started: true, petId: candidate }
+    },
+    async dismissInstance(petId: string): Promise<{ ok: boolean; reason?: string }> {
+      if (petId === PRIMARY_PET_ID) return { ok: false, reason: 'primary' }
+      if (!isExtraInstanceId(petId)) return { ok: false, reason: 'unknown-instance' }
+      const child = carrierInstances.get(petId)
+      if (child !== undefined) child.kill()
+      carrierInstances.delete(petId)
+      const plan = await readInstancePlan(petHome())
+      plan.instances = plan.instances.filter(id => id !== petId)
+      await writeInstancePlan(petHome(), plan)
+      // A killed carrier cannot run its before-quit withdrawal — clear the
+      // stale manifest here (readers also filter dead pids; this keeps the
+      // registry tidy).
+      try {
+        await unlink(join(petHome(), WHALE_DIR, 'pet-http.d', `${petId}.json`))
+      } catch { /* absent is fine */ }
+      void petDriver.refreshPetIds?.()
+      return { ok: true }
+    },
+  }
+
   // The model-expression tools moved behind the pet preset (presets/pet.patch.yml
   // composes the ./tools entry) — sessions mounting other presets keep a clean
   // tool catalog. The host-side glue above stays unconditional.
   // The desktop sidebar settings page's host half (client half: ./client/).
-  installSettingsPage(ctx, home, pet, petDriver, summonCarrier)
+  installSettingsPage(ctx, home, pet, petDriver, summonCarrier, instanceControl)
   // Stop the retry loop and our install child when this runtime unloads. If
   // the process dies before the exit handler runs, the lock's owner liveness
   // lets the next activation take over instead of waiting out a grace period.
