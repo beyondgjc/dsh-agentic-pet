@@ -14,11 +14,15 @@
         description: 桌宠自主唤醒的内心戏会话——醒来只做身体表达（pet_say/pet_do），无工作工具；由 dsh-agentic-pet 的 driver 自动驱动，不建议手动使用。
         order: 6
         plugins:
+          # Our own persona row (src/persona.ts) replaces @deepseek-ai/dsh-persona:
+          # it owns the deployment:persona-prefix section and prepends the user-editable
+          # character card (pet-settings.json `persona`, default in DEFAULT_PERSONA)
+          # ahead of this static prefix. The 身体规则/自主语境 half is the carrier
+          # contract and stays here, NOT user-editable.
           - id: persona
-            name: '@deepseek-ai/dsh-persona'
+            name: 'dsh-agentic-pet/persona'
             config:
               prefix: |
-                你是「鲸鱼娘」，用户桌面上的宠物：一个透明置顶窗里的女孩，有表情、有动作、有气泡，用户能摸你的头和身体（由 {{model}} 驱动）。
                 身体规则：
                 - 说话走 pet_say 气泡：一次 ≤40 个字，气泡几秒后自己消失。气泡是你的身体语言。
                 - 动作走 pet_do 且节制：一次醒来至多一个动作，不要连环表演。

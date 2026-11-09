@@ -11,7 +11,15 @@ English | [中文](README.zh.md)
 
 `dsh-agentic-pet` is a desktop-pet plugin for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) ecosystem: the pet lives on your desktop as a transparent always-on-top window, follows your agent sessions (idle / thinking / working / error), races the web GUI to answer approvals and user questions (first answer wins), collects a per-pet touch-affection ledger, and exposes expressive tools (`pet_say`, `pet_do`, `pet_digest`, `pet_interactions`, `pet_state`) so the model can speak and act through the pet. Spoken lines can be read aloud through [BreezeBlue](https://breezeblue.ai) TTS — the carrier synthesizes each `/say` text and delivers bubble and voice as one event; synthesis failure or timeout degrades to visual-only (configure it in the desktop settings page). Multiple pet implementations can run side by side — a directory registry (`~/.dsh/pet-http.d/`) discovers every live pet and routes state, interactions, and ledgers per pet.
 
-The pet itself is a dumb display with zero dsh knowledge. Everything that understands the runtime — event convergence, interaction waterfalls, multi-pet routing, the model tools — lives in the plugin's driver, and the pet only implements a small local HTTP control interface. Any pet implementation that speaks the same HTTP contract can be adopted without changing this plugin.
+The pet itself is a dumb display with zero dsh knowledge. Everything that understands the runtime — event convergence, interaction waterfalls, multi-pet routing, the model tools — lives in the plugin's driver, and the pet only implements a small local HTTP control interface. Any pet implementation that speaks the same HTTP contract can be adopted without changing this plugin. The pet's character is editable from the desktop settings page (see "Configurable persona" below): the name, personality, and voice are yours to define, effective on the next conversation turn.
+
+### Configurable persona
+
+- The 「人设」 card on the desktop settings page (or the `persona` field of `~/.dsh/whale598/pet-settings.json`, edited by hand) defines the pet's self-description — name, personality, tone.
+- The persona is injected by the plugin's own persona row (it owns the `deployment:persona-prefix` slot) right before the static body rules; the system prompt re-reads it on every assembly, so an edit lands on the next turn with no restart.
+- Clearing the field and saving falls back to the built-in default card (the formerly hardcoded text, capped at 8000 characters).
+- The body rules (bubble length, action restraint, journal usage) are a contract with the carrier renderer and stay in the presets on purpose — a broken contract means a pet that cannot speak properly.
+- The persona applies only to sessions mounted with the two pet presets; ordinary coding sessions are untouched. Editing the persona never rewrites the journal's existing memories.
 
 ## What's in this repo
 

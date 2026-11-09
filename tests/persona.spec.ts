@@ -1,0 +1,107 @@
+/**
+ * The configurable persona: the sync card reader (missing/broken/empty →
+ * default, custom → verbatim, oversized → truncated, legacy location still
+ * answers) and the settings-page merge's persona leaf (absent patch keeps,
+ * empty clears to absent, oversize truncates). The row itself only wires the
+ * reader into the prompt registry — the merge and the reader are the
+ * behavior-bearing halves, both pure against a fake home.
+ */
+
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+import { DEFAULT_PERSONA, MAX_PERSONA_CHARS, readPersonaCard } from '../src/persona.ts'
+import { mergeSettings } from '../src/settings-page.ts'
+
+const dirs: string[] = []
+
+afterAll(async () => {
+  for (const dir of dirs) await rm(dir, { recursive: true, force: true })
+})
+
+async function tempHome(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'persona-'))
+  dirs.push(dir)
+  return dir
+}
+
+describe('readPersonaCard', () => {
+  it('answers the default card when the settings file is missing, broken, or card-less', async () => {
+    const home = await tempHome()
+    expect(readPersonaCard(home)).toBe(DEFAULT_PERSONA)
+    await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
+    expect(readPersonaCard(home)).toBe(DEFAULT_PERSONA)
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({ tts: { enabled: true } }), 'utf8')
+    expect(readPersonaCard(home)).toBe(DEFAULT_PERSONA)
+  })
+
+  it('falls back to the default for an empty or whitespace-only card', async () => {
+    const home = await tempHome()
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({ persona: '   ' }), 'utf8')
+    expect(readPersonaCard(home)).toBe(DEFAULT_PERSONA)
+  })
+
+  it('passes a custom card through verbatim (trimmed)', async () => {
+    const home = await tempHome()
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({ persona: ' 你是「测试猫娘」。\n' }), 'utf8')
+    expect(readPersonaCard(home)).toBe('你是「测试猫娘」。')
+  })
+
+  it('truncates an oversized hand-edited card to the cap', async () => {
+    const home = await tempHome()
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({ persona: '呜'.repeat(MAX_PERSONA_CHARS + 10) }), 'utf8')
+    expect(readPersonaCard(home)).toBe('呜'.repeat(MAX_PERSONA_CHARS))
+  })
+
+  it('answers the legacy root copy when the whale598 one is absent', async () => {
+    const home = await tempHome()
+    await mkdir(join(home, 'whale598'), { recursive: true })
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({ persona: '旧位置的卡' }), 'utf8')
+    expect(readPersonaCard(home)).toBe('旧位置的卡')
+  })
+
+  it('re-reads on every call: an overwrite lands without any cache to bust', async () => {
+    const home = await tempHome()
+    const file = join(home, 'whale598', 'pet-settings.json')
+    await mkdir(join(home, 'whale598'), { recursive: true })
+    await writeFile(file, JSON.stringify({ persona: '第一版' }), 'utf8')
+    expect(readPersonaCard(home)).toBe('第一版')
+    await writeFile(file, JSON.stringify({ persona: '第二版' }), 'utf8')
+    expect(readPersonaCard(home)).toBe('第二版')
+  })
+})
+
+describe('DEFAULT_PERSONA', () => {
+  it('keeps the shipped identity sentence and stays interpolation-free', () => {
+    expect(DEFAULT_PERSONA).toContain('鲸鱼娘')
+    expect(DEFAULT_PERSONA).not.toContain('{{')
+  })
+})
+
+describe('mergeSettings persona leaf', () => {
+  it('keeps the stored card when the patch does not mention persona', () => {
+    const current = mergeSettings({ persona: '已有设定' }, {})
+    expect(current.persona).toBe('已有设定')
+  })
+
+  it('deletes the key on an empty or whitespace patch (cleared = default)', () => {
+    const cleared = mergeSettings({ persona: '已有设定' }, { persona: '' })
+    expect('persona' in cleared).toBe(false)
+    const blanked = mergeSettings({ persona: '已有设定' }, { persona: '   \n ' })
+    expect('persona' in blanked).toBe(false)
+  })
+
+  it('stores a trimmed custom card and truncates past the cap', () => {
+    const saved = mergeSettings({}, { persona: ' 新设定 \n' })
+    expect(saved.persona).toBe('新设定')
+    const capped = mergeSettings({}, { persona: '呜'.repeat(MAX_PERSONA_CHARS + 10) })
+    expect(capped.persona).toBe('呜'.repeat(MAX_PERSONA_CHARS))
+  })
+
+  it('ignores non-string patches and preserves the carrier-shared keys', () => {
+    const current = mergeSettings({ persona: '保留', tts: { enabled: true } }, { persona: 42 })
+    expect(current.persona).toBe('保留')
+    expect(current.tts?.enabled).toBe(true)
+  })
+})

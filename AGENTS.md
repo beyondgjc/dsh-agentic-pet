@@ -47,13 +47,14 @@
   --module esnext --moduleResolution bundler --target es2024 --lib esnext --types node --strict \
   --skipLibCheck --declaration --declarationMap --sourceMap --rewriteRelativeImportExtensions
 
-# 2) tsdown 打包：lib/types/index.js + tools.js → lib/index.js + lib/tools.js + 一个 hash chunk
-rm -f lib/driver-*.js        # 先删旧 chunk 再打包！tsdown 是 clean:false
+# 2) tsdown 打包：lib/types/index.js + tools.js + persona.js → 三个入口 + 两个共享 hash chunk
+#    （driver-* + service-*：persona 入口与 tools 共享 service/petdata，tsdown 拆出第二个 chunk）
+rm -f lib/driver-*.js lib/service-*.js   # 先删旧 chunk 再打包！tsdown 是 clean:false
 ./node_modules/.bin/tsdown
 
-# 3) 验证：lib/ 只能有一个 driver-*.js；index.js 引用它；模块能独立加载
-grep -c "driver-" lib/index.js
-node --input-type=module -e "await import('./lib/index.js')"
+# 3) 验证：lib/ 恰好一个 driver-*.js 和一个 service-*.js（release.mjs 同款校验）；各入口能独立加载
+grep -c "driver-" lib/index.js && grep -c "service-" lib/persona.js
+node --input-type=module -e "await import('./lib/index.js'); await import('./lib/persona.js')"
 ```
 
 `lib/` 是入库产物——**改了 src 必须重建并一起提交**，不许 src 和 lib 漂移。
@@ -78,7 +79,7 @@ cd "$P" && node --input-type=module -e "await import('./lib/index.js')"
 ## 5. 发布
 
 ```bash
-# 前置：工作树干净（release.mjs 会拒绝）、测试全绿、lib 单 chunk
+# 前置：工作树干净（release.mjs 会拒绝）、测试全绿、lib 双 chunk（driver+service）
 node scripts/release.mjs 0.4.13 --dry-run   # 预检：版本、包清单，不发不提交
 node scripts/release.mjs 0.4.13             # npm publish + commit "chore(release): X.Y.Z" + tag vX.Y.Z
 git push --follow-tags
@@ -107,6 +108,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `src/body.ts` | body/1 自述校验：behavior 能力 kind 分流（facing/idle/transition）、hitboxes 单矩形/多矩形（tail 双尾鳍）、resolveExpressionRequest/suggestExpressionFallback |
 | `src/idle-selector.ts` | 待机选择器纯函数：白名单池过滤（idleEligible/facing 排 noMirror/noRepeat 回落）、加权随机 + 时段偏置（max-not-product）、区间采样抖动、朝向迟滞判定；RNG 可注入（mulberry32） |
 | `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；touchPartWording（head/body/tail/hand）；"回忆不是新事实"边界声明 |
+| `src/persona.ts` | 人设 row（两个 preset 挂载，替换 @deepseek-ai/dsh-persona 独占 deployment:persona-prefix 段）：角色卡读 pet-settings.json `persona`（readPersonaCard 同步读，空/缺回落 DEFAULT_PERSONA，8000 字截断），拼在 yml 静态身体规则前；interpolate:false + 每次组装重读，改人设下一轮即生效 |
 | `src/driver.ts` | 工具注册（`pet_journal` 六个 op、`pet_recall`）、唤醒路径接线、readAutonomy（autonomy + idleBias 载荷） |
 | `src/rhythm.ts` | 静默时段 + B06 时辰偏置表（readIdleBias：默认 凌晨安静系×1.5/活跃系×0.5，可配可 null 关） |
 | carrier `apps/pet/src/renderer/main.ts` | 身体的呈现半边：WebGL stage 绘制、镜像（scaleX(-1) + 命中折返）、idle theater 双模式（bodyIdle 接管/legacy）、touchPartOf（body.json 驱动 + 特定优先）、**双缓冲已回退**（单元素直换，见 §9） |

@@ -34,6 +34,7 @@ const REGISTRY = 'https://registry.npmjs.org'
 const REQUIRED_ARTIFACTS = [
   'lib/index.js',
   'lib/tools.js',
+  'lib/persona.js',
   'client/pet-settings.js',
   'carrier/lib/main.js',
   'carrier/dist-renderer/index.html',
@@ -116,10 +117,17 @@ for (const relative of REQUIRED_ARTIFACTS) {
     fail(`missing release artifact ${relative} - build, then run scripts\\sync-from-monorepo.cmd`)
   }
 }
-const entryFiles = new Set(['index.js', 'tools.js'])
+// Three bundle entries, two shared chunks: the persona entry (dsh-agentic-pet/persona)
+// pulls service/petdata out of the driver chunk, so tsdown splits a second
+// shared chunk. The invariant is still "exactly the chunks a clean rebuild
+// produces" — one driver-* and one service-*, nothing else — which is what
+// catches the stale chunks tsdown's clean:false leaves behind.
+const entryFiles = new Set(['index.js', 'tools.js', 'persona.js'])
 const chunks = readdirSync(join(ROOT, 'lib')).filter(entry => entry.endsWith('.js') && !entryFiles.has(entry))
-if (chunks.length !== 1) {
-  fail(`lib/ must carry exactly one bundle chunk, found ${String(chunks.length)} (${chunks.join(', ') || 'none'}) - tsdown clean:false leaves stale chunks behind; delete lib/*.js and rebuild`)
+const driverChunks = chunks.filter(entry => /^driver-[A-Za-z0-9_-]+\.js$/.test(entry))
+const serviceChunks = chunks.filter(entry => /^service-[A-Za-z0-9_-]+\.js$/.test(entry))
+if (driverChunks.length !== 1 || serviceChunks.length !== 1 || driverChunks.length + serviceChunks.length !== chunks.length) {
+  fail(`lib/ must carry exactly one driver-* and one service-* chunk, found ${String(chunks.length)} (${chunks.join(', ') || 'none'}) - tsdown clean:false leaves stale chunks behind; delete lib/driver-*.js lib/service-*.js and rebuild`)
 }
 
 const prerelease = version.includes('-')

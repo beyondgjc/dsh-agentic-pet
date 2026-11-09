@@ -58,6 +58,8 @@ import { voiceBindingSnapshot, type PetDriverControl } from './driver.ts'
 
 import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
 
+import { DEFAULT_PERSONA, MAX_PERSONA_CHARS } from './persona.ts'
+
 import { parseClock } from './rhythm.ts'
 
 import type { PetService } from './service.ts'
@@ -237,6 +239,11 @@ interface PetSettings {
   tts?: TtsSettings
 
   debug?: DebugSettings
+
+  /** The user-editable character card (src/persona.ts): absent or empty
+   * falls back to DEFAULT_PERSONA at prompt-assembly time. */
+
+  persona?: string
 
 }
 
@@ -418,9 +425,9 @@ function clampNumber(value: unknown, min: number, max: number): number | undefin
 
 
 
-/** Merge a patch into the settings, accepting only the known keys. */
-
-function mergeSettings(current: PetSettings, patch: Record<string, unknown>): PetSettings {
+/** Merge a patch into the settings, accepting only the known keys. Exported
+ * for the persona-merge spec (tests/persona.spec.ts). */
+export function mergeSettings(current: PetSettings, patch: Record<string, unknown>): PetSettings {
 
   const proactivity = { ...DEFAULT_SETTINGS.proactivity, ...current.proactivity }
 
@@ -700,6 +707,25 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
 
   }
 
+  // Persona (the user-editable character card, src/persona.ts): a string leaf
+  // with the same clear-on-empty semantics as the TTS texts — an empty save
+  // DELETES the key so the persona row falls back to DEFAULT_PERSONA, and a
+  // hand-edited oversized card is truncated rather than trusted.
+
+  const patchPersona = patch.persona
+
+  let persona: string | undefined = current.persona
+
+  if (typeof patchPersona === 'string') {
+
+    const trimmed = patchPersona.trim()
+
+    if (trimmed === '') persona = undefined
+
+    else persona = trimmed.length > MAX_PERSONA_CHARS ? trimmed.slice(0, MAX_PERSONA_CHARS) : trimmed
+
+  }
+
   // NOTE: display names are NOT a pet-settings.json section anymore — they
 
   // live in whale598/<petId>/pet-name.json (see the update handler).
@@ -710,7 +736,16 @@ function mergeSettings(current: PetSettings, patch: Record<string, unknown>): Pe
 
   // save here silently wipes the carrier's half.
 
-  return { ...current, proactivity, innerVoice, rhythm, journal, presenceSummary, tts, debug }
+  const next = { ...current, proactivity, innerVoice, rhythm, journal, presenceSummary, tts, debug }
+
+  // The cleared-card case must remove the key, not spread `undefined` over
+  // it — `...current` already carried the stored value into `next`.
+
+  if (persona === undefined) Reflect.deleteProperty(next, 'persona')
+
+  else next.persona = persona
+
+  return next
 
 }
 
@@ -1076,7 +1111,21 @@ export function installSettingsPage(
 
     }
 
-    writeJson(res, 200, { settings: composed, affection, windowPosition, pets: status.pets, touchTotals })
+    // The persona card (src/persona.ts): current value plus the default and
+    // cap so the client can placeholder and count without hardcoding the
+    // row's constants.
+
+    const persona = {
+
+      value: typeof settings.persona === 'string' ? settings.persona : '',
+
+      default: DEFAULT_PERSONA,
+
+      maxLength: MAX_PERSONA_CHARS,
+
+    }
+
+    writeJson(res, 200, { settings: composed, affection, windowPosition, pets: status.pets, touchTotals, persona })
 
   })
 

@@ -34,7 +34,7 @@ describe('dsh-pet-app bundle', () => {
     // in the patch parse exactly the way the Loader parses them.
     const rows = patches!.flatMap(file =>
       (yaml.load(readFileSync(resolve(root, file), 'utf8'), { schema: entryListSchema }) as unknown) as {
-        insert?: { id?: string; name?: string; config?: { id?: string; plugins?: { id?: string }[] } }
+        insert?: { id?: string; name?: string; config?: { id?: string; plugins?: { id?: string; name?: string }[] } }
       }[],
     ).flatMap(patch => patch.insert ?? [])
     expect(rows.map(row => row.id)).toEqual(['pet-surface', 'preset-pet', 'preset-pet-inner-voice'])
@@ -43,9 +43,17 @@ describe('dsh-pet-app bundle', () => {
     // The inner-voice preset is expression-only by design: persona + the pet
     // tools + time context + compaction, never the work-tool rows.
     expect(rows[2]).toMatchObject({ name: '@deepseek-ai/dsh-agent-preset' })
-    const voiceRow = (rows[2] as { config?: { id?: string; plugins?: { id?: string }[] } }).config
+    const voiceRow = (rows[2] as { config?: { id?: string; plugins?: { id?: string; name?: string }[] } }).config
     expect(voiceRow?.id).toBe('whale598')
     expect(voiceRow?.plugins?.map(plugin => plugin.id)).toEqual(['persona', 'pet-tools', 'time-context', 'compaction'])
+    // Both presets mount OUR persona row (src/persona.ts, the editable card)
+    // — never the stock @deepseek-ai/dsh-persona, whose static prefix cannot
+    // re-read pet-settings.json. Same id `persona` in both trees on purpose:
+    // the web editor overrides rows by id.
+    for (const row of [rows[1], rows[2]] as { config?: { plugins?: { id?: string; name?: string }[] } }[]) {
+      const personaRow = row.config?.plugins?.find(plugin => plugin.id === 'persona')
+      expect(personaRow?.name).toBe('dsh-agentic-pet/persona')
+    }
   })
 })
 

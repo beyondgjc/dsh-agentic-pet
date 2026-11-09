@@ -128,6 +128,11 @@ window.__ModuleLoader__.load({
       var affectionRevealState = useState({})
       var affectionReveal = affectionRevealState[0]
       var setAffectionReveal = affectionRevealState[1]
+      // 人设卡片（data.persona 由 host 提供；旧 host 无此块时整卡隐藏）：
+      // 草稿 null = 跟随 host 生效值；保存成功才交还，失败保留草稿供重试。
+      var personaDraftState = useState(null)
+      var personaDraft = personaDraftState[0]
+      var setPersonaDraft = personaDraftState[1]
 
       var refresh = useCallback(function () {
         fetch(READ, { credentials: 'same-origin' })
@@ -220,6 +225,15 @@ window.__ModuleLoader__.load({
       var tts = settings.tts || {}
       var debug = settings.debug || {}
       var savedBinding = String((iv.boundSessions && iv.boundSessions.electron) || '')
+      // 人设（data.persona = {value, default, maxLength}，host 从 src/persona.ts
+      // 取默认与上限）：生效文本 = 草稿优先，否则 host 值；字数按 Unicode 码点数，
+      // 和宿主的截断口径一致。
+      var personaInfo = (data && data.persona) || null
+      var personaValue = personaInfo ? String(personaInfo.value || '') : ''
+      var personaDefault = personaInfo ? String(personaInfo.default || '') : ''
+      var personaMax = personaInfo ? (Number(personaInfo.maxLength) || 8000) : 8000
+      var personaText = personaDraft !== null ? personaDraft : personaValue
+      var personaCount = Array.from(personaText).length
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
@@ -350,6 +364,29 @@ window.__ModuleLoader__.load({
         }).then(function () { done() }, function () { done() })
       }
 
+      // 人设保存走独立的 fetch（不走 update）：保存成功才把文本框交还 host
+      // 生效值（setPersonaDraft(null)），失败时草稿留在框里供重试——长文本
+      // 不该因为一次请求失败就丢。text 参数显式传入，避免闭包读到旧渲染趟的
+      // personaText。
+      var savePersona = function (text, doneMessage) {
+        setBusy(true)
+        setMsg('')
+        fetch(UPDATE, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ patch: { persona: String(text || '').trim() } }),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (d && d.error) setMsg('失败: ' + d.error)
+            else { setPersonaDraft(null); setMsg(doneMessage) }
+            setWarnings(d && d.warnings && d.warnings.length ? d.warnings.join('；') : '')
+            refresh()
+          })
+          .catch(function (e) { setMsg('请求失败: ' + (e && e.message)) })
+          .finally(function () { setBusy(false) })
+      }
+
       return h('div', { style: { width: '100%', maxWidth: 720 } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 10px' } },
           h('span', { style: { fontWeight: 700, fontSize: 15 } }, '桌宠'),
@@ -380,6 +417,24 @@ window.__ModuleLoader__.load({
                   : h('span', { style: muted }, '离线'))
             })
             : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。'))),
+
+        // ── 人设（可编辑角色卡；身体规则是宿主契约，不在此编辑） ──
+        personaInfo ? h(Section, { title: '人设' },
+          h('textarea', {
+            style: Object.assign({}, inputStyle, { width: '100%', minHeight: 120, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px' }),
+            value: personaText,
+            placeholder: personaDefault,
+            onChange: function (e) { setPersonaDraft(e.target.value) },
+            'aria-label': '人设文本',
+          }),
+          h('div', { style: row },
+            h(SButton, { variant: 'primary', disabled: busy || personaDraft === null, onClick: function () { savePersona(personaText, '人设已保存') } }, '保存人设'),
+            h(SButton, { disabled: busy, onClick: function () { setPersonaDraft(''); savePersona('', '已恢复默认人设') } }, '恢复默认'),
+            h('span', { style: personaCount > personaMax ? { color: '#ff7369', fontSize: 12 } : muted },
+              String(personaCount) + ' / ' + String(personaMax) + ' 字')),
+          h(Hint, null, '自定义宠物的角色设定（名字、性格、口吻）。身体规则（气泡、动作、本子的用法）是固定契约，不在这里编辑。'),
+          h(Hint, null, '清空并保存即恢复默认人设；改动下一次对话就生效，无需重启。'),
+          h(Hint, null, '改人设不会改写本子里已有的记忆——换了设定，宠物还得慢慢适应自己想起来的旧事。')) : null,
 
         // ── 好感度（每宠独立账本） ──
         h(Section, { title: '好感度' },

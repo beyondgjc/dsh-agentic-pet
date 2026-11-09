@@ -18,6 +18,7 @@
     "./src/*": "./src/*",
     "./package.json": "./package.json",
     "./tools": "./lib/tools.js",
+    "./persona": "./lib/persona.js",
     "./presets/*.patch.yml": "./presets/*.patch.yml",
     "./locale/*.json": "./locale/*.json"
   },

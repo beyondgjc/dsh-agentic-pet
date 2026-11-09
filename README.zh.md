@@ -11,7 +11,15 @@ kind: "package-bundle"
 
 `dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`）——模型可以借宠物说话、做动作、感知被触摸、给自己定作息。说话内容可通过 [BreezeBlue](https://breezeblue.ai) TTS 朗读——carrier 侧合成每条 `/say` 文本，语音就绪后与气泡同时下发；合成失败或超时静默降级为只显示（桌面设置页可配）。多只宠物实现可以并存：目录注册表（`~/.dsh/whale598/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
 
-宠物本身是零 DSH 知识的纯显示端。理解运行时的一切——事件收敛、交互瀑布、多宠路由、模型工具——都在插件的 driver 里，宠物只实现一个小型本地 HTTP 控制接口。任何讲同一 HTTP 契约的宠物实现都能被采纳，插件零改动。
+宠物本身是零 DSH 知识的纯显示端。理解运行时的一切——事件收敛、交互瀑布、多宠路由、模型工具——都在插件的 driver 里，宠物只实现一个小型本地 HTTP 控制接口。任何讲同一 HTTP 契约的宠物实现都能被采纳，插件零改动。宠物的角色设定可在桌面设置页自由编辑（见下文「可配置人设」）：名字、性格、口吻由你定义，下一次对话即生效。
+
+### 可配置人设（角色卡）
+
+- 桌面设置页「人设」卡片（或直接改 `~/.dsh/whale598/pet-settings.json` 的 `persona` 字段）自定义宠物的自我描述——名字、性格、口吻。
+- 人设由插件自己的 persona row 注入（占用 `deployment:persona-prefix` 槽位），拼在静态身体规则之前；系统提示词每次组装都会重读，改动下一次对话即生效，无需重启。
+- 清空并保存 = 回落内置默认人设（即旧版硬编码的角色卡，上限 8000 字）。
+- 身体规则（气泡长度、动作节制、本子用法）是和 carrier 渲染层的契约，留在 preset 里不开放编辑——改坏了宠物就不会好好说话了。
+- 人设只作用于两个宠物 preset 的会话，普通编码会话不受影响；改人设也不会改写本子（journal）里已有的记忆。
 
 ### 多宠会话路由（session ↔ 宠物）
 
