@@ -507,7 +507,7 @@ window.__ModuleLoader__.load({
 
         // ── 好感度（每宠独立账本） ──
         h(Section, { title: h('span', null, '好感度 ',
-          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '数值全由它自己判断增减——触摸只是事实，不会自动加分')) },
+          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '数值全由模型自己判断增减——触摸只是事实，不会自动加分')) },
           (function () {
             var bookIds = affection && typeof affection === 'object' ? Object.keys(affection) : []
             var ids = []
