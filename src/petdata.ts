@@ -241,13 +241,22 @@ export async function writePetStateJson(home: string, petId: string, name: strin
   await writeFile(current, `${JSON.stringify(obj, null, 2)}\n`, 'utf8')
 }
 
+/** Root directories under whale598/ that are NOT pets — machine layers keyed
+ * by petId (AGENTS.md §8: 机器层目录不是宠物). existingPetIds is the gate
+ * every per-pet sweep walks through (presence/wake plans/inner-voice loads
+ * and deletes, migrations, the settings window loop), so a machine dir
+ * missing from this list becomes a phantom petId — it gets ingested into
+ * knownPetIds and its "pet files" get rm'd by the save-time cleanups. A new
+ * machine dir MUST be added here. */
+const NON_PET_DIRS = ['pet-http.d', 'carrier-instances']
+
 /** PetIds with a data directory on disk — the sweep basis for per-pet
  * migrations and merged loads. Registry-only pets (live, never persisted)
  * are absent; callers union their own id sources on top. */
 export async function existingPetIds(home: string): Promise<string[]> {
   try {
     const entries = await readdir(join(home, WHALE_DIR), { withFileTypes: true })
-    return entries.filter(entry => entry.isDirectory() && entry.name !== 'pet-http.d').map(entry => entry.name)
+    return entries.filter(entry => entry.isDirectory() && !NON_PET_DIRS.includes(entry.name)).map(entry => entry.name)
   } catch {
     return []
   }

@@ -3228,10 +3228,10 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const text = typeof args.text === 'string' ? args.text.trim() : ''
           if (text === '') throw new Error('text 必填：append 要写什么？')
           const tags = typeof args.tags === 'string' && args.tags.trim() !== ''
-            ? args.tags.split(/[,，]/).map(item => item.trim()).filter(item => item !== '')
+            ? args.tags.split(/[,，]/).map((item: string) => item.trim()).filter((item: string) => item !== '')
             : undefined
           const entities = typeof args.entities === 'string' && args.entities.trim() !== ''
-            ? args.entities.split(/[,，]/).map(item => item.trim()).filter(item => item !== '')
+            ? args.entities.split(/[,，]/).map((item: string) => item.trim()).filter((item: string) => item !== '')
             : undefined
           const result = await appendJournal(home, petId, {
             source: ownSession ? 'pet' : 'unbound',
@@ -3251,7 +3251,11 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             id: result.id,
             path: result.path,
             rotated: result.rotated,
-            ...(result.echo ? { echo: true, note: '这条和已有条目重复/包含——已照常落盘，但召回时会默认跳过。别把想起来的事再写一遍。' } : {}),
+            // 同 §11 纪律：echo/note 恒定输出（条件缺席是序列化陷阱）。
+            echo: result.echo,
+            note: result.echo
+              ? '这条和已有条目重复/包含——已照常落盘，但召回时会默认跳过。别把想起来的事再写一遍。'
+              : null,
           })
         }
         if (op === 'read') {
@@ -3262,16 +3266,18 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           if (crossRead) {
             driverLog(home, `PET_JOURNAL cross-read pet=${petId} reader=${owner ?? 'none'} session=${sessionId ?? 'none'}`)
           }
+          // 协议通则（技术实现 §11）：可选语义字段恒定输出 null——boundary
+          // 在两次 read（按 id / 列表）里都是常驻字段，只是值随 crossRead 变。
           const boundary = crossRead
             ? `这是 ${petId} 的本子，不是你的——看可以，别把这里的事当成自己的记忆，也不要替对方写（写只能写自己的）。`
-            : undefined
+            : null
           if (id !== undefined) {
             // REQ-M10: snippet → full text. Neighbors let her walk the chain.
             const { entry, neighbors } = await readMemoryById(home, petId, id)
             driverLog(home, `PET_JOURNAL read-by-id pet=${petId} id=${id}${crossRead ? ` reader=${owner ?? 'none'}` : ''}`)
             return JSON.stringify({
               pet: petId,
-              ...(crossRead ? { boundary } : {}),
+              boundary,
               id: entry.id,
               at: entry.at,
               source: entry.source,
@@ -3293,7 +3299,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const pinnedIds = new Set(meta.pinnedIds)
           return JSON.stringify({
             pet: petId,
-            ...(crossRead ? { boundary } : {}),
+            boundary,
             path: journalPath(home, petId),
             count: entries.length,
             entries: entries.map(entry => ({

@@ -21,16 +21,22 @@
 ## 2. 本地开发（发布仓直连）
 
 ```bash
-# 测试（自包含，只要 cordis + vitest）
-./node_modules/.bin/vitest run            # 全量 12 文件；journal-recall.spec.ts 是记忆系统
+# 测试与类型检查（2026-11-10 起工具链入 devDeps：typescript 5.9.3 / vitest 4.1.12 /
+# js-yaml / @types/node / cordis-plugin-include——曾被 pnpm reconcile prune 过一次，
+# 靠这份记录 + pnpm add -d 恢复）
+./node_modules/.bin/vitest run            # 全量 18 文件；journal-recall.spec.ts 是记忆系统
 
-# 快速类型检查（发布仓宽松 flags）
-./node_modules/.bin/tsc --ignoreConfig --noEmit --skipLibCheck --allowImportingTsExtensions \
+# 快速类型检查（stock tsc；显式给文件时 tsconfig.json 不参与——旧 flag
+# --ignoreConfig 是幻影，stock tsc 没有这个选项，勿再抄）
+./node_modules/.bin/tsc --noEmit --skipLibCheck --allowImportingTsExtensions \
   --module esnext --moduleResolution bundler --target es2024 --lib esnext --types node --strict \
-  src/journal.ts src/journal-recall.ts src/inner-voice.ts src/driver.ts
+  --exactOptionalPropertyTypes \
+  src/index.ts src/settings-page.ts src/driver.ts src/petdata.ts src/board.ts src/instances.ts
 
-# 严格检查（monorepo 同款，防积压——发布仓积压过 35 处 exactOptionalPropertyTypes 违规就是这么来的）
-#   在上面的命令里加 --exactOptionalPropertyTypes
+# @deepseek-ai 桩（prune 脆弱）：node_modules/@deepseek-ai/ 下的 dsh-tools /
+# dsh-client-connection / dsh-host-webserver 是 0.0.0-local-stub 手工桩（类型 +
+# identity 透传），丢了按 dsh-client-connection 的样子重建；dsh-tools 必须带
+# index.js（vitest 运行时要解析 defineTool）+ Context.tools 增强
 ```
 
 **monorepo 强制的规矩**（本地不守，反向同步时 monorepo 的 tsc/oxlint 会全拦）：
@@ -43,7 +49,7 @@
 
 ```bash
 # 1) tsc emit：src/*.ts → lib/types/*.js（.ts 后缀导入靠 --rewriteRelativeImportExtensions 重写成 .js）
-./node_modules/.bin/tsc --ignoreConfig --rootDir src --outDir lib/types \
+./node_modules/.bin/tsc --rootDir src --outDir lib/types \
   --module esnext --moduleResolution bundler --target es2024 --lib esnext --types node --strict \
   --skipLibCheck --declaration --declarationMap --sourceMap --rewriteRelativeImportExtensions
 

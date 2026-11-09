@@ -17,6 +17,7 @@ import {
   petStatePaths,
   readGlobalArrayJson,
   readPetStateJson,
+  writePetStateJson,
 } from '../src/petdata.ts'
 
 const homes: string[] = []
@@ -97,6 +98,20 @@ describe('whale598 layout rules', () => {
     await mkdir(join(home, 'whale598'), { recursive: true })
     await writeFile(join(home, 'whale598', 'pet-interactions.json'), JSON.stringify([{ id: 'current' }]), 'utf8')
     expect(await readGlobalArrayJson(home, 'pet-interactions.json')).toEqual([{ id: 'current' }])
+  })
+
+  it('existingPetIds never treats machine-layer dirs as pets (机器层目录不是宠物)', async () => {
+    const home = await tempHome()
+    await mkdir(join(home, 'whale598', 'electron'), { recursive: true })
+    await mkdir(join(home, 'whale598', 'pure'), { recursive: true })
+    await mkdir(join(home, 'whale598', 'pet-http.d'), { recursive: true })
+    await mkdir(join(home, 'whale598', 'carrier-instances', 'electron-2'), { recursive: true })
+    // A phantom petId would get swept into knownPetIds, ingested by the
+    // per-pet loads, and its "state files" rm'd by the save-time cleanups —
+    // the gate itself must uphold the §8 layering.
+    expect(await existingPetIds(home)).toEqual(['electron', 'pure'])
+    await writePetStateJson(home, 'electron', 'pet-wake-state.json', { counts: {} })
+    expect(await readPetStateJson(home, 'electron', 'pet-wake-state.json')).toEqual({ counts: {} })
   })
 
   it('layout guard: after the splits no petId-keyed state file remains at the whale598 root', async () => {
