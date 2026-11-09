@@ -506,7 +506,8 @@ window.__ModuleLoader__.load({
           h(Hint, null, '改人设不会改写本子里已有的记忆——换了设定，宠物还得慢慢适应自己想起来的旧事。')) : null,
 
         // ── 好感度（每宠独立账本） ──
-        h(Section, { title: '好感度' },
+        h(Section, { title: h('span', null, '好感度 ',
+          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '数值全由它自己判断增减——触摸只是事实，不会自动加分')) },
           (function () {
             var bookIds = affection && typeof affection === 'object' ? Object.keys(affection) : []
             var ids = []
