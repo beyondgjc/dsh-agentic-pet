@@ -54,6 +54,7 @@ import {
 
 } from './binding.ts'
 
+import type { SummonOutcome } from './carrier-summon.ts'
 import { voiceBindingSnapshot, type PetDriverControl } from './driver.ts'
 
 import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
@@ -791,6 +792,8 @@ export function installSettingsPage(
 
   control?: PetDriverControl,
 
+  summon?: () => SummonOutcome,
+
 ): void {
 
   // Pet visibility flows through the capability seam: discovery, liveness,
@@ -1134,6 +1137,40 @@ export function installSettingsPage(
   route('GET', '/api/pet-settings/electron-runtime', async (_req, res) => {
 
     writeJson(res, 200, { ok: true, runtime: readElectronRuntimeStatus(home) ?? null })
+
+  })
+
+
+
+  route('POST', '/api/pet-settings/summon', async (_req, res) => {
+
+    // The summon card's back end. Liveness first: the card hides client-side
+
+    // when a pet is up, this guards the double click (and the page-stale race).
+
+    // Otherwise the pure plan decides — spawn now, or kick the electron
+
+    // installer — and the carrier's single-instance lock keeps a lost race
+
+    // harmless.
+
+    const status = await petStatus()
+
+    if (status.pets.some(entry => entry.online === true)) {
+
+      writeJson(res, 200, { ok: true, started: false, reason: 'already-running' } satisfies SummonOutcome)
+
+      return
+
+    }
+
+    const outcome = summon === undefined
+
+      ? { ok: false, started: false, reason: 'unsupported' }
+
+      : summon()
+
+    writeJson(res, 200, outcome)
 
   })
 

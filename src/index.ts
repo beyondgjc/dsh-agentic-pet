@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { planSummon, type SummonOutcome } from './carrier-summon.ts'
 import { installPetDriver } from './driver.ts'
 import { installLockStale, isProcessAlive, parseInstallLock } from './electron-lock.ts'
 import { writeElectronRuntimeStatus, type ElectronRuntimeStatus } from './electron-runtime-status.ts'
@@ -595,6 +596,10 @@ export function apply(ctx: Context): void {
     child.on('error', (error) => { logCarrier(`child error: ${error.message}`) })
     child.on('exit', (code, signal) => {
       logCarrier(`child exit code=${String(code)} signal=${String(signal)} stderr=${JSON.stringify(stderrTail.slice(-700))}`)
+      // A quit or a crash frees the one-shot gate, so a settings-page summon
+      // may relaunch; the disposed guard still covers the unload path, where
+      // the shutdown kill below is what triggers this exit.
+      carrierLaunched = false
     })
     child.unref()
     ctx.effect(() => () => { child.kill() }, 'pet-surface: carrier shutdown')
@@ -699,11 +704,36 @@ export function apply(ctx: Context): void {
 
   const petDriver = installPetDriver(ctx, home, pet)
 
+  // The summon face (settings-page POST /api/pet-settings/summon): brings the
+  // carrier back after the user quit it — activation spawns once, and nothing
+  // else respawns a dead carrier until the host restarts. The decision is pure
+  // (carrier-summon, unit-tested); the act reuses the activation machinery,
+  // where the exit handler has already freed the one-shot gate. The carrier's
+  // single-instance lock keeps a double summon harmless.
+  const summonCarrier = (): SummonOutcome => {
+    const url = authenticatedRoot()
+    if (url === undefined) return { ok: false, started: false, reason: 'no-webserver' }
+    const carrierDir = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', 'carrier'))
+    const resolution = resolveElectron()
+    const plan = planSummon({
+      url,
+      noSpawn: process.env.DSH_PET_NO_SPAWN === '1',
+      carrierDirExists: existsSync(join(carrierDir, 'package.json')),
+      electronBinaryReady: resolution.binary !== undefined,
+      electronInstallable: resolution.npmPackageDir !== undefined,
+    })
+    if (plan.action === 'skip') {
+      return { ok: false, started: false, ...(plan.reason === undefined ? {} : { reason: plan.reason }) }
+    }
+    spawnPetCarrier(url)
+    return { ok: true, started: true }
+  }
+
   // The model-expression tools moved behind the pet preset (presets/pet.patch.yml
   // composes the ./tools entry) — sessions mounting other presets keep a clean
   // tool catalog. The host-side glue above stays unconditional.
   // The desktop sidebar settings page's host half (client half: ./client/).
-  installSettingsPage(ctx, home, pet, petDriver)
+  installSettingsPage(ctx, home, pet, petDriver, summonCarrier)
   // Stop the retry loop and our install child when this runtime unloads. If
   // the process dies before the exit handler runs, the lock's owner liveness
   // lets the next activation take over instead of waiting out a grace period.

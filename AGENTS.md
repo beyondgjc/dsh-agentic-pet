@@ -109,6 +109,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `src/idle-selector.ts` | 待机选择器纯函数：白名单池过滤（idleEligible/facing 排 noMirror/noRepeat 回落）、加权随机 + 时段偏置（max-not-product）、区间采样抖动、朝向迟滞判定；RNG 可注入（mulberry32） |
 | `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；touchPartWording（head/body/tail/hand）；"回忆不是新事实"边界声明 |
 | `src/persona.ts` | 人设 row（两个 preset 挂载，替换 @deepseek-ai/dsh-persona 独占 deployment:persona-prefix 段）：角色卡读 pet-settings.json `persona`（readPersonaCard 同步读，空/缺回落 DEFAULT_PERSONA，8000 字截断），拼在 yml 静态身体规则前；interpolate:false + 每次组装重读，改人设下一轮即生效 |
+| `src/carrier-summon.ts` | 召唤决策纯函数（planSummon：no-webserver → NO_SPAWN → carrier 目录 → electron 可得性的优先级门）；副作用半边在 index.ts `summonCarrier`——child exit 复位 `carrierLaunched` 一次性闸后经 spawnPetCarrier 重拉，路由 `POST /api/pet-settings/summon`（settings-page），客户端召唤卡在 pet-settings.js（在线即隐藏 + 4s 轮询确认） |
 | `src/driver.ts` | 工具注册（`pet_journal` 六个 op、`pet_recall`）、唤醒路径接线、readAutonomy（autonomy + idleBias 载荷） |
 | `src/rhythm.ts` | 静默时段 + B06 时辰偏置表（readIdleBias：默认 凌晨安静系×1.5/活跃系×0.5，可配可 null 关） |
 | carrier `apps/pet/src/renderer/main.ts` | 身体的呈现半边：WebGL stage 绘制、镜像（scaleX(-1) + 命中折返）、idle theater 双模式（bodyIdle 接管/legacy）、touchPartOf（body.json 驱动 + 特定优先）、**双缓冲已回退**（单元素直换，见 §9） |

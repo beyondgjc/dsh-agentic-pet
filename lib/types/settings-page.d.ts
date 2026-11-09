@@ -22,6 +22,7 @@
 
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { SummonOutcome } from './carrier-summon.ts';
 import { type PetDriverControl } from './driver.ts';
 import type { PetService } from './service.ts';
 /** The proactivity switches. `enabled`/`cooldownMinutes`/
@@ -139,6 +140,6 @@ export declare function mergeSettings(current: PetSettings, patch: Record<string
  * @param home - the dsh home holding the settings/ledger/manifest files.
 
  */
-export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl): void;
+export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl, summon?: () => SummonOutcome): void;
 export {};
 //# sourceMappingURL=settings-page.d.ts.map

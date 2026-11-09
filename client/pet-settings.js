@@ -128,6 +128,13 @@ window.__ModuleLoader__.load({
       var affectionRevealState = useState({})
       var affectionReveal = affectionRevealState[0]
       var setAffectionReveal = affectionRevealState[1]
+      // 召唤卡（POST /api/pet-settings/summon）：宠物进程不在时显示，上线即消失。
+      var summoningState = useState(false)
+      var summoning = summoningState[0]
+      var setSummoning = summoningState[1]
+      var summonMsgState = useState('')
+      var summonMsg = summonMsgState[0]
+      var setSummonMsg = summonMsgState[1]
       // 人设卡片（data.persona 由 host 提供；旧 host 无此块时整卡隐藏）：
       // 草稿 null = 跟随 host 生效值；保存成功才交还，失败保留草稿供重试。
       var personaDraftState = useState(null)
@@ -237,6 +244,27 @@ window.__ModuleLoader__.load({
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
+      // 在线判断与 GET /read 的 pets[].online 同源；reason → 提示文案映射。
+      var anyOnline = (pets || []).some(function (p) { return p.online })
+      var SUMMON_HINTS = {
+        'already-running': '宠物已经在身边了',
+        'no-webserver': '宿主 web 服务未就绪，稍后再试',
+        'spawn-disabled': 'DSH_PET_NO_SPAWN=1 已禁用拉起（环境变量），解除后重启桌面端',
+        'carrier-missing': '插件安装不完整（carrier/ 缺失）——重装插件',
+        'electron-unavailable': 'electron 未安装且无法自动安装——检查插件目录的 electron 依赖',
+        'unsupported': '当前插件版本不支持召唤，更新插件',
+      }
+      // 宠物不在身边时每 4s 轮询 /read：召唤生效（或桌面端自启）后卡片立即
+      // 消失。上线瞬间清掉按钮态与提示，避免下次打开卡片读到陈旧文案。
+      useEffect(function () {
+        if (anyOnline) {
+          setSummoning(false)
+          setSummonMsg('')
+          return undefined
+        }
+        var timer = setInterval(function () { refresh() }, 4000)
+        return function () { clearInterval(timer) }
+      }, [anyOnline, refresh])
       var moodOf = function (a) { return a >= 80 ? '开心' : a >= 40 ? '满足' : '平静' }
       // 显示名：用户自定义（settings.names）优先，缺省回落内置名；
       // 宠物区改名后好感度区自动跟随（同一状态、同一渲染趟）。
@@ -387,6 +415,36 @@ window.__ModuleLoader__.load({
           .finally(function () { setBusy(false) })
       }
 
+      // 召唤：独立 fetch（不走 act 的全局横幅，提示留在卡片里）。POST 成功后
+      // 交给上面的 4s 轮询把卡片翻掉；45s 仍未上线给出提示——首次召唤可能
+      // 在下载 electron（页面上方的安装进度条会显示），装完再点一次即可。
+      var summonNow = function () {
+        if (summoning) return
+        setSummoning(true)
+        setSummonMsg('')
+        fetch('/api/pet-settings/summon', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (d && d.ok === false) {
+              setSummoning(false)
+              setSummonMsg(SUMMON_HINTS[d.reason] || ('失败: ' + String(d.reason || '未知原因')))
+              return
+            }
+            setTimeout(function () {
+              setSummoning(false)
+              setSummonMsg('还没就绪——首次召唤可能在下载 electron（看上方安装进度），装完再点一次召唤')
+            }, 45000)
+          })
+          .catch(function (e) {
+            setSummoning(false)
+            setSummonMsg('请求失败: ' + ((e && e.message) || e))
+          })
+      }
+
       return h('div', { style: { width: '100%', maxWidth: 720 } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 10px' } },
           h('span', { style: { fontWeight: 700, fontSize: 15 } }, '桌宠'),
@@ -395,6 +453,16 @@ window.__ModuleLoader__.load({
           h(SButton, { onClick: refresh, disabled: busy }, '刷新')),
         msg ? h('div', { style: { fontSize: 12, margin: '0 0 6px', color: msg.indexOf('失败') >= 0 ? '#ff7369' : 'inherit' } }, msg) : null,
         h(RuntimeBanner, { runtime: runtime }),
+
+        // ── 召唤卡：进程未运行时显示，任一宠物上线即消失 ──
+        !anyOnline
+          ? h('div', { style: { border: '1px solid rgba(255,115,105,.45)', background: 'rgba(255,115,105,.08)', borderRadius: 10, padding: '10px 12px', margin: '0 0 10px' } },
+            h('div', { style: row },
+              h('span', null, '宠物不在身边 · 进程未运行'),
+              h('span', { style: { flex: 1 } }),
+              h(SButton, { variant: 'primary', disabled: summoning, onClick: summonNow }, summoning ? '召唤中…' : '召唤宠物')),
+            summonMsg ? h('div', { style: { fontSize: 12, marginTop: 6, color: '#ff7369' } }, summonMsg) : null)
+          : null,
 
         // ── 状态（每宠一行） ──
         h(Section, { title: '宠物' },
