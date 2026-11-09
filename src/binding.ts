@@ -25,6 +25,7 @@ export type VoiceAttachErrorCode =
   | 'registry-missing'
   | 'session-archived'
   | 'session-missing'
+  | 'session-occupied'
   | 'preset-mismatch'
   | 'attach-failed'
 
@@ -137,4 +138,24 @@ export function isPetWorkspace(cwd: string | undefined | null, root: string): bo
   const normalize = (value: string): string =>
     value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
   return normalize(cwd) === normalize(root)
+}
+
+/** The collision guard for manually bound sessions: one session is exactly
+ * one pet's brain (`voiceOwners` is sessionId → petId, so a second claimant
+ * would hijack the mapping). Returns the OTHER petId currently holding
+ * `sessionId` — via its configured binding or its durable store entry — or
+ * undefined when the session is free for `selfPetId`. */
+export function sessionOccupiedBy(
+  sessionId: string,
+  selfPetId: string,
+  boundSessions: Record<string, string>,
+  storeSessions: Record<string, { sessionId?: string }>,
+): string | undefined {
+  for (const [petId, bound] of Object.entries(boundSessions)) {
+    if (petId !== selfPetId && bound === sessionId) return petId
+  }
+  for (const [petId, entry] of Object.entries(storeSessions)) {
+    if (petId !== selfPetId && entry?.sessionId === sessionId) return petId
+  }
+  return undefined
 }

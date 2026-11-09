@@ -39,6 +39,7 @@ import {
   type VoiceBindingFailure,
   type VoiceBindingSnapshot,
   type VoiceBindingView,
+  sessionOccupiedBy,
 } from './binding.ts'
 import {
   bondTier,
@@ -524,10 +525,14 @@ const voiceBindingStates = new Map<string, VoiceBindingInternal>()
 const voiceBindingFailures: VoiceBindingFailure[] = []
 let voiceBindingsReady: Promise<void> = Promise.resolve()
 
+/** Pet ids discovered by the sweep (registry + on-disk pet directories) —
+ * the dynamic base of allKnownPetIds. Pet ids are DISCOVERED, never assumed:
+ * a hardcoded list goes stale the moment a new instance appears. */
+const knownPetIdsFromSweep = new Set<string>()
+
 function allKnownPetIds(): string[] {
   return [...new Set([
-    'electron',
-    'pure',
+    ...knownPetIdsFromSweep,
     ...Object.keys(voiceStore.sessions),
     ...Object.keys(voiceBoundSessions),
     ...voiceOwners.values(),
@@ -813,6 +818,23 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
     if (petId !== 'electron' || Object.keys(global).length === 0) return undefined
     return { ...global }
   })
+  // The known-pet-id sweep: allKnownPetIds() must not hardcode pet kinds —
+  // ids are discovered from the registry and the pet directories, then kept
+  // fresh on a slow cadence (new instances join without a restart).
+  const refreshKnownPetIds = async (): Promise<void> => {
+    const ids = new Set<string>(['electron'])
+    try {
+      for (const id of await petdata.existingPetIds(home)) ids.add(id)
+    } catch { /* directory scan is best-effort */ }
+    try {
+      for (const entry of await pet.list()) ids.add(entry.id)
+    } catch { /* registry absent is fine */ }
+    for (const id of ids) knownPetIdsFromSweep.add(id)
+  }
+  void refreshKnownPetIds()
+  const knownPetIdsTimer = setInterval(() => { void refreshKnownPetIds() }, 60_000)
+  knownPetIdsTimer.unref?.()
+  ctx.effect(() => () => { clearInterval(knownPetIdsTimer) }, 'pet-surface: known-pet-id sweep')
   // Inner-voice (re)initialization: a re-install must not inherit stale
   // owners from a previous driver generation. The store on disk is the
   // durable petId→sessionId truth; the maps are rebuilt from it.
@@ -1410,6 +1432,16 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
         attachRetryAfter.delete(configured)
         attachResults.delete(configured)
       }
+      // Collision guard (防呆): one session is exactly one pet's brain. A
+      // manual binding pointing at a session another pet already holds is
+      // refused here — the pet falls back to its own store session and stays
+      // speaking; the page shows WHY the manual binding was refused.
+      const occupiedBy = configured !== undefined
+        ? sessionOccupiedBy(configured, petId, config.boundSessions, voiceStore.sessions)
+        : undefined
+      if (occupiedBy !== undefined) {
+        driverLog(home, `VOICE binding conflict pet=${petId}: ${configured} is held by pet=${occupiedBy} — manual binding refused, falling back to the pet's own session`)
+      }
       const state: VoiceBindingInternal = {
         ...(configured === undefined ? {} : { configuredSessionId: configured }),
         ...(storeSessionId === undefined ? {} : { storeSessionId }),
@@ -1429,7 +1461,18 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
         if (preset !== undefined) {
           state.preset = preset
         }
-        if (lookup.checked && header === undefined) {
+        if (occupiedBy !== undefined) {
+          state.usable = false
+          state.lastError = `session-occupied-by:${occupiedBy}`
+          attach = {
+            ok: false,
+            errorCode: 'session-occupied',
+            error: `session is occupied by pet ${occupiedBy}`,
+            expectedCwd: petWorkspaceDir(),
+            actualCwd: null,
+            at: Date.now(),
+          }
+        } else if (lookup.checked && header === undefined) {
           state.usable = false
           state.lastError = 'session-missing'
           attach = {
@@ -1486,6 +1529,13 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
         state.usable = true
         delete state.lastError
         state.fallback = configured !== undefined
+      }
+      // The occupation error survives the fallback reset: the pet keeps
+      // speaking via its own session, but the page must show WHY the manual
+      // binding was refused.
+      if (occupiedBy !== undefined) {
+        state.lastError = `session-occupied-by:${occupiedBy}`
+        state.fallback = true
       }
       if (effective !== undefined) {
         state.effectiveSessionId = effective
@@ -2507,6 +2557,15 @@ ${text}`
       // Explicit user action: bypass any backoff from an earlier failure.
       const configured = voiceBoundSessions.get(petId)
       if (configured !== undefined) {
+        // Collision guard (防呆): testing into a session another pet already
+        // holds would hijack voiceOwners — refuse with the occupier's id.
+        const occupiedBy = sessionOccupiedBy(configured, petId, Object.fromEntries(voiceBoundSessions), voiceStore.sessions)
+        if (occupiedBy !== undefined) {
+          const binding = voiceBindingView(petId)
+          binding.usable = false
+          binding.lastError = `session-occupied-by:${occupiedBy}`
+          return { ok: false, petId, sessionId: configured, binding }
+        }
         attachRetryAfter.delete(configured)
         attachResults.delete(configured)
       }

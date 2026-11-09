@@ -8,7 +8,7 @@
 /** Presets that mount the pet tool row (`pet-tools`). */
 export declare const PET_PRESET_IDS: ReadonlySet<string>;
 export declare function isPetPreset(preset: string | undefined | null): boolean;
-export type VoiceAttachErrorCode = 'none' | 'cwd-mismatch' | 'registry-missing' | 'session-archived' | 'session-missing' | 'preset-mismatch' | 'attach-failed';
+export type VoiceAttachErrorCode = 'none' | 'cwd-mismatch' | 'registry-missing' | 'session-archived' | 'session-missing' | 'session-occupied' | 'preset-mismatch' | 'attach-failed';
 export interface VoiceAttachState {
     ok: boolean;
     errorCode: VoiceAttachErrorCode;
@@ -97,4 +97,12 @@ export declare function patchTouchesElectronBinding(patch: Record<string, unknow
 /** The host attaches a session only when its cwd IS the workspace path
  * (canonical equality), not a descendant. */
 export declare function isPetWorkspace(cwd: string | undefined | null, root: string): boolean;
+/** The collision guard for manually bound sessions: one session is exactly
+ * one pet's brain (`voiceOwners` is sessionId → petId, so a second claimant
+ * would hijack the mapping). Returns the OTHER petId currently holding
+ * `sessionId` — via its configured binding or its durable store entry — or
+ * undefined when the session is free for `selfPetId`. */
+export declare function sessionOccupiedBy(sessionId: string, selfPetId: string, boundSessions: Record<string, string>, storeSessions: Record<string, {
+    sessionId?: string;
+}>): string | undefined;
 //# sourceMappingURL=binding.d.ts.map

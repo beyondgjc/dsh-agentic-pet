@@ -4,6 +4,7 @@ import {
   isPetPreset,
   isPetWorkspace,
   patchTouchesElectronBinding,
+  sessionOccupiedBy,
 } from '../src/binding.ts'
 
 describe('classifyAttachFailure', () => {
@@ -92,5 +93,29 @@ describe('isPetWorkspace', () => {
     expect(isPetWorkspace('C:\\Users\\me\\whale598-other', root)).toBe(false)
     expect(isPetWorkspace('C:\\Users\\me\\other', root)).toBe(false)
     expect(isPetWorkspace(undefined, root)).toBe(false)
+  })
+})
+
+describe('sessionOccupiedBy (防呆：一只宠物一个脑子)', () => {
+  const bound = { electron: 'session-e', 'electron-2': 'session-e2' }
+  const store = { pure: { sessionId: 'session-pure' } }
+
+  it('returns the other pet when the session is in its configured binding', () => {
+    expect(sessionOccupiedBy('session-e', 'electron-2', bound, store)).toBe('electron')
+    expect(sessionOccupiedBy('session-e2', 'electron', bound, store)).toBe('electron-2')
+  })
+
+  it('returns the other pet when the session is its durable store session', () => {
+    expect(sessionOccupiedBy('session-pure', 'electron', bound, store)).toBe('pure')
+  })
+
+  it('is silent for the pet itself and for free sessions', () => {
+    expect(sessionOccupiedBy('session-e', 'electron', bound, store)).toBeUndefined()
+    expect(sessionOccupiedBy('session-free', 'electron-2', bound, store)).toBeUndefined()
+  })
+
+  it('config claim wins over a stale store entry', () => {
+    const conflicting = { ...bound, pure: 'session-e' }
+    expect(sessionOccupiedBy('session-e', 'pure', conflicting, store)).toBe('electron')
   })
 })
