@@ -998,8 +998,8 @@ window.__ModuleLoader__.load({
                 h('span', { style: muted }, '清空长期记忆 · ' + petName(petId)),
                 h('span', { style: { flex: 1 } }),
                 h(SButton, { variant: 'danger', disabled: busy, onClick: function () {
-                  if (window.confirm('清空 ' + petName(petId) + ' 的长期记忆？本子、归档、阶段摘要全部移入备份目录（~/.dsh/backup-journal/），她的连续性从零开始——旧会话上下文里还留有的印象不受影响，但新的唤醒不再带入旧本子。')) {
-                    act('/api/pet-settings/journal/clear', { petId: petId }, petName(petId) + ' 的长期记忆已清空（原文件在 ~/.dsh/backup-journal/）')
+                  if (window.confirm('清空 ' + petName(petId) + ' 的长期记忆？本子、归档、阶段摘要全部移入备份目录（备份在 ~/.dsh/whale598/journal-backups/），她的连续性从零开始——旧会话上下文里还留有的印象不受影响，但新的唤醒不再带入旧本子。')) {
+                    act('/api/pet-settings/journal/clear', { petId: petId }, petName(petId) + ' 的长期记忆已清空（原文件备份在 ~/.dsh/whale598/journal-backups/）')
                   }
                 }, title: '删除这只宠物的连续性本子（先备份）' }, '清空'))
             })

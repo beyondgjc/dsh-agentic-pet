@@ -76,9 +76,11 @@ export declare function existingPetIds(home: string): Promise<string[]>;
  * 这把删除，防止调用方传错参数变成任意目录删除。 */
 export declare function destroyPetData(home: string, petId: string): Promise<void>;
 /** 清空一只宠物的长期记忆（连续性本子全套）：journal.md / archive /
- * epochs / index / meta / last-recall 先移入 ~/.dsh/backup-journal/<petId>-<ts>/
- * 再从宠物目录消失——记忆清零，文件可手工找回（重 0 SOP 的按钮化）。
- * 守卫：id 只许字母数字下划线连字符，防路径穿越。 */
+ * epochs / index / meta / last-recall 先移入
+ * whale598/journal-backups/<petId>-<ts>/ 再从宠物目录消失——记忆清零，
+ * 文件可手工找回（重 0 SOP 的按钮化）。备份目录是根级键控目录（同
+ * pet-http.d 先例），已入 NON_PET_DIRS。守卫：id 只许字母数字下划线连字符，
+ * 防路径穿越。 */
 export declare function clearJournalData(home: string, petId: string): Promise<{
     moved: number;
     backupDir: string;

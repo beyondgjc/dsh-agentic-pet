@@ -248,7 +248,7 @@ export async function writePetStateJson(home: string, petId: string, name: strin
  * missing from this list becomes a phantom petId — it gets ingested into
  * knownPetIds and its "pet files" get rm'd by the save-time cleanups. A new
  * machine dir MUST be added here. */
-const NON_PET_DIRS = ['pet-http.d', 'carrier-instances']
+const NON_PET_DIRS = ['pet-http.d', 'carrier-instances', 'journal-backups']
 
 /** PetIds with a data directory on disk — the sweep basis for per-pet
  * migrations and merged loads. Registry-only pets (live, never persisted)
@@ -272,15 +272,17 @@ export async function destroyPetData(home: string, petId: string): Promise<void>
 }
 
 /** 清空一只宠物的长期记忆（连续性本子全套）：journal.md / archive /
- * epochs / index / meta / last-recall 先移入 ~/.dsh/backup-journal/<petId>-<ts>/
- * 再从宠物目录消失——记忆清零，文件可手工找回（重 0 SOP 的按钮化）。
- * 守卫：id 只许字母数字下划线连字符，防路径穿越。 */
+ * epochs / index / meta / last-recall 先移入
+ * whale598/journal-backups/<petId>-<ts>/ 再从宠物目录消失——记忆清零，
+ * 文件可手工找回（重 0 SOP 的按钮化）。备份目录是根级键控目录（同
+ * pet-http.d 先例），已入 NON_PET_DIRS。守卫：id 只许字母数字下划线连字符，
+ * 防路径穿越。 */
 export async function clearJournalData(home: string, petId: string): Promise<{ moved: number; backupDir: string }> {
   if (!/^[A-Za-z0-9_-]+$/.test(petId)) throw new Error(`clearJournalData: "${petId}" 不是合法的宠物 id`)
   const dir = petDataDir(home, petId)
   if (!existsSync(dir)) return { moved: 0, backupDir: '' }
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const backupDir = join(home, 'backup-journal', `${petId}-${stamp}`)
+  const backupDir = join(home, WHALE_DIR, 'journal-backups', `${petId}-${stamp}`)
   await mkdir(backupDir, { recursive: true })
   const names = [
     'journal.md',

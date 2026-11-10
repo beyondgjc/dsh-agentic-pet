@@ -109,6 +109,7 @@ describe('whale598 layout rules', () => {
     await mkdir(join(home, 'whale598', 'pure'), { recursive: true })
     await mkdir(join(home, 'whale598', 'pet-http.d'), { recursive: true })
     await mkdir(join(home, 'whale598', 'carrier-instances', 'electron-2'), { recursive: true })
+    await mkdir(join(home, 'whale598', 'journal-backups'), { recursive: true })
     // A phantom petId would get swept into knownPetIds, ingested by the
     // per-pet loads, and its "state files" rm'd by the save-time cleanups —
     // the gate itself must uphold the §8 layering.
@@ -142,7 +143,7 @@ describe('whale598 layout rules', () => {
     expect(existsSync(join(home, 'whale598', 'electron-2', 'journal.md'))).toBe(false)
     expect(existsSync(join(home, 'whale598', 'electron-2', 'pet-affection.json'))).toBe(true)
     // 备份目录里两件都在（可手工找回）
-    const backups = await readdir(join(home, 'backup-journal'))
+    const backups = await readdir(join(home, 'whale598', 'journal-backups'))
     expect(backups.length).toBe(1)
     expect(backups[0]).toMatch(/^electron-2-\d{14}$/)
   })
