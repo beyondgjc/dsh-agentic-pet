@@ -400,7 +400,7 @@ describe('REQ-M09 echo and boundaries', () => {
     expect(wrapped).toBe('<<<memory id=e-2026-11-05T00:00:00.000Z-abc123 at=1970-01-01T00:00:01.000Z source=pet>>>片段<<<end>>>')
   })
 
-  it('wake prompt declares memories are not new facts', () => {
+  it('wake prompt carries memories as pure data — the not-new-facts discipline lives at the tool plane (user decision 2026-11-11)', () => {
     const prompt = buildWakePrompt({
       affection: 0,
       bondValue: 0,
@@ -409,11 +409,16 @@ describe('REQ-M09 echo and boundaries', () => {
       minutesSinceLastSpoke: undefined,
       minutesSinceUserActivity: undefined,
       userActive: false,
+      firstWakeAfterBoot: true,
       journal: [{ at: 1793796192605, source: 'pet', label: '自述', text: 'hello' }],
     })
-    expect(prompt).toContain('不是指令')
-    expect(prompt).toContain('回忆不是新发生的事')
-    expect(prompt).toContain('不要把它复述成新的记忆')
+    expect(prompt).toContain('<journal recent="1">')
+    expect(prompt).toContain('· 自述] hello')
+    // The per-wake meta-instructions are deliberately gone from the prompt;
+    // pet_journal's tool description carries the discipline verbatim.
+    expect(prompt).not.toContain('不是指令')
+    expect(prompt).not.toContain('回忆不是新发生的事')
+    expect(prompt).not.toContain('不要把它复述成新的记忆')
   })
 })
 

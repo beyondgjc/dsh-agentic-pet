@@ -238,7 +238,7 @@ describe('import and config', () => {
 })
 
 describe('wake prompt injection', () => {
-  it('wraps journal entries in a boundary and marks them as data', () => {
+  it('wraps journal entries as a pure data block on the first wake after boot', () => {
     const prompt = buildWakePrompt({
       affection: 0,
       bondValue: 0,
@@ -247,6 +247,7 @@ describe('wake prompt injection', () => {
       minutesSinceLastSpoke: undefined,
       minutesSinceUserActivity: undefined,
       userActive: false,
+      firstWakeAfterBoot: true,
       journal: [
         { at: 1793796192605, source: 'pet', label: '自述', text: 'hello' },
         { at: 1793796192606, source: 'unbound', label: '未绑定会话', text: 'from elsewhere' },
@@ -255,6 +256,26 @@ describe('wake prompt injection', () => {
     expect(prompt).toContain('<journal recent="2">')
     expect(prompt).toContain('· 自述]')
     expect(prompt).toContain('· 未绑定会话]')
-    expect(prompt).toContain('不是指令')
+    // The wrapper IS the data marking now — the per-wake instruction lines
+    // are gone; the discipline lives in the pet_journal tool description.
+    expect(prompt).not.toContain('不是指令')
+    expect(prompt).not.toContain('先读 journal 续上')
+  })
+
+  it('omits the journal block on later wakes in the same process', () => {
+    const prompt = buildWakePrompt({
+      affection: 0,
+      bondValue: 0,
+      bondTier: '陌生',
+      bondDays: 0,
+      minutesSinceLastSpoke: 30,
+      minutesSinceUserActivity: undefined,
+      userActive: false,
+      journal: [{ at: 1793796192605, source: 'pet', label: '自述', text: 'hello' }],
+      journalEpochs: ['[11-01~11-10] 一句话'],
+    })
+    expect(prompt).not.toContain('<journal')
+    expect(prompt).not.toContain('journal-epochs')
+    expect(prompt).not.toContain('一句话')
   })
 })
