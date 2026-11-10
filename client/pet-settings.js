@@ -869,8 +869,7 @@ window.__ModuleLoader__.load({
                   h('option', { key: '', value: '', style: optionStyle }, '跟随默认'),
                   PRESET_SLOT_IDS.map(function (presetId) {
                     return h('option', { key: presetId, value: presetId, style: optionStyle }, presetNameOf(presetId))
-                  })),
-                current === '' ? h('span', { style: muted }, '继承默认') : h('span', { style: muted }, '独立选择'))
+                  })))
             })
           })(),
           // ── 指定会话（高级）：按宠物一行——每只宠物各绑各的脑子 ──
