@@ -25,6 +25,9 @@ window.__ModuleLoader__.load({
     var row = { display: 'flex', alignItems: 'center', gap: 10, margin: '6px 0', fontSize: 13, flexWrap: 'wrap' }
     var muted = { color: 'rgba(127,127,127,.9)', fontSize: 12 }
     var inputStyle = { width: 64, padding: '2px 6px', border: '1px solid rgba(127,127,127,.4)', borderRadius: 6, background: 'transparent', color: 'inherit', font: 'inherit' }
+    // 原生 select 的下拉列表用 Chromium 默认白底、option 又继承页面浅色文字
+    // = 白底白字看不见——option 显式深底浅字 + select 声明 dark 配色。
+    var optionStyle = { background: '#1c2733', color: '#e8e8e8' }
     var eyeButton = { border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 2, display: 'inline-flex', alignItems: 'center', opacity: .65 }
     var runtimeCard = { border: '1px solid rgba(124,108,240,.45)', borderRadius: 10, padding: '10px 14px 12px', margin: '10px 0', background: 'rgba(124,108,240,.06)' }
     var runtimeTrack = { position: 'relative', height: 4, borderRadius: 2, background: 'rgba(127,127,127,.18)', overflow: 'hidden', marginTop: 8 }
@@ -776,14 +779,14 @@ window.__ModuleLoader__.load({
             })()),
           h('div', { style: row }, '默认会话模式',
             h('select', {
-              style: Object.assign({}, inputStyle, { width: 190 }),
+              style: Object.assign({}, inputStyle, { width: 190, colorScheme: 'dark' }),
               value: String(iv.preset || 'whale598'),
               onChange: function (e) {
                 if (e.target.value !== iv.preset) update({ innerVoice: { preset: e.target.value } })
               },
               'aria-label': '默认会话模式',
             }, PRESET_SLOT_IDS.map(function (presetId) {
-              return h('option', { key: presetId, value: presetId }, PRESET_SLOT_LABELS[presetId] || presetId)
+              return h('option', { key: presetId, value: presetId, style: optionStyle }, PRESET_SLOT_LABELS[presetId] || presetId)
             }))),
           // ── 按宠预设（多宠）：每只宠各选各的会话模式=各带各的人设卡 ──
           (function () {
@@ -796,7 +799,7 @@ window.__ModuleLoader__.load({
               return h('div', { key: 'preset-' + petId, style: row },
                 '会话预设 · ' + petName(petId),
                 h('select', {
-                  style: Object.assign({}, inputStyle, { width: 190 }),
+                  style: Object.assign({}, inputStyle, { width: 190, colorScheme: 'dark' }),
                   value: current,
                   onChange: function (e) {
                     var next = Object.assign({}, perPet)
@@ -806,9 +809,9 @@ window.__ModuleLoader__.load({
                   },
                   'aria-label': '会话预设 · ' + petName(petId),
                 },
-                  h('option', { key: '', value: '' }, '跟随默认'),
+                  h('option', { key: '', value: '', style: optionStyle }, '跟随默认'),
                   PRESET_SLOT_IDS.map(function (presetId) {
-                    return h('option', { key: presetId, value: presetId }, PRESET_SLOT_LABELS[presetId] || presetId)
+                    return h('option', { key: presetId, value: presetId, style: optionStyle }, PRESET_SLOT_LABELS[presetId] || presetId)
                   })),
                 current === '' ? h('span', { style: muted }, '继承默认') : h('span', { style: muted }, '独立选择'))
             })
