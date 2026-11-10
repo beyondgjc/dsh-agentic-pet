@@ -666,7 +666,7 @@ window.__ModuleLoader__.load({
 
         // ── 人设（按预设 4 槽；身体规则是宿主契约，不在此编辑） ──
         personaSlots ? h(Section, { title: h('span', null, '人设 ',
-          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '每个预设一张卡 · 改动会击穿会话前缀缓存')) },
+          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '每个预设一张卡 · 点 ▾ 展开编辑 · 改动会击穿会话前缀缓存')) },
           PRESET_SLOT_IDS.map(function (presetId) {
             var slot = personaSlotOf(presetId)
             if (!slot) return null
@@ -686,8 +686,7 @@ window.__ModuleLoader__.load({
                 onBlur: function (e) { commitPresetName(presetId, e.target.value) },
                 onKeyDown: function (e) { if (e.key === 'Enter') { commitPresetName(presetId, e.target.value); e.target.blur() } },
                 'aria-label': '人设名 · ' + presetId }),
-              h('span', { style: muted }, '对应预设：' + (PRESET_SLOT_LABELS[presetId] || presetId)),
-              !open ? h('span', { style: muted }, '点 ▾ 展开编辑') : null)
+              h('span', { style: muted }, '对应预设：' + (PRESET_SLOT_LABELS[presetId] || presetId)))
             if (!open) return h('div', { key: presetId, style: { marginBottom: 10 } }, header)
             return h('div', { key: presetId, style: { marginBottom: 14 } },
               header,
