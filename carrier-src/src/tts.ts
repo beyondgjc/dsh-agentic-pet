@@ -15,6 +15,10 @@
  * Configuration lives in the shared pet-settings.json (`tts` section, written
  * by the plugin's settings page) and is read lazily per utterance with an
  * mtime cache: a saved switch reaches the pet without any push or restart.
+ * Voice identity is per pet: `tts.voices[petId]` may pin its own voiceId,
+ * speed and volume (the settings page writes one table, every carrier
+ * instance resolves its own entry); unset fields fall through to the shared
+ * defaults, so single-pet setups behave exactly as before.
  *
  * The wire surface is a bare fetch against the BreezeBlue REST endpoint (no
  * SDK — the carrier carries none): POST /v1/text-to-speech/{voice_id} with
@@ -46,6 +50,9 @@ interface SayTtsDeps {
   /** The dsh home holding pet-settings.json (whale598/ first, legacy root
    * fallback — same dual-path rule as the driver's petdata). */
   home: string
+  /** This carrier instance's pet id (DSH_PET_ID): the key this instance
+   * resolves its voice override with from the shared `tts.voices` table. */
+  petId: string
   window: BrowserWindow
   /** The one delivery channel to the page: the bubble, optionally with its
    * voice. Main process owns the wire shape; this module owns the timing. */
@@ -100,9 +107,34 @@ function normalizeTts(raw: unknown): TtsConfig {
   return config
 }
 
+/** Resolve the section for one pet: the shared defaults with this pet's
+ * `voices[petId]` entry overlaid field-by-field (voiceId / speed / volume
+ * only — key, model, enabled and hold are account- or timing-level and stay
+ * shared). Unknown shapes fold away, so a malformed override simply falls
+ * through to the global defaults. An empty-string voiceId is "not set" (the
+ * settings page's clear-on-empty), never "mute". */
+export function resolvePetTts(raw: unknown, petId: string): TtsConfig {
+  const config = normalizeTts(raw)
+  if (typeof raw !== 'object' || raw === null) return config
+  const voices = (raw as Record<string, unknown>).voices
+  if (typeof voices !== 'object' || voices === null) return config
+  const override = (voices as Record<string, unknown>)[petId]
+  if (typeof override !== 'object' || override === null) return config
+  const record = override as Record<string, unknown>
+  if (typeof record.voiceId === 'string' && record.voiceId !== '') config.voiceId = record.voiceId
+  if (typeof record.speed === 'number' && Number.isFinite(record.speed)) {
+    config.speed = Math.min(2, Math.max(0.5, record.speed))
+  }
+  if (typeof record.volume === 'number' && Number.isFinite(record.volume)) {
+    config.volume = Math.min(2, Math.max(0.01, record.volume))
+  }
+  return config
+}
+
 export function createSayTts(deps: SayTtsDeps): SayTts {
   const log = deps.log ?? ((line: string): void => { console.log(`[pet-tts] ${line}`) })
   const home = deps.home
+  const petId = deps.petId
 
   // ── config: mtime-cached dual-path read ───────────────────────────────────
   // whale598/ first, legacy root fallback — the newest of whichever exist.
@@ -123,11 +155,13 @@ export function createSayTts(deps: SayTtsDeps): SayTts {
     if (cache !== undefined && cache.path === newest.path && cache.mtimeMs === newest.mtimeMs) return cache.config
     try {
       const parsed = JSON.parse(readFileSync(newest.path, 'utf8')) as { tts?: unknown }
-      const config = normalizeTts(parsed?.tts)
+      const config = resolvePetTts(parsed?.tts, petId)
       cache = { ...newest, config }
       // One line per config CHANGE (never the key itself): the observable
-      // trace for "why is she silent" without a log per utterance.
-      const echo = `config from ${newest.path}: enabled=${String(config.enabled === true)}`
+      // trace for "why is she silent" without a log per utterance. voice /
+      // speed / volume are the values AS RESOLVED for this pet (override
+      // applied) — a per-pet override change produces its own echo line.
+      const echo = `config from ${newest.path} (pet=${petId}): enabled=${String(config.enabled === true)}`
         + ` key=${config.apiKey ? 'set' : 'unset'} voice=${config.voiceId ?? '-'}`
         + ` model=${config.modelId ?? 'auto'} speed=${String(config.speed ?? 1)} volume=${String(config.volume ?? 1)}`
         + ` hold=${String(config.holdMs ?? DEFAULT_HOLD_MS)}ms`

@@ -257,6 +257,10 @@ export interface WakePromptFacts {
     };
     /** 静默时段：只压制世界时钟；自主唤醒仍触发，prompt 说明用户可能已睡。 */
     quiet?: boolean;
+    /** true = 本次唤醒是本进程启动后该宠的第一次（账本行 + journal + epochs
+     * 三块只随这次注入）。同一进程后续唤醒不再重复——完整历史就在会话上下
+     * 文里，每 20 分钟重抄一遍是纯 token 税。缺省 false（旧调用点）。 */
+    firstWakeAfterBoot?: boolean;
     /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */
     journal?: Array<{
         at: number;

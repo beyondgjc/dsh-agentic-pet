@@ -15,6 +15,10 @@
  * Configuration lives in the shared pet-settings.json (`tts` section, written
  * by the plugin's settings page) and is read lazily per utterance with an
  * mtime cache: a saved switch reaches the pet without any push or restart.
+ * Voice identity is per pet: `tts.voices[petId]` may pin its own voiceId,
+ * speed and volume (the settings page writes one table, every carrier
+ * instance resolves its own entry); unset fields fall through to the shared
+ * defaults, so single-pet setups behave exactly as before.
  *
  * The wire surface is a bare fetch against the BreezeBlue REST endpoint (no
  * SDK — the carrier carries none): POST /v1/text-to-speech/{voice_id} with
@@ -41,6 +45,9 @@ interface SayTtsDeps {
     /** The dsh home holding pet-settings.json (whale598/ first, legacy root
      * fallback — same dual-path rule as the driver's petdata). */
     home: string;
+    /** This carrier instance's pet id (DSH_PET_ID): the key this instance
+     * resolves its voice override with from the shared `tts.voices` table. */
+    petId: string;
     window: BrowserWindow;
     /** The one delivery channel to the page: the bubble, optionally with its
      * voice. Main process owns the wire shape; this module owns the timing. */
@@ -53,6 +60,13 @@ export interface SayTts {
      * delivery is abandoned (the newest say owns the bubble and the voice). */
     deliver(text: string): void;
 }
+/** Resolve the section for one pet: the shared defaults with this pet's
+ * `voices[petId]` entry overlaid field-by-field (voiceId / speed / volume
+ * only — key, model, enabled and hold are account- or timing-level and stay
+ * shared). Unknown shapes fold away, so a malformed override simply falls
+ * through to the global defaults. An empty-string voiceId is "not set" (the
+ * settings page's clear-on-empty), never "mute". */
+export declare function resolvePetTts(raw: unknown, petId: string): TtsConfig;
 export declare function createSayTts(deps: SayTtsDeps): SayTts;
 export {};
 //# sourceMappingURL=tts.d.ts.map

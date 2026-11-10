@@ -81,6 +81,7 @@ cd "$P" && node --input-type=module -e "await import('./lib/index.js')"
 - 运行配置：`~/.dsh/whale598/pet-settings.json`（journal 注入预算等），改前备份。
 - 宠物数据目录：`~/.dsh/whale598/<petId>/`（journal.md / archive / epochs / index / last-recall）。
 - **发布仓的 `carrier-src/` 从不在本地编译**（它只是 monorepo `apps/pet` 的参考镜像）——carrier 的 bug 在这里全是潜伏的（/expression 引用未定义 `body` 潜伏了一整版）。改过 carrier-src 后必须在 monorepo 跑 `pnpm run build` 验证。
+- **⚠️ `sync-from-monorepo.cmd` 别全量跑**（2026-11-11 实证）：它对 `lib/` 是 robocopy /MIR——monorepo `pet-app/lib` 是陈旧构建（发布仓 lib 一直本地两段式构建，tsdown 版本不同 chunk hash 也不同），全量 sync 会把发布仓 lib 打回旧版。carrier 产物（`carrier/lib`、`carrier/dist-renderer`、`carrier-src/src`）手工从 `apps/pet` 拷回即可；跑全量 sync 前必须先在 monorepo 重建 pet-app/lib 且核对 hash。
 
 ## 5. 发布
 
@@ -114,7 +115,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `src/body.ts` | body/1 自述校验：behavior 能力 kind 分流（facing/idle/transition）、hitboxes 单矩形/多矩形（tail 双尾鳍）、resolveExpressionRequest/suggestExpressionFallback |
 | `src/idle-selector.ts` | 待机选择器纯函数：白名单池过滤（idleEligible/facing 排 noMirror/noRepeat 回落）、加权随机 + 时段偏置（max-not-product）、区间采样抖动、朝向迟滞判定；RNG 可注入（mulberry32） |
 | `src/inner-voice.ts` | 唤醒/触摸/对话 prompt 构造；journal 与 epoch 索引行的渲染；touchPartWording（head/body/tail/hand）；"回忆不是新事实"边界声明 |
-| `src/persona.ts` | 人设 row（两个 preset 挂载，替换 @deepseek-ai/dsh-persona 独占 deployment:persona-prefix 段）：角色卡读 pet-settings.json `persona`（readPersonaCard 同步读，空/缺回落 DEFAULT_PERSONA，8000 字截断），拼在 yml 静态身体规则前；interpolate:false + 每次组装重读，改人设下一轮即生效 |
+| `src/persona.ts` | 人设 row（四个 preset 挂载——whale598/standard/custom-1/2，替换 @deepseek-ai/dsh-persona 独占 deployment:persona-prefix 段）：角色卡按挂载点 personaKey 读 pet-settings.json `personas.<presetId>`（readPersonaCard 回落链：槽卡 → 全局 `persona` → DEFAULT_PERSONA，8000 字截断），拼在 yml 静态身体规则前；interpolate:false + 每次组装重读，改人设下一轮即生效；按宠 preset 选择=innerVoice.presets（mint 时读，设置页行内选） |
 | `src/carrier-summon.ts` | 召唤决策纯函数（planSummon：no-webserver → NO_SPAWN → carrier 目录 → electron 可得性的优先级门）；副作用半边在 index.ts `summonCarrier`——child exit 复位 `carrierLaunched` 一次性闸后经 spawnPetCarrier 重拉，路由 `POST /api/pet-settings/summon`（settings-page），客户端召唤卡在 pet-settings.js（在线即隐藏 + 4s 轮询确认） |
 | `src/instances.ts` | 多实例注册表（Phase 1，设计文档 §12）：desired set 读写（whale598/multi-instances.json）、id 算术（nextInstanceId）、召唤准入（admitSummon：上限+去重）；index.ts `instanceControl`（summonInstance/dismissInstance）+ 路由 instance/summon|dismiss + carrier `--user-data-dir` 按实例隔离（锁作用域 = userData） |
 | `src/board.ts` | 客厅记事板（Phase 2，设计文档 §5）：共享留字区（pet-board.json，cap 20/回复 10/字 200）；反收音机三禁（不打断/自言自语不自动上板/不合并流）——注入只报数与来源，注入即已读（游标 whale598/<petId>/pet-board-cursor.json）；工具 pet_board（read/leave/reply） |
@@ -122,6 +123,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 | `src/rhythm.ts` | 静默时段 + B06 时辰偏置表（readIdleBias：默认 凌晨安静系×1.5/活跃系×0.5，可配可 null 关） |
 | carrier `apps/pet/src/renderer/main.ts` | 身体的呈现半边：WebGL stage 绘制、镜像（scaleX(-1) + 命中折返）、idle theater 双模式（bodyIdle 接管/legacy）、touchPartOf（body.json 驱动 + 特定优先）、**双缓冲已回退**（单元素直换，见 §9）、bodyRuntime.lastClip 记最近播放的 one-shot（非 src 快照——快照口径在动作窗口外永远拍到基础循环） |
 | carrier `apps/pet/src/main.ts` | 光标轮询喂 pet:cursor（click-through 轮询顺带）、readActionTags（_meta 守卫 + idleEligible）、text_clips no_mirror 合入 catalog、/status 透传 bodyRuntime、runtimeLog 诊断落盘 |
+| carrier `apps/pet/src/tts.ts` | say 侧 TTS（BreezeBlue）：合成与气泡同发的竞速交付；**按宠声音**（2026-11-11 起）——resolvePetTts 按 DSH_PET_ID 解析 pet-settings.json `tts.voices[petId]` 覆盖（voiceId/speed/volume 字段级，未知形状回落全局默认），echo 日志带 pet= 且永不打 key；配置表写入端 = settings-page mergeSettings 的逐键合并（null entry=删整条、null 字段=清该字段、未提及键保留） |
 | 需求文档 | 仓外（不在 git 里）：`C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`（§11.1 三轮实测修订）、`pet-body-requirements-v0.2.md`（§13 变更记录） |
 | 全景技术文档 | Obsidian：`C:\Users\beyondguo\Documents\Obsidian Vault\DSH-PET 技术实现.md`（协议栈/八端点契约/各模块深读；§6.9 记忆系统；本手册是它的操作面补充） |
 

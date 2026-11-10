@@ -182,6 +182,30 @@ interface TtsSettings {
 
   volume?: number
 
+  /** Per-pet voice identity (multi-instance): `voices[petId]` pins that
+   * pet's voiceId/speed/volume; every other field stays shared. Each carrier
+   * instance resolves its own entry (apps/pet tts.ts resolvePetTts) — unset
+   * fields fall through to the shared defaults above. */
+
+  voices?: Record<string, PetVoiceOverride>
+
+}
+
+/** One pet's voice override. An empty-string voiceId means "not set" (the
+ * clear-on-empty semantics), never "mute". */
+
+interface PetVoiceOverride {
+
+  voiceId?: string
+
+  /** 0.5–2.0 */
+
+  speed?: number
+
+  /** 0.01–2.0 */
+
+  volume?: number
+
 }
 
 
@@ -738,6 +762,70 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
 
     if (typeof t.volume === 'number' && Number.isFinite(t.volume)) tts.volume = Math.min(2, Math.max(0.01, t.volume))
 
+    // Per-pet voice overrides: merge petId key by key. Keys absent from the
+    // patch survive (a one-pet save must not wipe hand-edited entries); an
+    // entry whose every field clears is removed so the table never fills
+    // with husks. An empty-string voiceId is clear-on-empty ("not set"),
+    // never "mute" — the carrier folds it through to the shared default.
+
+    const patchVoices = t.voices
+
+    if (typeof patchVoices === 'object' && patchVoices !== null) {
+
+      const merged: Record<string, PetVoiceOverride> = { ...(tts.voices ?? {}) }
+
+      for (const [petId, rawEntry] of Object.entries(patchVoices as Record<string, unknown>)) {
+
+        // An explicit null entry deletes that pet's override (the UI's 清除
+        // button): the pet falls back to the shared defaults entirely.
+
+        if (rawEntry === null) { Reflect.deleteProperty(merged, petId); continue }
+
+        if (typeof rawEntry !== 'object' || rawEntry === null) continue
+
+        const entry = rawEntry as Record<string, unknown>
+
+        const pet: PetVoiceOverride = { ...(merged[petId] ?? {}) }
+
+        // A null FIELD clears it (delete → fall back to the shared default):
+        // under per-key merge, an absent key means "keep", so clearing needs
+        // its own signal. An empty-string voiceId clears too (the text-input
+        // clear-on-empty convention); speed/volume use null only.
+
+        const overrideVoiceId = entry.voiceId
+
+        if (overrideVoiceId === null) Reflect.deleteProperty(pet, 'voiceId')
+
+        else if (typeof overrideVoiceId === 'string') {
+
+          const trimmed = overrideVoiceId.trim()
+
+          if (trimmed === '') Reflect.deleteProperty(pet, 'voiceId')
+
+          else pet.voiceId = trimmed
+
+        }
+
+        if (entry.speed === null) Reflect.deleteProperty(pet, 'speed')
+
+        else if (typeof entry.speed === 'number' && Number.isFinite(entry.speed)) pet.speed = Math.min(2, Math.max(0.5, entry.speed))
+
+        if (entry.volume === null) Reflect.deleteProperty(pet, 'volume')
+
+        else if (typeof entry.volume === 'number' && Number.isFinite(entry.volume)) pet.volume = Math.min(2, Math.max(0.01, entry.volume))
+
+        if (Object.keys(pet).length === 0) Reflect.deleteProperty(merged, petId)
+
+        else merged[petId] = pet
+
+      }
+
+      if (Object.keys(merged).length === 0) Reflect.deleteProperty(tts, 'voices')
+
+      else tts.voices = merged
+
+    }
+
   }
 
   // Persona (the user-editable character card, src/persona.ts): a string leaf
@@ -1220,13 +1308,9 @@ export function installSettingsPage(
     }
 
     // Per-preset persona slots (multi-pet): one entry per registered pet
-
     // preset, each resolved through the row's fallback chain
-
     // (personas.<key> → global persona → DEFAULT_PERSONA). `inherited`
-
     // tells the client the slot shows a card it does not own — editing
-
     // materializes it onto the slot.
 
     const slots = typeof settings.personas === 'object' && settings.personas !== null

@@ -578,6 +578,7 @@ async function main() {
     // the bubble beyond showing it alone.
     const sayTts = createSayTts({
         home: DSH_HOME,
+        petId: PET_ID,
         window,
         deliver: (text, audio) => {
             window.webContents.send('pet:say', audio === undefined ? { text } : { text, audio });

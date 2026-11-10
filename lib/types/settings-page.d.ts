@@ -98,6 +98,20 @@ interface TtsSettings {
     speed?: number;
     /** 0.01–2.0 */
     volume?: number;
+    /** Per-pet voice identity (multi-instance): `voices[petId]` pins that
+     * pet's voiceId/speed/volume; every other field stays shared. Each carrier
+     * instance resolves its own entry (apps/pet tts.ts resolvePetTts) — unset
+     * fields fall through to the shared defaults above. */
+    voices?: Record<string, PetVoiceOverride>;
+}
+/** One pet's voice override. An empty-string voiceId means "not set" (the
+ * clear-on-empty semantics), never "mute". */
+interface PetVoiceOverride {
+    voiceId?: string;
+    /** 0.5–2.0 */
+    speed?: number;
+    /** 0.01–2.0 */
+    volume?: number;
 }
 interface QuietSettings {
     from?: string;
