@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
+  clearJournalData,
   destroyPetData,
   existingPetIds,
   migrateGlobalSplits,
@@ -128,6 +129,28 @@ describe('whale598 layout rules', () => {
     await expect(destroyPetData(home, 'pure')).rejects.toThrow(/不可销毁/)
     await expect(destroyPetData(home, '../electron')).rejects.toThrow(/不可销毁/)
     expect(existsSync(join(home, 'whale598', 'electron'))).toBe(true)
+  })
+
+  it('clearJournalData moves the journal set to the backup dir and leaves the rest', async () => {
+    const home = await tempHome()
+    await mkdir(join(home, 'whale598', 'electron-2'), { recursive: true })
+    await writeFile(join(home, 'whale598', 'electron-2', 'journal.md'), '# journal', 'utf8')
+    await writeFile(join(home, 'whale598', 'electron-2', 'journal.meta.json'), '{}', 'utf8')
+    await writeFile(join(home, 'whale598', 'electron-2', 'pet-affection.json'), '{}', 'utf8')
+    const result = await clearJournalData(home, 'electron-2')
+    expect(result.moved).toBe(2)
+    expect(existsSync(join(home, 'whale598', 'electron-2', 'journal.md'))).toBe(false)
+    expect(existsSync(join(home, 'whale598', 'electron-2', 'pet-affection.json'))).toBe(true)
+    // 备份目录里两件都在（可手工找回）
+    const backups = await readdir(join(home, 'backup-journal'))
+    expect(backups.length).toBe(1)
+    expect(backups[0]).toMatch(/^electron-2-\d{14}$/)
+  })
+
+  it('clearJournalData guards the id shape (no path traversal)', async () => {
+    const home = await tempHome()
+    await expect(clearJournalData(home, '../electron')).rejects.toThrow(/不是合法/)
+    await expect(clearJournalData(home, '')).rejects.toThrow(/不是合法/)
   })
 
   it('layout guard: after the splits no petId-keyed state file remains at the whale598 root', async () => {
