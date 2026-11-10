@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
       var setVoice = voiceState[1]
       // 选择器的写入目标 petId：给那只宠配覆盖（voices[petId]）。全局默认
       // 已退役——没有默认声音，没配的宠只显示气泡。搜索列表只有一份，
-      // 选用写入目标宠。
+      // 内联展开在被点宠的行下方，选用写入该宠。
       var voiceTargetState = useState(null)
       var voiceTarget = voiceTargetState[0]
       var setVoiceTarget = voiceTargetState[1]
@@ -1007,35 +1007,6 @@ window.__ModuleLoader__.load({
               onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
             h('a', { href: 'https://breezeblue.ai/app/developer/api-keys', target: '_blank', rel: 'noopener noreferrer',
               style: Object.assign(btnStyle('primary'), { display: 'inline-block', textDecoration: 'none' }), title: '打开 BreezeBlue 开发者控制台的 API Keys 页面' }, '获取 Key')),
-          voice && voiceTarget
-            ? h('div', { style: { border: '1px solid rgba(127,127,127,.3)', borderRadius: 8, padding: '8px 10px', margin: '4px 0 6px' } },
-                h('div', { style: row },
-                  h('span', { style: { fontWeight: 600, fontSize: 12 } },
-                    '为「' + petName(voiceTarget) + '」（' + voiceTarget + '）挑声音'),
-                  h('span', { style: { flex: 1 } }),
-                  h(SButton, { disabled: busy, onClick: function () { commitVoiceEntry(voiceTarget, null) }, title: '清除这只宠的声音配置——之后它只显示气泡、不再朗读' }, '不朗读'),
-                  h(SButton, { onClick: function () { setVoice(null) } }, '收起')),
-                h('div', { style: row },
-                  h('input', { style: Object.assign({}, inputStyle, { width: 190 }), value: voice.search || '', placeholder: '搜索声音（名称/风格）',
-                    onChange: function (e) { setVoice(Object.assign({}, voice, { search: e.target.value })) },
-                    onKeyDown: function (e) { if (e.key === 'Enter') loadVoices(voice.search) } }),
-                  h(SButton, { disabled: voice.loading, onClick: function () { flushKeyThen(function () { loadVoices(voice.search) }) } }, '搜索')),
-                voice.error ? h('div', { style: { color: '#ff7369', fontSize: 12, margin: '2px 0' } }, voice.error) : null,
-                h('div', { style: { maxHeight: 220, overflowY: 'auto' } },
-                  (voice.items || []).map(function (v) {
-                    var effective = (tts.voices && tts.voices[voiceTarget] && tts.voices[voiceTarget].voiceId) || ''
-                    return h('div', { key: v.voice_id, style: Object.assign({}, row, { borderBottom: '1px solid rgba(127,127,127,.15)' }) },
-                      h('span', { style: { fontWeight: 600 } }, v.name || v.voice_id),
-                      h('span', { style: muted }, [v.language_code, v.gender, (v.tone || []).join('/')].filter(Boolean).join(' · ')),
-                      v.voice_id === effective ? h('span', { style: { color: '#3ddc84', fontSize: 12, fontWeight: 700 } }, '当前') : null,
-                      h('span', { style: { flex: 1 } }),
-                      v.preview_url ? h(SButton, { onClick: function () { playPreview(v.preview_url) } }, '试听') : null,
-                      h(SButton, { variant: 'primary', onClick: function () {
-                        commitVoiceEntry(voiceTarget, { voiceId: v.voice_id }, '已为「' + petName(voiceTarget) + '」选用 ' + (v.name || v.voice_id))
-                      } }, '选用'))
-                  }),
-                  (!voice.loading && !voice.error && (voice.items || []).length === 0) ? h('div', { style: muted }, '没有匹配的声音') : null))
-            : null,
           // ── 按宠声音（多实例，tts.voices[petId] 覆盖表）──
           // 行来源 = 桌面上的宠物（pets 注册表快照）——有几只显示几只，不从
           // windowPositions/voices 键补（桌面没有的不要显示）。每宠一个
@@ -1086,6 +1057,33 @@ window.__ModuleLoader__.load({
                         if (Number.isFinite(v) && v !== (entry.volume ?? 1)) commitVoiceEntry(pid, { volume: Math.min(2, Math.max(0.01, v)) })
                       },
                       onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } })),
+                  picking ? h('div', { key: 'tts-picker-' + pid, style: { border: '1px solid rgba(127,127,127,.3)', borderRadius: 8, padding: '8px 10px', margin: '0 0 6px 74px' } },
+                    h('div', { style: row },
+                      h('span', { style: { fontWeight: 600, fontSize: 12 } },
+                        '为「' + petName(pid) + '」（' + pid + '）挑声音'),
+                      h('span', { style: { flex: 1 } }),
+                      h(SButton, { disabled: busy, onClick: function () { commitVoiceEntry(pid, null) }, title: '清除这只宠的声音配置——之后它只显示气泡、不再朗读' }, '不朗读'),
+                      h(SButton, { onClick: function () { setVoice(null) } }, '收起')),
+                    h('div', { style: row },
+                      h('input', { style: Object.assign({}, inputStyle, { width: 190 }), value: voice.search || '', placeholder: '搜索声音（名称/风格）',
+                        onChange: function (e) { setVoice(Object.assign({}, voice, { search: e.target.value })) },
+                        onKeyDown: function (e) { if (e.key === 'Enter') loadVoices(voice.search) } }),
+                      h(SButton, { disabled: voice.loading, onClick: function () { flushKeyThen(function () { loadVoices(voice.search) }) } }, '搜索')),
+                    voice.error ? h('div', { style: { color: '#ff7369', fontSize: 12, margin: '2px 0' } }, voice.error) : null,
+                    h('div', { style: { maxHeight: 220, overflowY: 'auto' } },
+                      (voice.items || []).map(function (v) {
+                        var effective = (tts.voices && tts.voices[pid] && tts.voices[pid].voiceId) || ''
+                        return h('div', { key: v.voice_id, style: Object.assign({}, row, { borderBottom: '1px solid rgba(127,127,127,.15)' }) },
+                          h('span', { style: { fontWeight: 600 } }, v.name || v.voice_id),
+                          h('span', { style: muted }, [v.language_code, v.gender, (v.tone || []).join('/')].filter(Boolean).join(' · ')),
+                          v.voice_id === effective ? h('span', { style: { color: '#3ddc84', fontSize: 12, fontWeight: 700 } }, '当前') : null,
+                          h('span', { style: { flex: 1 } }),
+                          v.preview_url ? h(SButton, { onClick: function () { playPreview(v.preview_url) } }, '试听') : null,
+                          h(SButton, { variant: 'primary', onClick: function () {
+                            commitVoiceEntry(pid, { voiceId: v.voice_id }, '已为「' + petName(pid) + '」选用 ' + (v.name || v.voice_id))
+                          } }, '选用'))
+                      }),
+                      (!voice.loading && !voice.error && (voice.items || []).length === 0) ? h('div', { style: muted }, '没有匹配的声音') : null)) : null,
                 ]
               }),
             ]
