@@ -159,10 +159,15 @@ window.__ModuleLoader__.load({
       var personaOpen = personaOpenState[0]
       var setPersonaOpen = personaOpenState[1]
 
+      // pets 镜像进 ref：轮询回调查最新列表而不用把 data 拖进依赖。
+      var petsRef = useRef([])
       var refresh = useCallback(function () {
         fetch(READ, { credentials: 'same-origin' })
           .then(function (r) { return r.json() })
-          .then(function (d) { setData(d) })
+          .then(function (d) {
+            petsRef.current = (d && d.pets) || []
+            setData(d)
+          })
           .catch(function (e) { setMsg('读取失败: ' + (e && e.message)) })
       }, [])
       useEffect(function () { refresh() }, [refresh])
@@ -297,12 +302,35 @@ window.__ModuleLoader__.load({
         })
           .then(function (r) { return r.json() })
           .then(function (d) {
-            if (d && d.ok) setMsg(doneText)
-            else setMsg('失败: ' + (INSTANCE_REASON[d && d.reason] || (d && (d.reason || d.error)) || '未知原因'))
-            refresh()
+            if (!d || !d.ok) {
+              setMsg('失败: ' + (INSTANCE_REASON[d && d.reason] || (d && (d.reason || d.error)) || '未知原因'))
+              setInstanceBusyId('')
+              refresh()
+              return
+            }
+            setMsg(doneText)
+            // 新载体要 electron 拉起 + 注册表心跳后才会出现在 pets[]——立即
+            // 刷新看不到（得手动点刷新的问题）。短轮询到目标状态出现即停；
+            // 按钮保持「召唤中/送别中」直到落定或 ~12s 超时。
+            var targetId = String((d && d.petId) || petId)
+            var expectOnline = action === 'summon'
+            var tries = 0
+            var tick = function () {
+              tries += 1
+              refresh()
+              setTimeout(function () {
+                var row = petsRef.current.filter(function (p) { return p.id === targetId })[0]
+                var settled = expectOnline ? !!(row && row.online) : (!row || !row.online)
+                if (settled || tries >= 8) { setInstanceBusyId(''); return }
+                tick()
+              }, 1500)
+            }
+            tick()
           })
-          .catch(function (e) { setMsg('请求失败: ' + ((e && e.message) || e)) })
-          .finally(function () { setInstanceBusyId('') })
+          .catch(function (e) {
+            setMsg('请求失败: ' + ((e && e.message) || e))
+            setInstanceBusyId('')
+          })
       }
       // 在线判断与 GET /read 的 pets[].online 同源；reason → 提示文案映射。
       var anyOnline = (pets || []).some(function (p) { return p.online })
