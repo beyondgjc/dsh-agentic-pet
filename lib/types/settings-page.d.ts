@@ -91,21 +91,18 @@ interface DebugSettings {
 interface TtsSettings {
     enabled?: boolean;
     apiKey?: string;
-    voiceId?: string;
     modelId?: string;
     languageCode?: string;
-    /** 0.5–2.0 */
-    speed?: number;
-    /** 0.01–2.0 */
-    volume?: number;
     /** Per-pet voice identity (multi-instance): `voices[petId]` pins that
-     * pet's voiceId/speed/volume; every other field stays shared. Each carrier
-     * instance resolves its own entry (apps/pet tts.ts resolvePetTts) — unset
-     * fields fall through to the shared defaults above. */
+     * pet's voiceId/speed/volume. There is NO global voice default (retired
+     * 2026-11-11 per user call): a pet without a voices entry stays silent
+     * (bubble only) — the carrier's speakable gate folds to closed when the
+     * resolved voiceId is absent. mergeSettings drops the legacy global
+     * voiceId/speed/volume keys from the stored file on every save. */
     voices?: Record<string, PetVoiceOverride>;
 }
-/** One pet's voice override. An empty-string voiceId means "not set" (the
- * clear-on-empty semantics), never "mute". */
+/** One pet's voice override. An empty-string voiceId clears the field —
+ * with no global default anymore, that pet then stays silent (bubble only). */
 interface PetVoiceOverride {
     voiceId?: string;
     /** 0.5–2.0 */

@@ -22,15 +22,37 @@ describe('mergeSettings tts.voices (per-pet voice overrides)', () => {
 
   it('adds one pet entry and keeps other sections intact', () => {
     const merged = mergeSettings(
-      { tts: { enabled: true, apiKey: 'brz_k', voiceId: 'global-voice', speed: 1.2 } },
+      { tts: { enabled: true, apiKey: 'brz_k' } },
       { tts: { voices: { 'electron-1': { voiceId: 'pet-voice', speed: 0.9 } } } },
     )
     const tts = ttsOf(merged)
     expect(tts.enabled).toBe(true)
     expect(tts.apiKey).toBe('brz_k')
-    expect(tts.voiceId).toBe('global-voice')
-    expect(tts.speed).toBe(1.2)
     expect(tts.voices).toEqual({ 'electron-1': { voiceId: 'pet-voice', speed: 0.9 } })
+  })
+
+  it('the global voice default is retired: legacy keys fold out on every save', () => {
+    const merged = mergeSettings(
+      { tts: { enabled: true, apiKey: 'brz_k', voiceId: 'legacy-global', speed: 1.4, volume: 0.8 } },
+      {},
+    )
+    const tts = ttsOf(merged)
+    expect(tts.voiceId).toBeUndefined()
+    expect(tts.speed).toBeUndefined()
+    expect(tts.volume).toBeUndefined()
+    expect(tts.enabled).toBe(true)
+    expect(tts.apiKey).toBe('brz_k')
+  })
+
+  it('a patch carrying the retired global keys is ignored too', () => {
+    const merged = mergeSettings({}, {
+      tts: { voiceId: 'sneaked-in', speed: 2, volume: 2, voices: { electron: { voiceId: 'real' } } },
+    } as never)
+    const tts = ttsOf(merged)
+    expect(tts.voiceId).toBeUndefined()
+    expect(tts.speed).toBeUndefined()
+    expect(tts.volume).toBeUndefined()
+    expect(tts.voices).toEqual({ electron: { voiceId: 'real' } })
   })
 
   it('deep-merges per petId: a second save on one pet keeps the other pet', () => {

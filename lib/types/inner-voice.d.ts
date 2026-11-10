@@ -45,8 +45,15 @@ export interface InnerVoiceConfig {
     presets: Record<string, string>;
     /** Random-wake cadence in minutes. */
     wakeIntervalMinutes: number;
-    /** Probability the wake actually speaks (the gate decides, never the model). */
+    /** Probability the wake actually speaks — the user's default dial (the
+     * gate decides; a pet may override HER OWN rate via pet_set_wake_rate,
+     * see selfWakeRates). */
     speakProbability: number;
+    /** Per-pet self-set wake rates (petId → 0-1, written by pet_set_wake_rate):
+     * the pet's own chosen 醒来意愿 for the world-clock dice. A present key
+     * overrides the global speakProbability for THAT pet; the user clears it
+     * in the settings page to take the dial back (effectiveSpeakProbability). */
+    selfWakeRates: Record<string, number>;
     /** Probability a touch earns a reply turn. */
     touchReplyProbability: number;
     /** Minimum seconds between touch-reply turns per pet (0 = no cooldown;
@@ -74,6 +81,11 @@ export declare const VOICE_SESSION_PREFIX = "whale598-";
 /** Read `innerVoice` from pet-settings.json; anything missing or mistyped
  * folds to its default (defensive parse, `readAutonomy` precedent). */
 export declare function readInnerVoiceConfig(home: string): Promise<InnerVoiceConfig>;
+/** The world-clock dice rate for one pet: her own self-set dial
+ * (pet_set_wake_rate → innerVoice.selfWakeRates[petId]) wins when present;
+ * otherwise the user's global speakProbability. Exported pure so the tool
+ * tests and the driver's dice site stay in lockstep. */
+export declare function effectiveSpeakProbability(config: InnerVoiceConfig, petId: string): number;
 export declare function innerVoiceStorePath(home: string): string;
 export declare function wakePlansStorePath(home: string): string;
 /** Load every pet's pending wake plans: per-pet files
@@ -289,7 +301,9 @@ export declare const journalClock: (at: number) => string;
 /** The wake prompt. Time context is injected by the preset's time-context
  * row; the leading tag doubles as the durable trigger marker in the log —
  * and now names the SOURCE: [世界时钟] (the environment's tick), [自主唤醒]
- * (the model's own schedule, with the original intent), or the merged form. */
+ * (the model's own schedule, with the original intent), or the merged form.
+ * The base blocks (ledger line + journal + epochs) ride only
+ * firstWakeAfterBoot — the session history already holds their copy. */
 export declare function buildWakePrompt(facts: WakePromptFacts): string;
 /** A self-scheduled plan folded into a USER-initiated turn (chat 上行 / touch
  * 回应)：the plan sat within the ±60s merge window, so both wake in one —
