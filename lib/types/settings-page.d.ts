@@ -168,6 +168,11 @@ export interface InstanceControl {
         ok: boolean;
         reason?: string;
     }>;
+    /** 彻底销毁：杀进程（在线时）+ 遗忘内存账 + rm 宠物数据目录。 */
+    destroyInstance(petId: string): Promise<{
+        ok: boolean;
+        reason?: string;
+    }>;
 }
 export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl, summon?: () => SummonOutcome, instances?: InstanceControl): void;
 export {};

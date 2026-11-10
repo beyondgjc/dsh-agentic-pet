@@ -7,11 +7,13 @@
  * whale598 root once the splits have run.
  */
 
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
+  destroyPetData,
   existingPetIds,
   migrateGlobalSplits,
   petStatePaths,
@@ -112,6 +114,20 @@ describe('whale598 layout rules', () => {
     expect(await existingPetIds(home)).toEqual(['electron', 'pure'])
     await writePetStateJson(home, 'electron', 'pet-wake-state.json', { counts: {} })
     expect(await readPetStateJson(home, 'electron', 'pet-wake-state.json')).toEqual({ counts: {} })
+  })
+
+  it('destroyPetData wipes an extra instance dir but refuses every other id shape', async () => {
+    const home = await tempHome()
+    await mkdir(join(home, 'whale598', 'electron-2', 'nested'), { recursive: true })
+    await writeFile(join(home, 'whale598', 'electron-2', 'nested', 'pet-affection.json'), '{}', 'utf8')
+    await mkdir(join(home, 'whale598', 'electron'), { recursive: true })
+    await destroyPetData(home, 'electron-2')
+    expect(existsSync(join(home, 'whale598', 'electron-2'))).toBe(false)
+    // 主身与未知形状永远够不到删除（守卫抛错而非静默）
+    await expect(destroyPetData(home, 'electron')).rejects.toThrow(/不可销毁/)
+    await expect(destroyPetData(home, 'pure')).rejects.toThrow(/不可销毁/)
+    await expect(destroyPetData(home, '../electron')).rejects.toThrow(/不可销毁/)
+    expect(existsSync(join(home, 'whale598', 'electron'))).toBe(true)
   })
 
   it('layout guard: after the splits no petId-keyed state file remains at the whale598 root', async () => {

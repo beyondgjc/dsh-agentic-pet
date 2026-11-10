@@ -262,6 +262,15 @@ export async function existingPetIds(home: string): Promise<string[]> {
   }
 }
 
+/** 彻底销毁一只额外实例的全部数据（本子/好感/名字/窗口位置/绑定切片）：
+ * rm -rf whale598/<petId>/。送走只是离开（数据休眠，可复活）；销毁才是抹除。
+ * 守卫收紧到额外实例 id 形状——主身（electron）与 unknown 名字永远够不到
+ * 这把删除，防止调用方传错参数变成任意目录删除。 */
+export async function destroyPetData(home: string, petId: string): Promise<void> {
+  if (!/^electron-\d+$/.test(petId)) throw new Error(`destroyPetData: "${petId}" 不是可销毁的额外实例 id（主身与未知名字不可销毁）`)
+  await rm(petDataDir(home, petId), { recursive: true, force: true })
+}
+
 /** Read a root-level global that is a bare JSON array: whale598 root →
  * ~/.dsh root → [] (the interaction ledger's shape — readGlobalJson's object
  * check happens to admit arrays, but the array contract deserves its own

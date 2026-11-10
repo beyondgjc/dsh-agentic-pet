@@ -944,6 +944,8 @@ function openPathInFileManager(path: string): void {
 export interface InstanceControl {
   summonInstance(petId?: string): Promise<SummonOutcome & { petId?: string }>
   dismissInstance(petId: string): Promise<{ ok: boolean; reason?: string }>
+  /** 彻底销毁：杀进程（在线时）+ 遗忘内存账 + rm 宠物数据目录。 */
+  destroyInstance(petId: string): Promise<{ ok: boolean; reason?: string }>
 }
 
 export function installSettingsPage(
@@ -1440,6 +1442,30 @@ export function installSettingsPage(
     const petId = typeof body?.petId === 'string' ? body.petId : ''
 
     const outcome = await instances.dismissInstance(petId)
+
+    writeJson(res, 200, outcome)
+
+  })
+
+
+
+  route('POST', '/api/pet-settings/instance/destroy', async (req, res) => {
+
+    // 彻底销毁：送走的全部动作 + 驱动遗忘 + rm 宠物数据目录。主身拒绝。
+
+    if (instances === undefined) {
+
+      writeJson(res, 200, { ok: false, reason: 'unsupported' })
+
+      return
+
+    }
+
+    const body = await readJsonBody(req)
+
+    const petId = typeof body?.petId === 'string' ? body.petId : ''
+
+    const outcome = await instances.destroyInstance(petId)
 
     writeJson(res, 200, outcome)
 

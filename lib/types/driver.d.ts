@@ -86,6 +86,10 @@ export interface PetDriverControl {
     /** Re-run the known-pet-id sweep immediately (a summon/dismiss just
      * changed the instance set; the 60s cadence would lag behind). */
     refreshPetIds(): Promise<void>;
+    /** 销毁前置（destroyInstance 调用）：把 petId 从全部内存账里遗忘并按新
+     * 状态重写持久层——否则下一次 save 会把刚删掉的宠物目录原样写回来。
+     * 只清账，不碰文件（文件由 destroyPetData 删）。 */
+    forgetPet(petId: string): Promise<void>;
 }
 export declare function installPetDriver(ctx: Context, home: string, pet: PetService): PetDriverControl;
 /**

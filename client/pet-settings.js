@@ -288,7 +288,7 @@ window.__ModuleLoader__.load({
         'electron-installing': 'electron 还在准备，装完再试',
         'electron-unavailable': 'electron 未安装且无法自动安装',
         'spawn-disabled': 'DSH_PET_NO_SPAWN=1 已禁用拉起',
-        primary: '主身不能送走',
+        primary: '主身不能送走或销毁',
         'unknown-instance': '不认识的实例 id',
       }
       var instanceAction = function (action, petId, doneText) {
@@ -634,6 +634,13 @@ window.__ModuleLoader__.load({
                   : null,
                 !p.online
                   ? h(SButton, { disabled: instanceBusyId === p.id, onClick: function () { instanceAction('summon', p.id, petName(p.id) + ' 已召唤') } }, instanceBusyId === p.id ? '召唤中…' : '召唤')
+                  : null,
+                isExtra
+                  ? h(SButton, { variant: 'danger', disabled: instanceBusyId === p.id, onClick: function () {
+                    if (window.confirm('彻底销毁 ' + petName(p.id) + '？本子、好感、名字、窗口位置全部删除，无法恢复、无法召回。（送走只是离开，销毁才是抹除——只想让它离开请用「送走」）')) {
+                      instanceAction('destroy', p.id, petName(p.id) + ' 已销毁（数据已抹除）')
+                    }
+                  }, title: '删除这只宠物的全部数据' }, instanceBusyId === p.id ? '销毁中…' : '销毁')
                   : null)
             })
             : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。')),

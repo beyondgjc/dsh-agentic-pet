@@ -790,6 +790,10 @@ export interface PetDriverControl {
   /** Re-run the known-pet-id sweep immediately (a summon/dismiss just
    * changed the instance set; the 60s cadence would lag behind). */
   refreshPetIds(): Promise<void>
+  /** 销毁前置（destroyInstance 调用）：把 petId 从全部内存账里遗忘并按新
+   * 状态重写持久层——否则下一次 save 会把刚删掉的宠物目录原样写回来。
+   * 只清账，不碰文件（文件由 destroyPetData 删）。 */
+  forgetPet(petId: string): Promise<void>
 }
 
 export function installPetDriver(ctx: Context, home: string, pet: PetService): PetDriverControl {
@@ -2584,6 +2588,38 @@ ${text}`
     bindingSnapshot: voiceBindingSnapshot,
     async refreshPetIds() {
       await refreshKnownPetIds()
+    },
+    async forgetPet(petId: string) {
+      await voiceBindingsReady
+      // 内心戏登记册：换代计数与会话归属一并遗忘（saveInnerVoiceStore 对
+      // 缺席键会删除该宠的切片文件）。
+      if (voiceStore.sessions[petId] !== undefined) Reflect.deleteProperty(voiceStore.sessions, petId)
+      if (voiceStore.generations[petId] !== undefined) Reflect.deleteProperty(voiceStore.generations, petId)
+      await saveInnerVoiceStore(home, voiceStore)
+      // 会话归属与节律账
+      for (const [sessionId, owner] of [...voiceOwners]) {
+        if (owner === petId) voiceOwners.delete(sessionId)
+      }
+      voicePendingUntil.delete(petId)
+      voiceLastSpokeAt.delete(petId)
+      voiceLastTouchReplyAt.delete(petId)
+      voiceNextWakeAt.delete(petId)
+      voiceGreetedOnce.delete(petId)
+      voiceNames.delete(petId)
+      voiceLastPrompt.delete(petId)
+      // 唤醒计划与收件箱（persist 对缺席键删文件，同 store 语义）
+      voiceWakePlans.delete(petId)
+      await saveWakePlans(home, Object.fromEntries(voiceWakePlans))
+      voicePetMessages.delete(petId)
+      persistPetMessages(home)
+      // 手绑与绑定诊断（boundSessions 的配置文件键由销毁方清理）
+      voiceBoundSessions.delete(petId)
+      voiceBindingStates.delete(petId)
+      // 存在感账（persistPresenceState 只写 presencePets 现存键）
+      presencePets.delete(petId)
+      schedulePresencePersist(home)
+      crossPetLog.delete(petId)
+      driverLog(home, `INSTANCE forget pet=${petId} — all ledgers dropped (销毁前置)`)
     },
     async testBinding(petId: string) {
       await voiceBindingsReady

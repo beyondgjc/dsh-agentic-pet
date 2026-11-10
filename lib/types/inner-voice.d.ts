@@ -45,15 +45,8 @@ export interface InnerVoiceConfig {
     presets: Record<string, string>;
     /** Random-wake cadence in minutes. */
     wakeIntervalMinutes: number;
-    /** Probability the wake actually speaks — the user's default dial (the
-     * gate decides; a pet may override HER OWN rate via pet_set_wake_rate,
-     * see selfWakeRates). */
+    /** Probability the wake actually speaks (the gate decides, never the model). */
     speakProbability: number;
-    /** Per-pet self-set wake rates (petId → 0-1, written by pet_set_wake_rate):
-     * the pet's own chosen 醒来意愿 for the world-clock dice. A present key
-     * overrides the global speakProbability for THAT pet; the user clears it
-     * in the settings page to take the dial back (effectiveSpeakProbability). */
-    selfWakeRates: Record<string, number>;
     /** Probability a touch earns a reply turn. */
     touchReplyProbability: number;
     /** Minimum seconds between touch-reply turns per pet (0 = no cooldown;
@@ -81,11 +74,6 @@ export declare const VOICE_SESSION_PREFIX = "whale598-";
 /** Read `innerVoice` from pet-settings.json; anything missing or mistyped
  * folds to its default (defensive parse, `readAutonomy` precedent). */
 export declare function readInnerVoiceConfig(home: string): Promise<InnerVoiceConfig>;
-/** The world-clock dice rate for one pet: her own self-set dial
- * (pet_set_wake_rate → innerVoice.selfWakeRates[petId]) wins when present;
- * otherwise the user's global speakProbability. Exported pure so the tool
- * tests and the driver's dice site stay in lockstep. */
-export declare function effectiveSpeakProbability(config: InnerVoiceConfig, petId: string): number;
 export declare function innerVoiceStorePath(home: string): string;
 export declare function wakePlansStorePath(home: string): string;
 /** Load every pet's pending wake plans: per-pet files
@@ -269,10 +257,6 @@ export interface WakePromptFacts {
     };
     /** 静默时段：只压制世界时钟；自主唤醒仍触发，prompt 说明用户可能已睡。 */
     quiet?: boolean;
-    /** true = 本次唤醒是本进程启动后该宠的第一次（账本行 + journal + epochs
-     * 三块只随这次注入）。同一进程后续唤醒不再重复——完整历史就在会话上下
-     * 文里，每 20 分钟重抄一遍是纯 token 税。缺省 false（旧调用点）。 */
-    firstWakeAfterBoot?: boolean;
     /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */
     journal?: Array<{
         at: number;
@@ -301,9 +285,7 @@ export declare const journalClock: (at: number) => string;
 /** The wake prompt. Time context is injected by the preset's time-context
  * row; the leading tag doubles as the durable trigger marker in the log —
  * and now names the SOURCE: [世界时钟] (the environment's tick), [自主唤醒]
- * (the model's own schedule, with the original intent), or the merged form.
- * The base blocks (ledger line + journal + epochs) ride only
- * firstWakeAfterBoot — the session history already holds their copy. */
+ * (the model's own schedule, with the original intent), or the merged form. */
 export declare function buildWakePrompt(facts: WakePromptFacts): string;
 /** A self-scheduled plan folded into a USER-initiated turn (chat 上行 / touch
  * 回应)：the plan sat within the ±60s merge window, so both wake in one —
