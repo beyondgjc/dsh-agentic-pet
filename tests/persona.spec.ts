@@ -120,6 +120,18 @@ describe('per-preset persona slots (multi-pet)', () => {
     const next = mergeSettings(current, { proactivity: {} })
     expect(next.personas).toEqual({ 'whale598-custom-1': '卡' })
   })
+
+  it('mergeSettings: innerVoice.selfTuning — strict boolean, absent patch keeps stored value', () => {
+    const saved = mergeSettings({}, { innerVoice: { selfTuning: true } })
+    expect(saved.innerVoice?.selfTuning).toBe(true)
+    // 非布尔折叠：闸门只认 true/false，其余不动现值。
+    const junk = mergeSettings({ innerVoice: { selfTuning: true } }, { innerVoice: { selfTuning: 'on' } })
+    expect(junk.innerVoice?.selfTuning).toBe(true)
+    const untouched = mergeSettings({ innerVoice: { selfTuning: true } }, { innerVoice: { wakeIntervalMinutes: 7 } })
+    expect(untouched.innerVoice?.selfTuning).toBe(true)
+    const off = mergeSettings({}, { innerVoice: { selfTuning: false } })
+    expect(off.innerVoice?.selfTuning).toBe(false)
+  })
 })
 
 describe('DEFAULT_PERSONA', () => {

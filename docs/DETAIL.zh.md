@@ -1,6 +1,6 @@
 # Agentic 桌面宠物
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`）。说话内容可通过 BreezeBlue TTS 朗读，合成失败或超时静默降级为只显示。多只宠物可并存：目录注册表发现全部在线宠物，状态、交互、账本按宠路由。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`、`pet_set_rhythm` 等 15 个）。说话内容可通过 BreezeBlue TTS 朗读（声音按宠配置，未配置的宠只显示气泡），合成失败或超时静默降级为只显示。多只宠物可并存：目录注册表发现全部在线宠物，状态、交互、账本按宠路由。
 
 ## 安装
 
@@ -26,6 +26,8 @@ dsh plugin --profile <name> add dsh-agentic-pet
 
 - **跟宠物说话**：用宠物表面的输入卡（双击宠物弹出），直达她自己的内心戏会话；在侧栏手动开的宠物模式会话不是对话入口。
 - **好感**：抚摸积累好感；触摸回复冷却与请求模型的概率在设置页调整。
+- **自主表达**：世界时钟按设置的间隔与唤醒概率轻拍她，到点她自己决定说不说；她还能用 `pet_schedule_wake` 给自己定闹钟、用 `pet_set_rhythm` 自调节律——后者默认关闭，需在设置页开启「允许模型自调」，开启后她改的就是设置页那四项的值（关闭时她调用直接失败，只能开口向你提）。
+- **多宠**：「再来一只」按最低空闲序号召唤；「送走」让她离开（数据休眠、可复活）；「销毁」才抹除该宠全部数据（强确认，不可恢复）。
 - **会话换代**：宠物内心戏会话在会话列表显示为「鲸鱼娘的内心戏」。归档它会让宠物换代重建新会话（编号 `-gN` 递增，记忆从零开始），所以只归档旧代——**最新一条是现役**。
 - **指定会话（高级）**：设置页可把某只宠物手动绑定到一个用宠物 preset 创建的会话；绑定的会话按原样使用（persona 与工具目录由该会话自身的 preset 决定）。
 
