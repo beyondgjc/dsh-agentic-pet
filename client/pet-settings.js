@@ -775,6 +775,11 @@ window.__ModuleLoader__.load({
               if (Number.isFinite(v) && v >= 0) update({ innerVoice: { touchReplyCooldownSeconds: Math.min(600, v) } })
             } }),
             '秒（0 = 不限）'),
+          h('div', { style: row }, '允许模型自调',
+            h(Toggle, { value: iv.selfTuning === true, onChange: function () {
+              update({ innerVoice: { selfTuning: !(iv.selfTuning === true) } })
+            } }),
+            h('span', { style: muted }, '开：她可用 pet_set_rhythm 自己调上面四项；关：她调用直接失败')),
           h('div', { style: row }, '自主唤醒遇用户忙',
             (function () {
               var seg = function (active, side) {
@@ -852,35 +857,6 @@ window.__ModuleLoader__.load({
                 current === '' ? h('span', { style: muted }, '继承默认') : h('span', { style: muted }, '独立选择'))
             })
           })(),
-          // ── 按宠醒来概率（pet_set_wake_rate 她自己设的）：回显生效值+来源，清空即收回 ──
-          (function () {
-            var ids = []
-            pets.forEach(function (p) { if (ids.indexOf(p.id) < 0) ids.push(p.id) })
-            if (ids.indexOf('electron') < 0) ids.unshift('electron')
-            var rates = iv.selfWakeRates || {}
-            var globalPct = Math.round(((typeof iv.speakProbability === 'number' ? iv.speakProbability : 0.5)) * 100)
-            return ids.map(function (petId) {
-              var own = rates[petId]
-              var ownPct = typeof own === 'number' && Number.isFinite(own) ? Math.round(own * 100) : null
-              return h('div', { key: 'rate-' + petId, style: row },
-                '醒来概率 · ' + petName(petId),
-                h('input', {
-                  style: inputStyle,
-                  value: ownPct !== null ? String(ownPct) : '',
-                  placeholder: '跟随全局 ' + globalPct + '%',
-                  onChange: function (e) {
-                    var v = parseFloat(e.target.value)
-                    var next = Object.assign({}, rates)
-                    if (Number.isFinite(v)) next[petId] = Math.min(1, Math.max(0, v / 100))
-                    else delete next[petId]
-                    update({ innerVoice: { selfWakeRates: next } })
-                  },
-                  'aria-label': '醒来概率 · ' + petName(petId),
-                }),
-                '%',
-                ownPct !== null ? h('span', { style: muted }, '她自己设的，清空即收回') : h('span', { style: muted }, '跟随全局'))
-            })
-          })(),
           // ── 指定会话（高级）：按宠物一行——每只宠物各绑各的脑子 ──
           (function () {
             var ids = []
@@ -940,7 +916,7 @@ window.__ModuleLoader__.load({
             })
           })(),
           warnings ? h('div', { style: { color: '#f0b429', fontSize: 12, margin: '2px 0 4px' } }, '提示：' + warnings) : null,
-          h(Hint, null, '指定会话会校验当前模式：标准模式（没有 pet_say/pet_do）会被拒绝，请使用「精简（仅表达）」或「普通（含工作工具）」的宠物模式会话。会话在别的项目也没关系，唤醒和气泡照常，只是不会归到 whale598 项目下。保存后状态显示「已装载/未装载/失败」，点「测试」可立即验证；清空后回落到她之前的会话。宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。醒来有两个来源：世界时钟是环境节拍，按上面的间隔和唤醒概率随机轻拍她，用户忙于会话或宠物表达未完成时不会打扰；自主唤醒是她用 pet_schedule_wake 给自己定的闹钟，到点带着当初的打算醒来，不受这个概率影响（上面的「自主唤醒遇用户忙」决定你正忙时她是否照醒，默认到点必醒）。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。她还有一个自己的旋钮：pet_set_wake_rate——模型可以自己调每宠一行的「醒来概率」（0=深睡不自己醒，100=每拍都想看看世界），改完下一拍生效；行内清空即收回，回落到上面的全局概率。')),
+          h(Hint, null, '指定会话会校验当前模式：标准模式（没有 pet_say/pet_do）会被拒绝，请使用「精简（仅表达）」或「普通（含工作工具）」的宠物模式会话。会话在别的项目也没关系，唤醒和气泡照常，只是不会归到 whale598 项目下。保存后状态显示「已装载/未装载/失败」，点「测试」可立即验证；清空后回落到她之前的会话。宠物在自己专属的会话里醒来，用气泡和动作自主表达；那条「鲸鱼娘的内心戏」会话可在会话列表查看，也可以直接在那里和它聊天。醒来有两个来源：世界时钟是环境节拍，按上面的间隔和唤醒概率随机轻拍她，用户忙于会话或宠物表达未完成时不会打扰；自主唤醒是她用 pet_schedule_wake 给自己定的闹钟，到点带着当初的打算醒来，不受这个概率影响（上面的「自主唤醒遇用户忙」决定你正忙时她是否照醒，默认到点必醒）。会话模式切换只对新建会话生效：归档旧会话后，她会在下次对话时自动换代重建（旧会话记忆不迁移）。「允许模型自调」是她的节律总闸：开启后她可用 pet_set_rhythm 自己调上面四项（世界时钟间隔/唤醒概率/被摸回应概率/回应间隔，改的就是这几行的值，下一拍生效）；关闭时她调用直接失败，只能开口向你提——四项任何时候都由你改回。')),
 
         h(Section, { title: '静默时段' },
           h('div', { style: row }, '启用静默', h(Toggle, { value: quietOn, onChange: function () {
@@ -1076,7 +1052,7 @@ window.__ModuleLoader__.load({
             return [
               h('div', { style: Object.assign({}, row, { margin: '2px 0 0' }) }, h('span', { style: { fontWeight: 600 } }, '每宠单独配'),
                 h('span', { style: muted }, '点某只的「选择」打开搜索列表，试听后选用——只为那一只生效')),
-              ids.map(function (pid) {
+              ids.map(function (pid, idx) {
                 var entry = (tts.voices && tts.voices[pid]) || {}
                 var picking = voice && voiceTarget === pid
                 // 两行布局：第一行 = 名字 + 当前声音 + 选择/清除；第二行 =
@@ -1095,7 +1071,7 @@ window.__ModuleLoader__.load({
                       flushKeyThen(function () { loadVoices('') })
                     } }, picking ? '收起' : '选择'),
                     h(SButton, { disabled: busy, onClick: function () { commitVoiceEntry(pid, null) }, title: '清除这只宠的声音配置——之后它只显示气泡、不再朗读' }, '清除')),
-                  h('div', { key: 'tts-per-pet-sub-' + pid, style: Object.assign({}, row, { fontSize: 12, paddingLeft: 74, margin: '0 0 4px' }) },
+                  h('div', { key: 'tts-per-pet-sub-' + pid, style: Object.assign({}, row, { fontSize: 12, paddingLeft: 74, margin: '0 0 4px' }, idx < ids.length - 1 ? { borderBottom: '1px solid rgba(127,127,127,.2)', paddingBottom: 6 } : {}) },
                     '速度',
                     h('input', { key: 'tts-speed-' + pid + '-' + String(entry.speed ?? 1), style: Object.assign({}, inputStyle, { width: 48 }), defaultValue: String(entry.speed ?? 1), title: '0.5 – 2.0，1 = 正常语速',
                       onBlur: function (e) {
