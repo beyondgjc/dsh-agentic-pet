@@ -142,6 +142,9 @@ interface PetSettings {
     /** Per-preset persona slots (presetId → card): readPersonaCard resolves
      * personas.<presetId> → the global `persona` → DEFAULT_PERSONA. */
     personas?: Record<string, string>;
+    /** 用户给各人设槽取的显示名（presetId → name）：只影响设置页展示，
+     * wire 上的 preset id 不变。空 = 用内置标签。 */
+    presetNames?: Record<string, string>;
 }
 /** Merge a patch into the settings, accepting only the known keys. Exported
  * for the persona-merge spec (tests/persona.spec.ts). */

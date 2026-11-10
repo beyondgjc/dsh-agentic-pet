@@ -277,6 +277,21 @@ window.__ModuleLoader__.load({
         var slot = personaSlotOf(presetId)
         return slot ? String(slot.value || '') : ''
       }
+      // 人设槽显示名：用户取名（settings.presetNames）优先，缺省回落内置标签
+      // ——与宠物改名同款（uncontrolled + key 钉住生效名，改名后重挂）。
+      var presetNameOf = function (presetId) {
+        var custom = settings.presetNames && settings.presetNames[presetId]
+        return custom ? String(custom) : (PRESET_SLOT_LABELS[presetId] || presetId)
+      }
+      var commitPresetName = function (presetId, value) {
+        var current = (settings.presetNames && settings.presetNames[presetId]) || ''
+        var v = String(value || '').trim()
+        if (v === current) return
+        var next = Object.assign({}, settings.presetNames || {})
+        if (v === '') delete next[presetId]
+        else next[presetId] = v
+        update({ presetNames: next }, '人设名已保存')
+      }
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
@@ -663,16 +678,16 @@ window.__ModuleLoader__.load({
             var toggle = function () {
               setPersonaOpen(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = !open; return n })()) })
             }
-            var header = h('div', {
-              style: Object.assign({}, row, { marginBottom: 4, cursor: 'pointer', userSelect: 'none' }),
-              onClick: toggle,
-              role: 'button',
-              'aria-expanded': open,
-              title: open ? '收起' : '展开编辑',
-            },
-              h('span', { style: { fontWeight: 700 } }, (open ? '▾ ' : '▸ ') + '人设 · ' + (PRESET_SLOT_LABELS[presetId] || presetId)),
+            var header = h('div', { style: Object.assign({}, row, { marginBottom: 4 }) },
+              h('button', { type: 'button', onClick: toggle, 'aria-expanded': open, title: open ? '收起' : '展开编辑',
+                style: { border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', padding: '2px 4px', fontWeight: 700, font: 'inherit' } },
+                open ? '▾' : '▸'),
+              h('input', { key: 'pname-' + presetNameOf(presetId), style: Object.assign({}, inputStyle, { width: 170, fontWeight: 700 }), defaultValue: presetNameOf(presetId), title: '给人设取名；点击空白处或回车生效；清空恢复内置名',
+                onBlur: function (e) { commitPresetName(presetId, e.target.value) },
+                onKeyDown: function (e) { if (e.key === 'Enter') { commitPresetName(presetId, e.target.value); e.target.blur() } },
+                'aria-label': '人设名 · ' + presetId }),
               slot.inherited ? h('span', { style: muted }, '继承卡') : h('span', { style: muted }, '独立卡'),
-              !open ? h('span', { style: muted }, '点开编辑') : null)
+              !open ? h('span', { style: muted }, '点 ▾ 展开编辑') : null)
             if (!open) return h('div', { key: presetId, style: { marginBottom: 10 } }, header)
             return h('div', { key: presetId, style: { marginBottom: 14 } },
               header,
@@ -828,7 +843,7 @@ window.__ModuleLoader__.load({
               },
               'aria-label': '默认会话模式',
             }, PRESET_SLOT_IDS.map(function (presetId) {
-              return h('option', { key: presetId, value: presetId, style: optionStyle }, PRESET_SLOT_LABELS[presetId] || presetId)
+              return h('option', { key: presetId, value: presetId, style: optionStyle }, presetNameOf(presetId))
             }))),
           // ── 按宠预设（多宠）：每只宠各选各的会话模式=各带各的人设卡 ──
           (function () {
@@ -853,7 +868,7 @@ window.__ModuleLoader__.load({
                 },
                   h('option', { key: '', value: '', style: optionStyle }, '跟随默认'),
                   PRESET_SLOT_IDS.map(function (presetId) {
-                    return h('option', { key: presetId, value: presetId, style: optionStyle }, PRESET_SLOT_LABELS[presetId] || presetId)
+                    return h('option', { key: presetId, value: presetId, style: optionStyle }, presetNameOf(presetId))
                   })),
                 current === '' ? h('span', { style: muted }, '继承默认') : h('span', { style: muted }, '独立选择'))
             })

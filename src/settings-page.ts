@@ -270,6 +270,10 @@ interface PetSettings {
    * personas.<presetId> → the global `persona` → DEFAULT_PERSONA. */
   personas?: Record<string, string>
 
+  /** 用户给各人设槽取的显示名（presetId → name）：只影响设置页展示，
+   * wire 上的 preset id 不变。空 = 用内置标签。 */
+  presetNames?: Record<string, string>
+
 }
 
 
@@ -901,6 +905,40 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
   if (personas !== undefined) next.personas = personas
 
   else Reflect.deleteProperty(next, 'personas')
+
+  // 人设槽显示名（presetId → name）：同槽卡的部分映射语义——trim、60 字截断、
+
+  // 空串删键回落内置标签、patch 未带键保现值。
+
+  const patchPresetNames = patch.presetNames
+
+  let presetNames: Record<string, string> | undefined = current.presetNames
+
+  if (typeof patchPresetNames === 'object' && patchPresetNames !== null) {
+
+    const record: Record<string, string> = { ...(presetNames ?? {}) }
+
+    for (const [presetId, name] of Object.entries(patchPresetNames as Record<string, unknown>)) {
+
+      if (presetId === '') continue
+
+      if (typeof name !== 'string') continue
+
+      const trimmed = name.trim()
+
+      if (trimmed === '') Reflect.deleteProperty(record, presetId)
+
+      else record[presetId] = trimmed.length > 60 ? trimmed.slice(0, 60) : trimmed
+
+    }
+
+    presetNames = record
+
+  }
+
+  if (presetNames !== undefined) next.presetNames = presetNames
+
+  else Reflect.deleteProperty(next, 'presetNames')
 
   return next
 
