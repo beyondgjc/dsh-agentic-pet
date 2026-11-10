@@ -470,6 +470,13 @@ const petDisplayName = (petId: string): string =>
   voiceNames.get(petId) ?? DEFAULT_PET_NAME[petId] ?? petId
 // Boot-greeting latch: one hello per dsh start, cleared on driver install.
 const voiceGreetedOnce = new Set<string>()
+// Per-boot base-injection latch (user decision 2026-11-11): the FIRST
+// admitted wake per pet carries the base blocks (ledger line + journal +
+// epochs, buildWakePrompt's firstWakeAfterBoot); later wakes in the same
+// process omit them — the session history already holds the copy, and
+// re-injecting on every 20min tick is a pure token tax. A prompt rejected
+// by the gates does NOT consume the slot: the next wake retries with base.
+const voiceBaseInjected = new Set<string>()
 // Custom display names (petId → label, from pet-settings.json `names`):
 // surfaced to the MODEL too — pet_state carries it, and prompts prepend a
 // name line so the pet self-identifies with the user's naming.
@@ -2193,11 +2200,12 @@ ${text}`
     if (!config.enabled) return
     const { source, overdue = false } = opts
     const plans = opts.plans ?? []
+    const firstAfterBoot = !voiceBaseInjected.has(petId)
     bumpPresence(home, petId, 'wakeCount')
     if (source !== 'world') bumpPresence(home, petId, 'selfWakeCount')
     // The effective numbers ride the log: a settings file that fails to reach
     // the driver must be visible, not just its consequences.
-    driverLog(home, `VOICE wake fire pet=${petId} source=${source} plans=${String(plans.length)} interval=${String(config.wakeIntervalMinutes)}min speakP=${String(config.speakProbability)} busyPolicy=${config.selfWakeBusyPolicy} quiet=${String(opts.quiet === true)}`)
+    driverLog(home, `VOICE wake fire pet=${petId} source=${source} plans=${String(plans.length)} interval=${String(config.wakeIntervalMinutes)}min speakP=${String(config.speakProbability)} busyPolicy=${config.selfWakeBusyPolicy} quiet=${String(opts.quiet === true)} base=${String(firstAfterBoot)}`)
     // The world clock alone stays probability-gated (the environment's tick
     // is throttled); a due plan fires regardless — 概率门不否决模型自己定
     // 的计划.
@@ -2280,13 +2288,19 @@ ${text}`
       unread,
       ...(boardUnread.count > 0 ? { boardUnread } : {}),
       quiet: opts.quiet === true,
+      firstWakeAfterBoot: firstAfterBoot,
       journal,
       ...(journalWake?.epochLines === undefined ? {} : { journalEpochs: journalWake.epochLines }),
       ...(journalWake?.epochFallback === undefined ? {} : { journalEpochFallback: journalWake.epochFallback }),
       ...(journalWake?.epochDue === undefined ? {} : { journalEpochDue: journalWake.epochDue.reason }),
       ...(presence === undefined ? {} : { presence }),
     }))
-    if (spoke) voiceLastSpokeAt.set(petId, now)
+    if (spoke) {
+      // The base blocks rode an admitted prompt — this boot won't repeat
+      // them. A gated/rejected wake returns false and leaves the latch open.
+      voiceBaseInjected.add(petId)
+      voiceLastSpokeAt.set(petId, now)
+    }
   }
   // Tool-plane bridge (see selfWakeSender): the schedule tool's overdue
   // catch-up fires through the same wake path as the sweep.
@@ -3750,6 +3764,87 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           persistWakePlans(home)
           driverLog(home, `VOICE wake plan cancelled pet=${entry.id} id=${id}`)
           return JSON.stringify({ cancelled: taken.removed.map(plan => plan.id), remaining: taken.next.length })
+        } catch (error: unknown) {
+          throw classify(error)
+        }
+      },
+    }))
+    scope.tools.register(defineTool({
+      name: 'pet_set_rhythm',
+      description: 'Tune the four rhythm dials of your 自主表达 (self-expression) — the SAME values the user sees on their settings page: wakeIntervalMinutes = how often the world clock taps you (minutes); wakeRate = the chance a world-clock tick actually wakes you (0 = 深睡, never self-wake; touches, chats and your own pet_schedule_wake plans still do); touchReplyRate = the chance a touch earns a reply turn; touchReplyCooldownSeconds = minimum seconds between touch replies (0 = unlimited). Only the params you pass change; omitted ones stay. Takes effect from the next world-clock tick / next touch. GATED: this works only while the user has 「允许模型自调」 ON in the settings page — when it is off your call FAILS and the dials are theirs alone; if you want a change then, ask them in words. They see every value you set and can rewrite or revoke at any time.',
+      parameters: {
+        wakeIntervalMinutes: { type: 'number', description: 'World-clock interval in minutes (1-60 whole number).' },
+        wakeRate: { type: 'number', description: 'World-clock wake probability as a whole number 0-100 (percent).' },
+        touchReplyRate: { type: 'number', description: 'Touch-reply probability as a whole number 0-100 (percent).' },
+        touchReplyCooldownSeconds: { type: 'number', description: 'Minimum seconds between touch replies (0-600 whole number, 0 = unlimited).' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        requireOwnedSession(exec)
+        try {
+          const entry = await resolveTarget(undefined, exec?.agent?.id)
+          // 权限总闸：用户没开「允许模型自调」时这组旋钮是用户的——调用即
+          // 失败，错误话术告诉她去路（开口向用户要），而不是让她反复重试。
+          // 每次调用现读：用户在设置页翻闸，下一拍即生效。
+          const gate = await readInnerVoiceConfig(home)
+          if (gate.selfTuning !== true) {
+            throw new Error('用户未开放「允许模型自调」（设置 → 自主表达）——表达节律四项现在由用户设定，调用不会生效。想要调整，直接在回复里向用户提出。')
+          }
+          // Validate BEFORE touching the file: whole numbers inside each
+          // dial's range; anything else is rejected with the range stated —
+          // teaching the boundary beats silent clamping (a silently clamped
+          // 0.5→1 read like a success the model never asked for). Percent
+          // dials store /100 (the settings file keeps fractional probabilities).
+          const patch: Record<string, number> = {}
+          const dial = (name: string, raw: unknown, min: number, max: number, note: string): number => {
+            const value = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : Number.NaN
+            if (Number.isNaN(value) || value < min || value > max) {
+              throw new Error(`${name} 必须是 ${String(min)}-${String(max)} 的整数（收到 ${String(raw)}）——${note}`)
+            }
+            return value
+          }
+          let provided = 0
+          if (args.wakeIntervalMinutes !== undefined) {
+            patch.wakeIntervalMinutes = dial('wakeIntervalMinutes', args.wakeIntervalMinutes, 1, 60, '世界时钟多少分钟轻拍你一次')
+            provided++
+          }
+          if (args.wakeRate !== undefined) {
+            patch.speakProbability = dial('wakeRate', args.wakeRate, 0, 100, '0=深睡不自己醒，100=每拍都想看看') / 100
+            provided++
+          }
+          if (args.touchReplyRate !== undefined) {
+            patch.touchReplyProbability = dial('touchReplyRate', args.touchReplyRate, 0, 100, '0=被摸也安静，100=每摸必应') / 100
+            provided++
+          }
+          if (args.touchReplyCooldownSeconds !== undefined) {
+            patch.touchReplyCooldownSeconds = dial('touchReplyCooldownSeconds', args.touchReplyCooldownSeconds, 0, 600, '0=不限，两次被摸回应的最小间隔')
+            provided++
+          }
+          if (provided === 0) {
+            throw new Error('四个参数至少传一个：wakeIntervalMinutes / wakeRate / touchReplyRate / touchReplyCooldownSeconds（只改你传的，其余保持不变）')
+          }
+          // Read-modify-write of the GLOBAL settings file — the same fields
+          // the settings page edits, so her change and the user's change are
+          // one value, never a shadow copy. The settings page is the only
+          // other writer (one tool call wide race window; the dial turns a
+          // few times a day at most). All consumers read fresh per trigger,
+          // so every value is live from the next tick without a restart.
+          const raw = await petdata.readGlobalJson(home, 'pet-settings.json') as Record<string, unknown>
+          const innerVoice = (typeof raw.innerVoice === 'object' && raw.innerVoice !== null
+            ? raw.innerVoice : {}) as Record<string, unknown>
+          for (const [name, value] of Object.entries(patch)) innerVoice[name] = value
+          raw.innerVoice = innerVoice
+          await petdata.writeGlobalJson(home, 'pet-settings.json', raw)
+          driverLog(home, `VOICE rhythm self-set pet=${entry.id} ` + Object.entries(patch).map(([name, value]) => `${name}=${String(value)}`).join(' '))
+          return JSON.stringify({
+            ok: true,
+            petId: entry.id,
+            applied: patch,
+            note: '已生效：下次世界时钟节拍/下次被摸即按新值。用户在设置页随时可改回，也可关掉「允许模型自调」收回权限。',
+          })
         } catch (error: unknown) {
           throw classify(error)
         }

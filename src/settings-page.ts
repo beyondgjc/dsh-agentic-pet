@@ -112,6 +112,11 @@ interface InnerVoiceSettings {
 
   touchReplyCooldownSeconds?: number
 
+  /** 允许模型自调（总闸，默认关）：false = pet_set_rhythm 调用即失败、表达
+   * 节律四项由用户独享；true = 模型可用 pet_set_rhythm 改这份全局值（无按宠
+   * 覆盖层），设置页随时改回或关闸。 */
+  selfTuning?: boolean
+
   /** 自主唤醒（pet_schedule_wake 计划）到点遇用户忙的策略：
 
    * 'fire' = 到点必醒（默认）；'defer' = 忙时顺延下一拍重试。 */
@@ -307,6 +312,8 @@ const DEFAULT_SETTINGS: PetSettings = {
     touchReplyProbability: 0.3,
 
     touchReplyCooldownSeconds: 30,
+
+    selfTuning: false,
 
     selfWakeBusyPolicy: 'fire',
 
@@ -629,6 +636,11 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
       innerVoice.presets = record
 
     }
+
+    // 允许模型自调（总闸）：false（默认）= pet_set_rhythm 调用即失败、四项
+    // 节律由用户独享；true = 模型改的就是这份全局值（无按宠覆盖层）。
+
+    if (typeof v.selfTuning === 'boolean') innerVoice.selfTuning = v.selfTuning
 
   }
 
@@ -1506,6 +1518,32 @@ export function installSettingsPage(
     const outcome = await instances.destroyInstance(petId)
 
     writeJson(res, 200, outcome)
+
+  })
+
+
+
+  route('POST', '/api/pet-settings/journal/clear', async (req, res) => {
+
+    // 清空一只宠的长期记忆（连续性本子全套移入 ~/.dsh/backup-journal/ 后
+
+    // 从宠物目录删除）。守卫与搬运在 petdata.clearJournalData。
+
+    const body = await readJsonBody(req)
+
+    const petId = typeof body?.petId === 'string' ? body.petId : ''
+
+    try {
+
+      const result = await petdata.clearJournalData(home, petId)
+
+      writeJson(res, 200, { ok: true, ...result })
+
+    } catch (error: unknown) {
+
+      writeJson(res, 200, { ok: false, reason: error instanceof Error ? error.message : String(error) })
+
+    }
 
   })
 

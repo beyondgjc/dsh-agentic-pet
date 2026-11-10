@@ -75,6 +75,14 @@ export declare function existingPetIds(home: string): Promise<string[]>;
  * 守卫收紧到额外实例 id 形状——主身（electron）与 unknown 名字永远够不到
  * 这把删除，防止调用方传错参数变成任意目录删除。 */
 export declare function destroyPetData(home: string, petId: string): Promise<void>;
+/** 清空一只宠物的长期记忆（连续性本子全套）：journal.md / archive /
+ * epochs / index / meta / last-recall 先移入 ~/.dsh/backup-journal/<petId>-<ts>/
+ * 再从宠物目录消失——记忆清零，文件可手工找回（重 0 SOP 的按钮化）。
+ * 守卫：id 只许字母数字下划线连字符，防路径穿越。 */
+export declare function clearJournalData(home: string, petId: string): Promise<{
+    moved: number;
+    backupDir: string;
+}>;
 /** Read a root-level global that is a bare JSON array: whale598 root →
  * ~/.dsh root → [] (the interaction ledger's shape — readGlobalJson's object
  * check happens to admit arrays, but the array contract deserves its own

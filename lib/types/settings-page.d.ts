@@ -51,6 +51,10 @@ interface InnerVoiceSettings {
     speakProbability?: number;
     touchReplyProbability?: number;
     touchReplyCooldownSeconds?: number;
+    /** 允许模型自调（总闸，默认关）：false = pet_set_rhythm 调用即失败、表达
+     * 节律四项由用户独享；true = 模型可用 pet_set_rhythm 改这份全局值（无按宠
+     * 覆盖层），设置页随时改回或关闸。 */
+    selfTuning?: boolean;
     /** 自主唤醒（pet_schedule_wake 计划）到点遇用户忙的策略：
   
      * 'fire' = 到点必醒（默认）；'defer' = 忙时顺延下一拍重试。 */

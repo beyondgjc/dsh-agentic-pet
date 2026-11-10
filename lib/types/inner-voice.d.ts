@@ -45,7 +45,8 @@ export interface InnerVoiceConfig {
     presets: Record<string, string>;
     /** Random-wake cadence in minutes. */
     wakeIntervalMinutes: number;
-    /** Probability the wake actually speaks (the gate decides, never the model). */
+    /** Probability the wake actually speaks — the user's dial by default; the
+     * model may edit it (pet_set_rhythm) only while selfTuning is on. */
     speakProbability: number;
     /** Probability a touch earns a reply turn. */
     touchReplyProbability: number;
@@ -53,6 +54,12 @@ export interface InnerVoiceConfig {
      * the probability gate alone decides). Legacy minute-keyed settings fold
      * in ×60. */
     touchReplyCooldownSeconds: number;
+    /** 允许模型自调（总闸，默认关）：false = 表达节律四项（wakeIntervalMinutes/
+     * speakProbability/touchReplyProbability/touchReplyCooldownSeconds）由用户
+     * 独享，pet_set_rhythm 调用即失败；true = 模型可用 pet_set_rhythm 改这四项
+     * ——改的就是这里的全局值（设置页与模型写同一份，无按宠覆盖层），设置页
+     * 随时改回或关闸。 */
+    selfTuning: boolean;
     /** 自主唤醒（pet_schedule_wake 计划）到点遇用户主会话忙时的策略：
      * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
      * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
@@ -257,6 +264,10 @@ export interface WakePromptFacts {
     };
     /** 静默时段：只压制世界时钟；自主唤醒仍触发，prompt 说明用户可能已睡。 */
     quiet?: boolean;
+    /** true = 本次唤醒是本进程启动后该宠的第一次（账本行 + journal + epochs
+     * 三块只随这次注入）。同一进程后续唤醒不再重复——完整历史就在会话上下
+     * 文里，每 20 分钟重抄一遍是纯 token 税。缺省 false（旧调用点）。 */
+    firstWakeAfterBoot?: boolean;
     /** 最近几条连续性记录（已按 maxEntryChars 截断、已做边界转义）。 */
     journal?: Array<{
         at: number;
@@ -285,7 +296,9 @@ export declare const journalClock: (at: number) => string;
 /** The wake prompt. Time context is injected by the preset's time-context
  * row; the leading tag doubles as the durable trigger marker in the log —
  * and now names the SOURCE: [世界时钟] (the environment's tick), [自主唤醒]
- * (the model's own schedule, with the original intent), or the merged form. */
+ * (the model's own schedule, with the original intent), or the merged form.
+ * The base blocks (ledger line + journal + epochs) ride only
+ * firstWakeAfterBoot — the session history already holds their copy. */
 export declare function buildWakePrompt(facts: WakePromptFacts): string;
 /** A self-scheduled plan folded into a USER-initiated turn (chat 上行 / touch
  * 回应)：the plan sat within the ±60s merge window, so both wake in one —

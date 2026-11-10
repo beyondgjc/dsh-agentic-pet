@@ -987,7 +987,23 @@ window.__ModuleLoader__.load({
             value: journal.allowUnboundAppend === true,
             onChange: function () { update({ journal: { allowUnboundAppend: journal.allowUnboundAppend !== true } }) },
           })),
-          h(Hint, null, '本子在 ~/.dsh/whale598/<petId>/journal.md：可读、可追加、不静默删改；手写本子已导入。默认只有宠物自己的会话可以追加。')),
+          h(Hint, null, '本子在 ~/.dsh/whale598/<petId>/journal.md：可读、可追加、不静默删改；手写本子已导入。默认只有宠物自己的会话可以追加。'),
+          // ── 清空长期记忆：按宠一行（全套移入 ~/.dsh/backup-journal/ 备份） ──
+          (function () {
+            var ids = []
+            pets.forEach(function (p) { if (ids.indexOf(p.id) < 0) ids.push(p.id) })
+            if (ids.indexOf('electron') < 0) ids.unshift('electron')
+            return ids.map(function (petId) {
+              return h('div', { key: 'jcl-' + petId, style: row },
+                h('span', { style: muted }, '清空长期记忆 · ' + petName(petId)),
+                h('span', { style: { flex: 1 } }),
+                h(SButton, { variant: 'danger', disabled: busy, onClick: function () {
+                  if (window.confirm('清空 ' + petName(petId) + ' 的长期记忆？本子、归档、阶段摘要全部移入备份目录（~/.dsh/backup-journal/），她的连续性从零开始——旧会话上下文里还留有的印象不受影响，但新的唤醒不再带入旧本子。')) {
+                    act('/api/pet-settings/journal/clear', { petId: petId }, petName(petId) + ' 的长期记忆已清空（原文件在 ~/.dsh/backup-journal/）')
+                  }
+                }, title: '删除这只宠物的连续性本子（先备份）' }, '清空'))
+            })
+          })()),
         h(Section, { title: '你不在的时候' },
           h('div', { style: row }, '回来时给我一份摘要', h(Toggle, { value: presenceOn, onChange: function () {
             update({ presenceSummary: { enabled: !presenceOn } })

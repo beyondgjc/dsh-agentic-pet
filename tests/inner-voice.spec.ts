@@ -67,6 +67,7 @@ describe('readInnerVoiceConfig', () => {
       petMessageLimits: { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 },
       boundSessions: {},
       presets: {},
+      selfTuning: false,
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
     expect((await readInnerVoiceConfig(home)).enabled).toBe(true)
@@ -87,6 +88,7 @@ describe('readInnerVoiceConfig', () => {
         petMessageLimits: { minutes5: 2, minutes10: 3, minutes30: 4, minutes60: 6 },
         boundSessions: { electron: 'whale598-electron', bad: 7, '': 'no-key' },
         presets: { electron: 'whale598-standard', ghost: 'no-such-preset', '': 'whale598' },
+        selfTuning: true,
       },
     }), 'utf8')
     expect(await readInnerVoiceConfig(home)).toEqual({
@@ -101,6 +103,7 @@ describe('readInnerVoiceConfig', () => {
       petMessageLimits: { minutes5: 2, minutes10: 3, minutes30: 4, minutes60: 6 },
       boundSessions: { electron: 'whale598-electron' },
       presets: { electron: 'whale598-standard' },
+      selfTuning: true,
     })
   })
 
@@ -115,6 +118,7 @@ describe('readInnerVoiceConfig', () => {
         selfWakeBusyPolicy: 'next-week',
         petToPetDelivery: 'carrier-pigeon',
         preset: 42,
+        selfTuning: 'yes',
       },
     }), 'utf8')
     const config = await readInnerVoiceConfig(home)
@@ -127,6 +131,8 @@ describe('readInnerVoiceConfig', () => {
     // 宠物间消息投递方式只收白名单两值，其余折叠默认 'queue'（排队等醒）。
     expect(config.petToPetDelivery).toBe('queue')
     expect(config.preset).toBe('whale598')
+    // 允许模型自调是严格布尔闸：非 true 一律折叠默认关。
+    expect(config.selfTuning).toBe(false)
   })
 
   it('folds the legacy minute cooldown key into seconds (x60), seconds key wins once saved', async () => {
@@ -139,6 +145,22 @@ describe('readInnerVoiceConfig', () => {
       innerVoice: { touchReplyCooldownMinutes: 5, touchReplyCooldownSeconds: 0 },
     }), 'utf8')
     expect((await readInnerVoiceConfig(home)).touchReplyCooldownSeconds).toBe(0)
+  })
+
+  it('parses the self-tuning gate strictly (non-true folds to closed)', async () => {
+    const home = await tempHome()
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({
+      innerVoice: { selfTuning: true },
+    }), 'utf8')
+    expect((await readInnerVoiceConfig(home)).selfTuning).toBe(true)
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({
+      innerVoice: { selfTuning: 'on' },
+    }), 'utf8')
+    expect((await readInnerVoiceConfig(home)).selfTuning).toBe(false)
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({
+      innerVoice: {},
+    }), 'utf8')
+    expect((await readInnerVoiceConfig(home)).selfTuning).toBe(false)
   })
 })
 
@@ -234,17 +256,28 @@ describe('prompts and helpers', () => {
   it('builds the wake prompt with the durable trigger tag and first-wake branch', () => {
     const prompt = buildWakePrompt({
       affection: 66, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      firstWakeAfterBoot: true,
     })
     // 世界时钟 is the environment's tick — the old [自主唤醒] tag now names
-    // the model's OWN schedule (pet_schedule_wake).
+    // the model's OWN schedule (pet_schedule_wake). The ledger line rides
+    // only the first wake after boot; the meta line 环境节拍到了 is gone.
     expect(prompt.startsWith('[世界时钟]')).toBe(true)
     expect(prompt).toContain('第一次醒来')
     expect(prompt).toContain('好感 66')
+    expect(prompt).not.toContain('环境节拍到了')
+    expect(prompt).not.toContain('醒来想到什么就说一句')
     const again = buildWakePrompt({
       affection: 66, bondValue: 0, bondTier: '陌生', bondDays: 0, minutesSinceLastSpoke: 30, minutesSinceUserActivity: 2, userActive: true,
     })
     expect(again).toContain('上次开口是 30 分钟前')
     expect(again).toContain('正在会话中工作')
+    // 同进程后续唤醒：账本行不再重复（历史已在会话上下文里）。
+    expect(again).not.toContain('好感 66')
+    expect(again).not.toContain('羁绊')
+    // 自调节律的旋钮只在首醒教一次（pet_set_rhythm 的契约在工具描述里，
+    // 「允许模型自调」闸门语义一并带到）。
+    expect(prompt).toContain('pet_set_rhythm')
+    expect(again).not.toContain('pet_set_rhythm')
   })
 
   it('builds the touch prompt with part wording and touch count', () => {
