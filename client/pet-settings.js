@@ -646,7 +646,8 @@ window.__ModuleLoader__.load({
             : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。')),
           h('div', { style: row },
             h(SButton, { disabled: instanceBusyId !== '' || busy, onClick: function () { instanceAction('summon', 'new', '新宠物已召唤上桌（可改名区分）') } }, instanceBusyId === 'new' ? '召唤中…' : '再来一只'),
-            h('span', { style: muted }, '同种同脸，各养各的记忆；上限 3 只（multi-instances.json 可调）'))),
+            h('span', { style: muted }, '同种同脸，各养各的记忆；上限 3 只（multi-instances.json 可调）')),
+          h(Hint, null, '送走＝让它离开桌面，本子和记忆都留着——之后「再来一只」它会带着原来的样子回来；销毁＝彻底删掉这只宠的全部数据，无法恢复也无法召回。只想暂时告别用送走，确定不要这只了才用销毁。')),
 
         // ── 人设（按预设 4 槽；身体规则是宿主契约，不在此编辑） ──
         personaSlots ? h(Section, { title: h('span', null, '人设 ',
