@@ -844,7 +844,8 @@ window.__ModuleLoader__.load({
               'aria-label': '默认会话模式',
             }, PRESET_SLOT_IDS.map(function (presetId) {
               return h('option', { key: presetId, value: presetId, style: optionStyle }, presetNameOf(presetId))
-            }))),
+            })),
+            h('span', { style: muted }, '＝默认人设（每只宠可在下方「会话预设」单独改，名字在「人设」区自定义）')),
           // ── 按宠预设（多宠）：每只宠各选各的会话模式=各带各的人设卡 ──
           (function () {
             var ids = []
