@@ -101,6 +101,11 @@ window.__ModuleLoader__.load({
       var voiceState = useState(null)
       var voice = voiceState[0]
       var setVoice = voiceState[1]
+      // 选择器的写入目标：null = 全局默认声音；petId = 给那只宠配覆盖
+      // （voices[petId]）。搜索列表只有一份，选用按目标分流写入。
+      var voiceTargetState = useState(null)
+      var voiceTarget = voiceTargetState[0]
+      var setVoiceTarget = voiceTargetState[1]
       var runtimeState = useState(null)
       var runtime = runtimeState[0]
       var setRuntime = runtimeState[1]
@@ -469,6 +474,27 @@ window.__ModuleLoader__.load({
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ patch: { tts: { apiKey: current } } }),
         }).then(function () { done() }, function () { done() })
+      }
+
+      // 按宠声音（多实例）：voices[petId] 覆盖该宠的声音/语速/音量，未设
+      // 字段回落全局默认。整表提交（宿主逐键合并，patch 未提及的宠保留，
+      // 手编 json 不丢）；清除 = 该键发 null——宿主的显式删除信号，整只
+      // 回落默认。单字段清空也走 null（逐键合并下缺键=保留，null 才是
+      // 删除）；entry 全空时折叠成 null，表里不留壳。
+      var commitVoiceEntry = function (petId, patchEntry, doneMessage) {
+        var next = Object.assign({}, tts.voices || {})
+        if (patchEntry === null) {
+          next[petId] = null
+        } else {
+          var entry = Object.assign({}, next[petId] || {})
+          Object.keys(patchEntry).forEach(function (k) {
+            var v = patchEntry[k]
+            if (v === '' || v === null || v === undefined) entry[k] = null
+            else entry[k] = v
+          })
+          next[petId] = Object.keys(entry).length ? entry : null
+        }
+        update({ tts: { voices: next } }, doneMessage)
       }
 
       // 人设保存走独立的 fetch（不走 update）：保存成功才把文本框交还 host
@@ -942,11 +968,19 @@ window.__ModuleLoader__.load({
               onBlur: function (e) { var v = e.target.value.trim(); if (v !== (tts.voiceId || '')) update({ tts: { voiceId: v } }) },
               onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
             h(SButton, { disabled: busy, onClick: function () {
-              if (voice) { setVoice(null); return }
+              if (voice && voiceTarget === null) { setVoice(null); return }
+              setVoiceTarget(null)
+              if (voice) return
               flushKeyThen(function () { loadVoices('') })
-            } }, voice ? '收起' : '选择声音')),
+            } }, voice && voiceTarget === null ? '收起' : '选择声音')),
           voice
             ? h('div', { style: { border: '1px solid rgba(127,127,127,.3)', borderRadius: 8, padding: '8px 10px', margin: '4px 0 6px' } },
+                h('div', { style: row },
+                  h('span', { style: { fontWeight: 600, fontSize: 12 } },
+                    voiceTarget === null ? '为全局默认挑声音' : '为「' + petName(voiceTarget) + '」（' + voiceTarget + '）挑声音'),
+                  h('span', { style: { flex: 1 } }),
+                  voiceTarget !== null ? h(SButton, { disabled: busy, onClick: function () { commitVoiceEntry(voiceTarget, null) }, title: '清除该宠的覆盖，回落全局默认' }, '跟随默认') : null,
+                  h(SButton, { onClick: function () { setVoice(null) } }, '收起')),
                 h('div', { style: row },
                   h('input', { style: Object.assign({}, inputStyle, { width: 190 }), value: voice.search || '', placeholder: '搜索声音（名称/风格）',
                     onChange: function (e) { setVoice(Object.assign({}, voice, { search: e.target.value })) },
@@ -955,26 +989,84 @@ window.__ModuleLoader__.load({
                 voice.error ? h('div', { style: { color: '#ff7369', fontSize: 12, margin: '2px 0' } }, voice.error) : null,
                 h('div', { style: { maxHeight: 220, overflowY: 'auto' } },
                   (voice.items || []).map(function (v) {
+                    var effective = voiceTarget === null
+                      ? tts.voiceId
+                      : (tts.voices && tts.voices[voiceTarget] && tts.voices[voiceTarget].voiceId) || tts.voiceId
                     return h('div', { key: v.voice_id, style: Object.assign({}, row, { borderBottom: '1px solid rgba(127,127,127,.15)' }) },
                       h('span', { style: { fontWeight: 600 } }, v.name || v.voice_id),
                       h('span', { style: muted }, [v.language_code, v.gender, (v.tone || []).join('/')].filter(Boolean).join(' · ')),
-                      v.voice_id === tts.voiceId ? h('span', { style: { color: '#3ddc84', fontSize: 12, fontWeight: 700 } }, '当前') : null,
+                      v.voice_id === effective ? h('span', { style: { color: '#3ddc84', fontSize: 12, fontWeight: 700 } }, '当前') : null,
                       h('span', { style: { flex: 1 } }),
                       v.preview_url ? h(SButton, { onClick: function () { playPreview(v.preview_url) } }, '试听') : null,
-                      h(SButton, { variant: 'primary', onClick: function () { update({ tts: { voiceId: v.voice_id } }, '已选用 ' + (v.name || v.voice_id)) } }, '选用'))
+                      h(SButton, { variant: 'primary', onClick: function () {
+                        if (voiceTarget === null) update({ tts: { voiceId: v.voice_id } }, '已选用 ' + (v.name || v.voice_id))
+                        else commitVoiceEntry(voiceTarget, { voiceId: v.voice_id }, '已为「' + petName(voiceTarget) + '」选用 ' + (v.name || v.voice_id))
+                      } }, '选用'))
                   }),
                   (!voice.loading && !voice.error && (voice.items || []).length === 0) ? h('div', { style: muted }, '没有匹配的声音') : null))
             : null,
           h('div', { style: row },
             '语速',
-            h('input', { key: 'tts-speed-' + String(tts.speed ?? 1), style: inputStyle, defaultValue: String(tts.speed ?? 1), title: '0.5 – 2.0，1 = 正常',
+            h('input', { key: 'tts-speed-' + String(tts.speed ?? 1), style: inputStyle, defaultValue: String(tts.speed ?? 1), title: '0.5 – 2.0，1 = 正常（全局默认，每宠可在下方覆盖）',
               onBlur: function (e) { var v = parseFloat(e.target.value); if (Number.isFinite(v) && v !== (tts.speed ?? 1)) update({ tts: { speed: Math.min(2, Math.max(0.5, v)) } }) },
               onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
             '音量',
-            h('input', { key: 'tts-volume-' + String(tts.volume ?? 1), style: inputStyle, defaultValue: String(tts.volume ?? 1), title: '0.01 – 2.0，1 = 默认',
+            h('input', { key: 'tts-volume-' + String(tts.volume ?? 1), style: inputStyle, defaultValue: String(tts.volume ?? 1), title: '0.01 – 2.0，1 = 默认（全局默认，每宠可在下方覆盖）',
               onBlur: function (e) { var v = parseFloat(e.target.value); if (Number.isFinite(v) && v !== (tts.volume ?? 1)) update({ tts: { volume: Math.min(2, Math.max(0.01, v)) } }) },
               onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } })),
-          h(Hint, null, '接入 BreezeBlue（breezeblue.ai）文字转语音：说话气泡显示时用所选声音朗读。key 只保存在本机 pet-settings.json；改动即时生效，无需重启宠物。气泡等语音的超时上限可在 pet-settings.json 的 tts.holdMs 调整（0–8000 毫秒，默认 5000；语音先就绪就立刻展示，超时则只展示气泡）。')),
+          // ── 按宠声音（多实例，tts.voices[petId] 覆盖表）──
+          // 行来源 = 桌面上的宠物（pets 注册表快照）——有几只显示几只，不从
+          // windowPositions/voices 键补（桌面没有的不要显示）。声音与全局同
+          // 款交互：每宠一个「选择」按钮打开上方那份搜索/试听列表，选用按
+          // voiceTarget 写入那只宠。语速/音量留空 = 回落全局；清除 = 该键发
+          // null，整只回落。
+          (function () {
+            var ids = []
+            var seen = {}
+            ;(pets || []).forEach(function (p) {
+              if (p && p.id && !seen[p.id]) { seen[p.id] = true; ids.push(String(p.id)) }
+            })
+            if (!ids.length) return null
+            return [
+              h('div', { style: Object.assign({}, row, { margin: '2px 0 0' }) }, h('span', { style: { fontWeight: 600 } }, '每宠单独配'),
+                h('span', { style: muted }, '点某只的「选择」打开搜索列表，试听后选用——只为那一只生效')),
+              ids.map(function (pid) {
+                var entry = (tts.voices && tts.voices[pid]) || {}
+                var picking = voice && voiceTarget === pid
+                return h('div', { key: 'tts-per-pet-' + pid, style: Object.assign({}, row, { fontSize: 12 }) },
+                  h('span', { style: { fontWeight: 600, minWidth: 64 } }, petName(pid)),
+                  h('span', { style: muted }, pid),
+                  h('span', { style: Object.assign({}, muted, { fontFamily: 'monospace', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) },
+                    entry.voiceId || '跟随默认'),
+                  h(SButton, { disabled: busy, onClick: function () {
+                    if (picking) { setVoice(null); return }
+                    setVoiceTarget(pid)
+                    if (voice) return
+                    flushKeyThen(function () { loadVoices('') })
+                  } }, picking ? '收起' : '选择'),
+                  '速',
+                  h('input', { key: 'tts-speed-' + pid + '-' + String(entry.speed ?? ''), style: Object.assign({}, inputStyle, { width: 44 }), defaultValue: entry.speed !== undefined ? String(entry.speed) : '', placeholder: '全局', title: '0.5 – 2.0，留空 = 跟随全局',
+                    onBlur: function (e) {
+                      var raw = e.target.value.trim()
+                      if (raw === '') { if (entry.speed !== undefined) commitVoiceEntry(pid, { speed: '' }); return }
+                      var v = parseFloat(raw)
+                      if (Number.isFinite(v) && v !== entry.speed) commitVoiceEntry(pid, { speed: Math.min(2, Math.max(0.5, v)) })
+                    },
+                    onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
+                  '量',
+                  h('input', { key: 'tts-volume-' + pid + '-' + String(entry.volume ?? ''), style: Object.assign({}, inputStyle, { width: 44 }), defaultValue: entry.volume !== undefined ? String(entry.volume) : '', placeholder: '全局', title: '0.01 – 2.0，留空 = 跟随全局',
+                    onBlur: function (e) {
+                      var raw = e.target.value.trim()
+                      if (raw === '') { if (entry.volume !== undefined) commitVoiceEntry(pid, { volume: '' }); return }
+                      var v = parseFloat(raw)
+                      if (Number.isFinite(v) && v !== entry.volume) commitVoiceEntry(pid, { volume: Math.min(2, Math.max(0.01, v)) })
+                    },
+                    onKeyDown: function (e) { if (e.key === 'Enter') e.target.blur() } }),
+                  h(SButton, { disabled: busy, onClick: function () { commitVoiceEntry(pid, null) }, title: '清除该宠的声音/语速/音量覆盖，完全跟随全局默认' }, '清除'))
+              }),
+            ]
+          })(),
+          h(Hint, null, '接入 BreezeBlue（breezeblue.ai）文字转语音：说话气泡显示时用所选声音朗读。key 只保存在本机 pet-settings.json；改动即时生效，无需重启宠物。多宠时点某只的「选择」打开搜索列表，试听后「选用」只为那一只生效（列表上方的目标名会跟着切换）；「跟随默认/清除」回落全局声音。气泡等语音的超时上限可在 pet-settings.json 的 tts.holdMs 调整（0–8000 毫秒，默认 5000；语音先就绪就立刻展示，超时则只展示气泡）。')),
 
         // ── 调试 ──
         h(Section, { title: '调试' },
