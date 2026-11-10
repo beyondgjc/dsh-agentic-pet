@@ -288,7 +288,7 @@ window.__ModuleLoader__.load({
         'electron-installing': 'electron 还在准备，装完再试',
         'electron-unavailable': 'electron 未安装且无法自动安装',
         'spawn-disabled': 'DSH_PET_NO_SPAWN=1 已禁用拉起',
-        primary: '主身不能送走或销毁',
+        primary: '主身不能召回或放生',
         'unknown-instance': '不认识的实例 id',
       }
       var instanceAction = function (action, petId, doneText) {
@@ -629,25 +629,25 @@ window.__ModuleLoader__.load({
                   : h('span', { style: muted }, '离线'),
                 p.online && isExtra
                   ? h(SButton, { variant: 'danger', disabled: instanceBusyId === p.id, onClick: function () {
-                    if (window.confirm('送走 ' + petName(p.id) + '？它会从桌面消失，重启后也不再自动回来。')) instanceAction('dismiss', p.id, petName(p.id) + ' 已送走')
-                  } }, instanceBusyId === p.id ? '送别中…' : '送走')
+                    if (window.confirm('召回 ' + petName(p.id) + '？它会离开桌面，本子和记忆都留着——「再来一只」时会带着原来的样子回来。')) instanceAction('dismiss', p.id, petName(p.id) + ' 已召回')
+                  } }, instanceBusyId === p.id ? '召回中…' : '召回')
                   : null,
                 !p.online
                   ? h(SButton, { disabled: instanceBusyId === p.id, onClick: function () { instanceAction('summon', p.id, petName(p.id) + ' 已召唤') } }, instanceBusyId === p.id ? '召唤中…' : '召唤')
                   : null,
                 isExtra
                   ? h(SButton, { variant: 'danger', disabled: instanceBusyId === p.id, onClick: function () {
-                    if (window.confirm('彻底销毁 ' + petName(p.id) + '？本子、好感、名字、窗口位置全部删除，无法恢复、无法召回。（送走只是离开，销毁才是抹除——只想让它离开请用「送走」）')) {
-                      instanceAction('destroy', p.id, petName(p.id) + ' 已销毁（数据已抹除）')
+                    if (window.confirm('赛博放生 ' + petName(p.id) + '？本子、好感、名字、窗口位置全部删除，放生之后就不会再回来了（这是幽默的说法——数据是真的没了）。只想暂时告别请用「召回」。')) {
+                      instanceAction('destroy', p.id, petName(p.id) + ' 已赛博放生（数据已抹除）')
                     }
-                  }, title: '删除这只宠物的全部数据' }, instanceBusyId === p.id ? '销毁中…' : '销毁')
+                  }, title: '删除这只宠物的全部数据（赛博放生）' }, instanceBusyId === p.id ? '放生中…' : '赛博放生')
                   : null)
             })
             : h('div', null, '没有在线的宠物', h(Hint, null, '启动 DeepSeek Harness 后鲸鱼娘会自动上桌；Pure 宠物需自行启动。')),
           h('div', { style: row },
             h(SButton, { disabled: instanceBusyId !== '' || busy, onClick: function () { instanceAction('summon', 'new', '新宠物已召唤上桌（可改名区分）') } }, instanceBusyId === 'new' ? '召唤中…' : '再来一只'),
             h('span', { style: muted }, '同种同脸，各养各的记忆；上限 3 只（multi-instances.json 可调）')),
-          h(Hint, null, '送走＝让它离开桌面，本子和记忆都留着——之后「再来一只」它会带着原来的样子回来；销毁＝彻底删掉这只宠的全部数据，无法恢复也无法召回。只想暂时告别用送走，确定不要这只了才用销毁。')),
+          h(Hint, null, '召回＝让它离开桌面，本子和记忆都留着——之后「再来一只」它会带着原来的样子回来；赛博放生＝彻底删掉这只宠的全部数据，无法恢复。只想暂时告别用召回，确定不要这只了才赛博放生。')),
 
         // ── 人设（按预设 4 槽；身体规则是宿主契约，不在此编辑） ──
         personaSlots ? h(Section, { title: h('span', null, '人设 ',
