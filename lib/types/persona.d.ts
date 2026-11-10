@@ -45,13 +45,18 @@ export declare const DEFAULT_PERSONA = "\u4F60\u662F\u300C\u9CB8\u9C7C\u5A18\u30
  * applies the same cap so a hand-edited file cannot bypass it. */
 export declare const MAX_PERSONA_CHARS = 8000;
 /**
- * Read the configured character card: whale598/pet-settings.json → legacy
- * root → default. Sync on purpose — PromptSection.text is a synchronous
- * provider called once per assembly, and a ~1KB JSON read per request is
- * noise next to the LLM call it feeds, so there is no cache to invalidate.
- * Both readers (this and the settings merge) trim first, then cap.
+ * Read the configured character card for one preset slot: the per-preset
+ * override `personas.<key>` → the legacy global `persona` card → default.
+ * Sync on purpose — PromptSection.text is a synchronous provider called once
+ * per assembly, and a ~1KB JSON read per request is noise next to the LLM
+ * call it feeds, so there is no cache to invalidate. Both readers (this and
+ * the settings merge) trim first, then cap.
+ *
+ * The fallback chain IS the migration: the two original presets show the
+ * existing global card until a slot is edited, and clearing a slot reverts
+ * it — no data move, one concept.
  */
-export declare function readPersonaCard(home: string): string;
+export declare function readPersonaCard(home: string, key?: string): string;
 /**
  * Row config, passed by the preset ymls. Deliberately schema-less — the only
  * writer is our own presets, and a schema library dependency just to shape
@@ -60,6 +65,9 @@ export declare function readPersonaCard(home: string): string;
 export interface PersonaRowConfig {
     /** Static body-rules prose appended after the character card. */
     prefix: string;
+    /** The persona slot this mount reads: a preset id keying pet-settings.json
+     * `personas.<key>`. Absent (legacy ymls) = the global `persona` card. */
+    personaKey?: string;
 }
 /**
  * Register the persona section in this preset's generation scope: it applies

@@ -139,11 +139,12 @@ window.__ModuleLoader__.load({
       var instanceBusyIdState = useState('')
       var instanceBusyId = instanceBusyIdState[0]
       var setInstanceBusyId = instanceBusyIdState[1]
-      // 人设卡片（data.persona 由 host 提供；旧 host 无此块时整卡隐藏）：
-      // 草稿 null = 跟随 host 生效值；保存成功才交还，失败保留草稿供重试。
-      var personaDraftState = useState(null)
-      var personaDraft = personaDraftState[0]
-      var setPersonaDraft = personaDraftState[1]
+      // 人设卡片（data.personas 按预设 4 槽，host 回落链解析生效值；旧 host
+      // 无此块时整卡隐藏）：草稿按 presetId 分键，null/缺席 = 跟随 host 生效值；
+      // 保存成功才交还，失败保留草稿供重试。每槽「恢复默认」= 写空串删键回落。
+      var personaDraftsState = useState({})
+      var personaDrafts = personaDraftsState[0]
+      var setPersonaDrafts = personaDraftsState[1]
 
       var refresh = useCallback(function () {
         fetch(READ, { credentials: 'same-origin' })
@@ -236,15 +237,28 @@ window.__ModuleLoader__.load({
       var presenceOn = presenceSummary.enabled === true
       var tts = settings.tts || {}
       var debug = settings.debug || {}
-      // 人设（data.persona = {value, default, maxLength}，host 从 src/persona.ts
-      // 取默认与上限）：生效文本 = 草稿优先，否则 host 值；字数按 Unicode 码点数，
-      // 和宿主的截断口径一致。
-      var personaInfo = (data && data.persona) || null
-      var personaValue = personaInfo ? String(personaInfo.value || '') : ''
-      var personaDefault = personaInfo ? String(personaInfo.default || '') : ''
-      var personaMax = personaInfo ? (Number(personaInfo.maxLength) || 8000) : 8000
-      var personaText = personaDraft !== null ? personaDraft : personaValue
-      var personaCount = Array.from(personaText).length
+      // 人设按预设 4 槽（data.personas = {presetId: {value(回落链生效文本),
+      // default, maxLength, inherited}}，host 从 src/persona.ts 解析；旧 host
+      // 无此块时整区隐藏）：生效文本 = 该槽草稿优先，否则 host 值；字数按
+      // Unicode 码点数，和宿主的截断口径一致。inherited=true 的槽显示的是
+      // 回落来的卡（全局卡或默认），一编辑就物化到该槽。
+      var PRESET_SLOT_LABELS = {
+        whale598: '精简（仅表达）',
+        'whale598-standard': '普通（含工作工具）',
+        'whale598-custom-1': '自定义1',
+        'whale598-custom-2': '自定义2',
+      }
+      var PRESET_SLOT_IDS = ['whale598-standard', 'whale598', 'whale598-custom-1', 'whale598-custom-2']
+      var personaSlots = (data && data.personas) || null
+      var personaSlotOf = function (presetId) {
+        return personaSlots ? personaSlots[presetId] : null
+      }
+      var personaTextOf = function (presetId) {
+        var draft = personaDrafts[presetId]
+        if (draft !== null && draft !== undefined) return draft
+        var slot = personaSlotOf(presetId)
+        return slot ? String(slot.value || '') : ''
+      }
       var affection = (data && data.affection) || {}
       var pets = (data && data.pets) || []
       if (!(pets && pets.length) && data && data.pet) pets = [Object.assign({ id: 'electron' }, data.pet)]
@@ -454,21 +468,26 @@ window.__ModuleLoader__.load({
       }
 
       // 人设保存走独立的 fetch（不走 update）：保存成功才把文本框交还 host
-      // 生效值（setPersonaDraft(null)），失败时草稿留在框里供重试——长文本
-      // 不该因为一次请求失败就丢。text 参数显式传入，避免闭包读到旧渲染趟的
-      // personaText。
-      var savePersona = function (text, doneMessage) {
+      // 生效值（清该槽草稿），失败时草稿留在框里供重试——长文本不该因为一次
+      // 请求失败就丢。text 参数显式传入，避免闭包读到旧渲染趟的草稿。空文本
+      // = 恢复默认：写空串删槽键，回落全局卡/DEFAULT_PERSONA（宿主语义）。
+      var savePersonaSlot = function (presetId, text, doneMessage) {
         setBusy(true)
         setMsg('')
+        var patchPersonas = {}
+        patchPersonas[presetId] = String(text || '').trim()
         fetch(UPDATE, {
           method: 'POST', credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ patch: { persona: String(text || '').trim() } }),
+          body: JSON.stringify({ patch: { personas: patchPersonas } }),
         })
           .then(function (r) { return r.json() })
           .then(function (d) {
             if (d && d.error) setMsg('失败: ' + d.error)
-            else { setPersonaDraft(null); setMsg(doneMessage) }
+            else {
+              setPersonaDrafts(function (prev) { var n = Object.assign({}, prev); delete n[presetId]; return n })
+              setMsg(doneMessage)
+            }
             setWarnings(d && d.warnings && d.warnings.length ? d.warnings.join('；') : '')
             refresh()
           })
@@ -560,23 +579,37 @@ window.__ModuleLoader__.load({
             h(SButton, { disabled: instanceBusyId !== '' || busy, onClick: function () { instanceAction('summon', 'new', '新宠物已召唤上桌（可改名区分）') } }, instanceBusyId === 'new' ? '召唤中…' : '再来一只'),
             h('span', { style: muted }, '同种同脸，各养各的记忆；上限 3 只（multi-instances.json 可调）'))),
 
-        // ── 人设（可编辑角色卡；身体规则是宿主契约，不在此编辑） ──
-        personaInfo ? h(Section, { title: h('span', null, '人设 ',
-          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '改动会击穿会话前缀缓存')) },
-          h('textarea', {
-            style: Object.assign({}, inputStyle, { width: '100%', minHeight: 120, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px' }),
-            value: personaText,
-            placeholder: personaDefault,
-            onChange: function (e) { setPersonaDraft(e.target.value) },
-            'aria-label': '人设文本',
+        // ── 人设（按预设 4 槽；身体规则是宿主契约，不在此编辑） ──
+        personaSlots ? h(Section, { title: h('span', null, '人设 ',
+          h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '每个预设一张卡 · 改动会击穿会话前缀缓存')) },
+          PRESET_SLOT_IDS.map(function (presetId) {
+            var slot = personaSlotOf(presetId)
+            if (!slot) return null
+            var draft = personaDrafts[presetId]
+            var text = personaTextOf(presetId)
+            var count = Array.from(text).length
+            var max = Number(slot.maxLength) || 8000
+            return h('div', { key: presetId, style: { marginBottom: 14 } },
+              h('div', { style: Object.assign({}, row, { marginBottom: 4 }) },
+                h('span', { style: { fontWeight: 700 } }, '人设 · ' + (PRESET_SLOT_LABELS[presetId] || presetId)),
+                slot.inherited ? h('span', { style: muted }, '当前显示的是继承卡——编辑后即独立') : null),
+              h('textarea', {
+                style: Object.assign({}, inputStyle, { width: '100%', minHeight: 96, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px' }),
+                value: text,
+                placeholder: slot.default,
+                onChange: function (e) {
+                  setPersonaDrafts(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = e.target.value; return n })()) })
+                },
+                'aria-label': '人设文本 · ' + (PRESET_SLOT_LABELS[presetId] || presetId),
+              }),
+              h('div', { style: row },
+                h(SButton, { variant: 'primary', disabled: busy || draft === null || draft === undefined, onClick: function () { savePersonaSlot(presetId, text, '人设已保存') } }, '保存人设'),
+                h(SButton, { disabled: busy, onClick: function () { savePersonaSlot(presetId, '', '已恢复默认人设（回落继承卡）') } }, '恢复默认'),
+                h('span', { style: count > max ? { color: '#ff7369', fontSize: 12 } : muted },
+                  String(count) + ' / ' + String(max) + ' 字')))
           }),
-          h('div', { style: row },
-            h(SButton, { variant: 'primary', disabled: busy || personaDraft === null, onClick: function () { savePersona(personaText, '人设已保存') } }, '保存人设'),
-            h(SButton, { disabled: busy, onClick: function () { setPersonaDraft(''); savePersona('', '已恢复默认人设') } }, '恢复默认'),
-            h('span', { style: personaCount > personaMax ? { color: '#ff7369', fontSize: 12 } : muted },
-              String(personaCount) + ' / ' + String(personaMax) + ' 字')),
-          h(Hint, null, '自定义宠物的角色设定（名字、性格、口吻）。身体规则（气泡、动作、本子的用法）是固定契约，不在这里编辑。'),
-          h(Hint, null, '清空并保存即恢复默认人设；改动下一次对话就生效，无需重启。'),
+          h(Hint, null, '每个预设一张角色卡：宠物用哪个预设，就带哪张卡（在上方「会话模式」按宠选择）。身体规则（气泡、动作、本子的用法）是固定契约，不在这里编辑。'),
+          h(Hint, null, '没单独编辑过的槽显示继承卡（全局卡或默认）；清空并保存即回落继承；改动下一次对话就生效，无需重启。'),
           h(Hint, null, '改人设不会改写本子里已有的记忆——换了设定，宠物还得慢慢适应自己想起来的旧事。')) : null,
 
         // ── 好感度（每宠独立账本） ──
@@ -698,24 +731,45 @@ window.__ModuleLoader__.load({
                   if (mode !== 'immediate') update({ innerVoice: { petToPetDelivery: 'immediate' } })
                 } }, '立即叫醒'))
             })()),
-          h('div', { style: row }, '会话模式',
-            (function () {
-              var seg = function (active, side) {
-                return { padding: '4px 12px', fontSize: 12, cursor: 'pointer',
-                  border: '1px solid ' + (active ? '#22c55e' : '#c9d4e0'),
-                  background: active ? '#22c55e' : '#f4f7fa',
-                  color: active ? '#ffffff' : '#1c2733',
-                  borderRadius: side === 'left' ? '4px 0 0 4px' : '0 4px 4px 0',
-                  marginLeft: side === 'right' ? -1 : 0 }
-              }
-              return h('div', { style: { display: 'inline-flex' } },
-                h('button', { style: seg(iv.preset === 'whale598', 'left'), onClick: function () {
-                  if (iv.preset !== 'whale598') update({ innerVoice: { preset: 'whale598' } })
-                } }, '精简（仅表达）'),
-                h('button', { style: seg(iv.preset === 'whale598-standard', 'right'), onClick: function () {
-                  if (iv.preset !== 'whale598-standard') update({ innerVoice: { preset: 'whale598-standard' } })
-                } }, '普通（含工作工具）'))
-            })()),
+          h('div', { style: row }, '默认会话模式',
+            h('select', {
+              style: Object.assign({}, inputStyle, { width: 190 }),
+              value: String(iv.preset || 'whale598'),
+              onChange: function (e) {
+                if (e.target.value !== iv.preset) update({ innerVoice: { preset: e.target.value } })
+              },
+              'aria-label': '默认会话模式',
+            }, PRESET_SLOT_IDS.map(function (presetId) {
+              return h('option', { key: presetId, value: presetId }, PRESET_SLOT_LABELS[presetId] || presetId)
+            }))),
+          // ── 按宠预设（多宠）：每只宠各选各的会话模式=各带各的人设卡 ──
+          (function () {
+            var ids = []
+            pets.forEach(function (p) { if (ids.indexOf(p.id) < 0) ids.push(p.id) })
+            if (ids.indexOf('electron') < 0) ids.unshift('electron')
+            var perPet = iv.presets || {}
+            return ids.map(function (petId) {
+              var current = String(perPet[petId] || '')
+              return h('div', { key: 'preset-' + petId, style: row },
+                '会话预设 · ' + petName(petId),
+                h('select', {
+                  style: Object.assign({}, inputStyle, { width: 190 }),
+                  value: current,
+                  onChange: function (e) {
+                    var next = Object.assign({}, perPet)
+                    if (e.target.value === '') delete next[petId]
+                    else next[petId] = e.target.value
+                    update({ innerVoice: { presets: next } })
+                  },
+                  'aria-label': '会话预设 · ' + petName(petId),
+                },
+                  h('option', { key: '', value: '' }, '跟随默认'),
+                  PRESET_SLOT_IDS.map(function (presetId) {
+                    return h('option', { key: presetId, value: presetId }, PRESET_SLOT_LABELS[presetId] || presetId)
+                  })),
+                current === '' ? h('span', { style: muted }, '继承默认') : h('span', { style: muted }, '独立选择'))
+            })
+          })(),
           // ── 指定会话（高级）：按宠物一行——每只宠物各绑各的脑子 ──
           (function () {
             var ids = []

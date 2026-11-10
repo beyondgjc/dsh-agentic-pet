@@ -81,21 +81,34 @@ export const DEFAULT_PERSONA =
 export const MAX_PERSONA_CHARS = 8000
 
 /**
- * Read the configured character card: whale598/pet-settings.json → legacy
- * root → default. Sync on purpose — PromptSection.text is a synchronous
- * provider called once per assembly, and a ~1KB JSON read per request is
- * noise next to the LLM call it feeds, so there is no cache to invalidate.
- * Both readers (this and the settings merge) trim first, then cap.
+ * Read the configured character card for one preset slot: the per-preset
+ * override `personas.<key>` → the legacy global `persona` card → default.
+ * Sync on purpose — PromptSection.text is a synchronous provider called once
+ * per assembly, and a ~1KB JSON read per request is noise next to the LLM
+ * call it feeds, so there is no cache to invalidate. Both readers (this and
+ * the settings merge) trim first, then cap.
+ *
+ * The fallback chain IS the migration: the two original presets show the
+ * existing global card until a slot is edited, and clearing a slot reverts
+ * it — no data move, one concept.
  */
-export function readPersonaCard(home: string): string {
+export function readPersonaCard(home: string, key?: string): string {
   const { current, legacy } = globalPaths(home, 'pet-settings.json')
   for (const file of [current, legacy]) {
     try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { persona?: unknown }
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { persona?: unknown; personas?: unknown }
       if (parsed && typeof parsed === 'object') {
+        const cap = (raw: string): string => (raw.length > MAX_PERSONA_CHARS ? raw.slice(0, MAX_PERSONA_CHARS) : raw)
+        if (key !== undefined) {
+          const slots = typeof parsed.personas === 'object' && parsed.personas !== null
+            ? parsed.personas as Record<string, unknown>
+            : {}
+          const slot = typeof slots[key] === 'string' ? slots[key].trim() : ''
+          if (slot !== '') return cap(slot)
+        }
         const card = typeof parsed.persona === 'string' ? parsed.persona.trim() : ''
         if (card === '') break // a readable settings file without a card answers the default
-        return card.length > MAX_PERSONA_CHARS ? card.slice(0, MAX_PERSONA_CHARS) : card
+        return cap(card)
       }
     } catch { /* try the next location */ }
   }
@@ -110,6 +123,9 @@ export function readPersonaCard(home: string): string {
 export interface PersonaRowConfig {
   /** Static body-rules prose appended after the character card. */
   prefix: string
+  /** The persona slot this mount reads: a preset id keying pet-settings.json
+   * `personas.<key>`. Absent (legacy ymls) = the global `persona` card. */
+  personaKey?: string
 }
 
 /** The prompt-registry section this row owns. Mirrors the unexported string
@@ -138,6 +154,6 @@ export function apply(ctx: Context, config: PersonaRowConfig): void {
     name: PERSONA_PREFIX_SECTION,
     order,
     interpolate: false,
-    text: () => `${readPersonaCard(home)}\n\n${config.prefix}`,
+    text: () => `${readPersonaCard(home, config.personaKey)}\n\n${config.prefix}`,
   }), 'persona.section()')
 }

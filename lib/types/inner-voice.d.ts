@@ -38,6 +38,11 @@ export interface InnerVoiceConfig {
     /** Preset id the self-session mounts: the trimmed catalog by default, the
      * full work catalog only if the user opts in. */
     preset: string;
+    /** Per-pet preset overrides (petId → preset id, multi-pet design): a pet
+     * named here mounts ITS preset at mint time; everyone else falls back to
+     * the global `preset`. Values are validated against PET_PRESET_IDS —
+     * unknown or empty entries drop, absent keys inherit. */
+    presets: Record<string, string>;
     /** Random-wake cadence in minutes. */
     wakeIntervalMinutes: number;
     /** Probability the wake actually speaks (the gate decides, never the model). */

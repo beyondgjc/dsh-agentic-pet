@@ -72,6 +72,56 @@ describe('readPersonaCard', () => {
   })
 })
 
+describe('per-preset persona slots (multi-pet)', () => {
+  it('resolves personas.<key> → global persona → default, per key', async () => {
+    const home = await tempHome()
+    await mkdir(join(home, 'whale598'), { recursive: true })
+    await writeFile(join(home, 'whale598', 'pet-settings.json'), JSON.stringify({
+      persona: '全局卡',
+      personas: { 'whale598-custom-1': '自定义1 的卡' },
+    }), 'utf8')
+    // an overridden slot answers its own card…
+    expect(readPersonaCard(home, 'whale598-custom-1')).toBe('自定义1 的卡')
+    // …an unedited slot falls back to the global card (the seed effect)…
+    expect(readPersonaCard(home, 'whale598-standard')).toBe('全局卡')
+    // …and a preset on a settings file without any card answers the default.
+    await writeFile(join(home, 'whale598', 'pet-settings.json'), JSON.stringify({
+      personas: { 'whale598-custom-1': '自定义1 的卡' },
+    }), 'utf8')
+    expect(readPersonaCard(home, 'whale598-custom-1')).toBe('自定义1 的卡')
+    expect(readPersonaCard(home, 'whale598-standard')).toBe(DEFAULT_PERSONA)
+  })
+
+  it('mergeSettings: personas map — partial update, clear-on-empty, trim/cap, non-string ignored', () => {
+    const current = {
+      personas: { 'whale598-custom-1': '已有的卡', 'whale598-custom-2': '会被清掉' },
+      persona: '全局卡',
+    }
+    const next = mergeSettings(current, {
+      personas: {
+        'whale598-custom-1': '  新卡  ',
+        'whale598-custom-2': '',
+        'whale598-standard': 'x'.repeat(MAX_PERSONA_CHARS + 5),
+        'whale598': 7,
+      },
+    })
+    // edited slot: trimmed; cleared slot: key deleted; oversize: capped;
+    // non-string: ignored (kept absent); untouched slot: preserved
+    expect(next.personas).toEqual({
+      'whale598-custom-1': '新卡',
+      'whale598-standard': 'x'.repeat(MAX_PERSONA_CHARS),
+    })
+    // the patch did not touch the global card — it stays
+    expect(next.persona).toBe('全局卡')
+  })
+
+  it('mergeSettings: personas absent from the patch keeps the stored map', () => {
+    const current = { personas: { 'whale598-custom-1': '卡' } }
+    const next = mergeSettings(current, { proactivity: {} })
+    expect(next.personas).toEqual({ 'whale598-custom-1': '卡' })
+  })
+})
+
 describe('DEFAULT_PERSONA', () => {
   it('keeps the shipped identity sentence and stays interpolation-free', () => {
     expect(DEFAULT_PERSONA).toContain('鲸鱼娘')

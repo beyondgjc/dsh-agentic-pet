@@ -66,6 +66,7 @@ describe('readInnerVoiceConfig', () => {
       petToPetDelivery: 'queue',
       petMessageLimits: { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 },
       boundSessions: {},
+      presets: {},
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
     expect((await readInnerVoiceConfig(home)).enabled).toBe(true)
@@ -85,6 +86,7 @@ describe('readInnerVoiceConfig', () => {
         petToPetDelivery: 'immediate',
         petMessageLimits: { minutes5: 2, minutes10: 3, minutes30: 4, minutes60: 6 },
         boundSessions: { electron: 'whale598-electron', bad: 7, '': 'no-key' },
+        presets: { electron: 'whale598-standard', ghost: 'no-such-preset', '': 'whale598' },
       },
     }), 'utf8')
     expect(await readInnerVoiceConfig(home)).toEqual({
@@ -98,6 +100,7 @@ describe('readInnerVoiceConfig', () => {
       petToPetDelivery: 'immediate',
       petMessageLimits: { minutes5: 2, minutes10: 3, minutes30: 4, minutes60: 6 },
       boundSessions: { electron: 'whale598-electron' },
+      presets: { electron: 'whale598-standard' },
     })
   })
 

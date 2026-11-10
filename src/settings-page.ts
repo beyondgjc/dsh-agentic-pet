@@ -60,6 +60,7 @@ import { voiceBindingSnapshot, type PetDriverControl } from './driver.ts'
 import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
 
 import { DEFAULT_PERSONA, MAX_PERSONA_CHARS } from './persona.ts'
+import { PET_PRESET_IDS } from './binding.ts'
 
 import { parseClock } from './rhythm.ts'
 
@@ -130,6 +131,10 @@ interface InnerVoiceSettings {
   petMessageLimits?: { minutes5?: number; minutes10?: number; minutes30?: number; minutes60?: number }
 
   boundSessions?: Record<string, string>
+
+  /** Per-pet preset overrides (petId → preset id, multi-pet): absent keys
+   * follow the global `preset`. */
+  presets?: Record<string, string>
 
 }
 
@@ -243,8 +248,11 @@ interface PetSettings {
 
   /** The user-editable character card (src/persona.ts): absent or empty
    * falls back to DEFAULT_PERSONA at prompt-assembly time. */
-
   persona?: string
+
+  /** Per-preset persona slots (presetId → card): readPersonaCard resolves
+   * personas.<presetId> → the global `persona` → DEFAULT_PERSONA. */
+  personas?: Record<string, string>
 
 }
 
@@ -578,6 +586,30 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
 
     }
 
+    // Per-pet preset overrides (multi-pet): petId → preset id. Only ids the
+
+    // host registers survive; an empty string deletes the pet's key (follow
+
+    // the global default again); absent keys in the patch are preserved.
+
+    const perPetPresets = v.presets
+
+    if (typeof perPetPresets === 'object' && perPetPresets !== null) {
+
+      const record: Record<string, string> = {}
+
+      for (const [petId, presetId] of Object.entries(perPetPresets as Record<string, unknown>)) {
+
+        if (petId === '' || typeof presetId !== 'string' || presetId === '') continue
+
+        if (isPetPreset(presetId)) record[petId] = presetId
+
+      }
+
+      innerVoice.presets = record
+
+    }
+
   }
 
   const patchRhythm = patch.rhythm
@@ -745,6 +777,44 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
   if (persona === undefined) Reflect.deleteProperty(next, 'persona')
 
   else next.persona = persona
+
+  // Per-preset persona slots (multi-pet): presetId → card, same per-entry
+
+  // semantics as the global leaf — trim, cap, empty string deletes the slot
+
+  // (falls back through the global card to DEFAULT_PERSONA); absent keys in
+
+  // the patch are preserved (partial updates).
+
+  const patchPersonas = patch.personas
+
+  let personas: Record<string, string> | undefined = current.personas
+
+  if (typeof patchPersonas === 'object' && patchPersonas !== null) {
+
+    const record: Record<string, string> = { ...(personas ?? {}) }
+
+    for (const [presetId, card] of Object.entries(patchPersonas as Record<string, unknown>)) {
+
+      if (presetId === '') continue
+
+      if (typeof card !== 'string') continue
+
+      const trimmed = card.trim()
+
+      if (trimmed === '') Reflect.deleteProperty(record, presetId)
+
+      else record[presetId] = trimmed.length > MAX_PERSONA_CHARS ? trimmed.slice(0, MAX_PERSONA_CHARS) : trimmed
+
+    }
+
+    personas = record
+
+  }
+
+  if (personas !== undefined) next.personas = personas
+
+  else Reflect.deleteProperty(next, 'personas')
 
   return next
 
@@ -1149,7 +1219,49 @@ export function installSettingsPage(
 
     }
 
-    writeJson(res, 200, { settings: composed, affection, windowPosition, windowPositions, pets: status.pets, touchTotals, persona })
+    // Per-preset persona slots (multi-pet): one entry per registered pet
+
+    // preset, each resolved through the row's fallback chain
+
+    // (personas.<key> → global persona → DEFAULT_PERSONA). `inherited`
+
+    // tells the client the slot shows a card it does not own — editing
+
+    // materializes it onto the slot.
+
+    const slots = typeof settings.personas === 'object' && settings.personas !== null
+
+      ? settings.personas as Record<string, unknown>
+
+      : {}
+
+    const personas: Record<string, { value: string; default: string; maxLength: number; inherited: boolean }> = {}
+
+    for (const presetId of PET_PRESET_IDS) {
+
+      if (presetId === 'pet-inner-voice' || presetId === 'pet') continue // legacy ids, not real slots
+
+      const own = typeof slots[presetId] === 'string' ? (slots[presetId] as string).trim() : ''
+
+      const global = typeof settings.persona === 'string' ? settings.persona.trim() : ''
+
+      const value = own !== '' ? own : global !== '' ? global : DEFAULT_PERSONA
+
+      personas[presetId] = {
+
+        value,
+
+        default: DEFAULT_PERSONA,
+
+        maxLength: MAX_PERSONA_CHARS,
+
+        inherited: own === '',
+
+      }
+
+    }
+
+    writeJson(res, 200, { settings: composed, affection, windowPosition, windowPositions, pets: status.pets, touchTotals, persona, personas })
 
   })
 

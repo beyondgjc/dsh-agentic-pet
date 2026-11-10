@@ -7,6 +7,10 @@
  */
 /** Presets that mount the pet tool row (`pet-tools`). */
 export declare const PET_PRESET_IDS: ReadonlySet<string>;
+/** Display names for the preset ids, settings page and validation copy. The
+ * custom ids are placeholder-named (自定义1/2) until the user renames them —
+ * ids are sticky (creation-time session metadata), display names are free. */
+export declare const PET_PRESET_LABELS: Readonly<Record<string, string>>;
 export declare function isPetPreset(preset: string | undefined | null): boolean;
 export type VoiceAttachErrorCode = 'none' | 'cwd-mismatch' | 'registry-missing' | 'session-archived' | 'session-missing' | 'session-occupied' | 'preset-mismatch' | 'attach-failed';
 export interface VoiceAttachState {

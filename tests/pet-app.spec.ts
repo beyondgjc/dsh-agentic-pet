@@ -29,7 +29,7 @@ describe('dsh-pet-app bundle', () => {
     // web-app presets split.
     const patchList = manifest.dsh?.bundle?.patch
     const patches = typeof patchList === 'string' ? [patchList] : patchList
-    expect(patches).toEqual(['./cordis.patch.yml', './presets/pet.patch.yml', './presets/pet-inner-voice.patch.yml'])
+    expect(patches).toEqual(['./cordis.patch.yml', './presets/pet.patch.yml', './presets/pet-inner-voice.patch.yml', './presets/pet-custom.patch.yml'])
     // entryListSchema is a js-yaml schema: load with it so `!!js` expressions
     // in the patch parse exactly the way the Loader parses them.
     const rows = patches!.flatMap(file =>
@@ -37,7 +37,7 @@ describe('dsh-pet-app bundle', () => {
         insert?: { id?: string; name?: string; config?: { id?: string; plugins?: { id?: string; name?: string }[] } }
       }[],
     ).flatMap(patch => patch.insert ?? [])
-    expect(rows.map(row => row.id)).toEqual(['pet-surface', 'preset-pet', 'preset-pet-inner-voice'])
+    expect(rows.map(row => row.id)).toEqual(['pet-surface', 'preset-pet', 'preset-pet-inner-voice', 'preset-pet-custom-1', 'preset-pet-custom-2'])
     expect(rows[0]).toMatchObject({ name: 'dsh-agentic-pet' })
     expect(rows[1]).toMatchObject({ name: '@deepseek-ai/dsh-agent-preset' })
     // The inner-voice preset is expression-only by design: persona + the pet
@@ -53,6 +53,19 @@ describe('dsh-pet-app bundle', () => {
     for (const row of [rows[1], rows[2]] as { config?: { plugins?: { id?: string; name?: string }[] } }[]) {
       const personaRow = row.config?.plugins?.find(plugin => plugin.id === 'persona')
       expect(personaRow?.name).toBe('dsh-agentic-pet/persona')
+    }
+    // The custom presets (自定义1/2) are standard-surface clones, each
+    // mounting our persona row with ITS personaKey — the per-preset persona
+    // slot the settings page edits.
+    for (const [index, expectedId] of [[3, 'whale598-custom-1'], [4, 'whale598-custom-2']] as const) {
+      const row = rows[index] as { config?: { id?: string; plugins?: Array<{ id?: string; name?: string; config?: { personaKey?: string; prefix?: string } }> } }
+      expect(row.config?.id).toBe(expectedId)
+      expect(row.config?.plugins?.map(plugin => plugin.id)).toEqual(
+        (rows[1] as { config?: { plugins?: { id?: string }[] } }).config?.plugins?.map(plugin => plugin.id),
+      )
+      const personaRow = row.config?.plugins?.find(plugin => plugin.id === 'persona')
+      expect(personaRow?.config?.personaKey).toBe(expectedId)
+      expect((personaRow?.config?.prefix ?? '').length).toBeGreaterThan(100)
     }
   })
 })

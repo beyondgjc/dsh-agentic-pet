@@ -69,6 +69,9 @@ interface InnerVoiceSettings {
         minutes60?: number;
     };
     boundSessions?: Record<string, string>;
+    /** Per-pet preset overrides (petId → preset id, multi-pet): absent keys
+     * follow the global `preset`. */
+    presets?: Record<string, string>;
 }
 /** Debug switches read by the carrier at startup (CDP needs a restart). */
 interface DebugSettings {
@@ -125,6 +128,9 @@ interface PetSettings {
     /** The user-editable character card (src/persona.ts): absent or empty
      * falls back to DEFAULT_PERSONA at prompt-assembly time. */
     persona?: string;
+    /** Per-preset persona slots (presetId → card): readPersonaCard resolves
+     * personas.<presetId> → the global `persona` → DEFAULT_PERSONA. */
+    personas?: Record<string, string>;
 }
 /** Merge a patch into the settings, accepting only the known keys. Exported
  * for the persona-merge spec (tests/persona.spec.ts). */

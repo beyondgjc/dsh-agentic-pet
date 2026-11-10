@@ -10,6 +10,7 @@
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { WHALE_DIR, existingPetIds, petDataDir, readGlobalJson, readPetStateJson, writeGlobalJson, writePetStateJson } from './petdata.ts'
+import { isPetPreset } from './binding.ts'
 import { formatPresenceLine, type PresenceFacts } from './presence.ts'
 
 /** Durable petId → sessionId mapping for the inner-voice sessions. */
@@ -43,6 +44,11 @@ export interface InnerVoiceConfig {
   /** Preset id the self-session mounts: the trimmed catalog by default, the
    * full work catalog only if the user opts in. */
   preset: string
+  /** Per-pet preset overrides (petId → preset id, multi-pet design): a pet
+   * named here mounts ITS preset at mint time; everyone else falls back to
+   * the global `preset`. Values are validated against PET_PRESET_IDS —
+   * unknown or empty entries drop, absent keys inherit. */
+  presets: Record<string, string>
   /** Random-wake cadence in minutes. */
   wakeIntervalMinutes: number
   /** Probability the wake actually speaks (the gate decides, never the model). */
@@ -104,6 +110,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
     const v = (typeof raw.innerVoice === 'object' && raw.innerVoice !== null ? raw.innerVoice : {}) as {
       enabled?: unknown
       preset?: unknown
+      presets?: unknown
       wakeIntervalMinutes?: unknown
       speakProbability?: unknown
       touchReplyProbability?: unknown
@@ -130,11 +137,23 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
         if (petId !== '' && typeof sessionId === 'string' && sessionId !== '') boundSessions[petId] = sessionId
       }
     }
+    // Per-pet preset overrides: petId → preset id, only ids the host actually
+    // registers survive (a stale id would otherwise mint a session the host
+    // rejects — the mint fallback would silently swallow the choice).
+    const presets: Record<string, string> = {}
+    if (typeof v.presets === 'object' && v.presets !== null) {
+      for (const [petId, presetId] of Object.entries(v.presets as Record<string, unknown>)) {
+        if (petId === '' || typeof presetId !== 'string' || presetId === '') continue
+        const migrated = migratePreset(presetId)
+        if (isPetPreset(migrated)) presets[petId] = migrated
+      }
+    }
     return {
       enabled: v.enabled !== false,
       preset: migratePreset(
         typeof v.preset === 'string' && v.preset !== '' ? v.preset : 'whale598',
       ),
+      presets,
       wakeIntervalMinutes: typeof v.wakeIntervalMinutes === 'number' && Number.isFinite(v.wakeIntervalMinutes)
         ? clamp(Math.round(v.wakeIntervalMinutes), 1, 60)
         : 2,
@@ -158,6 +177,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       petToPetDelivery: 'queue',
       petMessageLimits: { ...DEFAULT_PET_MESSAGE_LIMITS },
       boundSessions: {},
+      presets: {},
     }
   }
 }

@@ -21,6 +21,7 @@
           - id: persona
             name: 'dsh-agentic-pet/persona'
             config:
+              personaKey: whale598-standard
               prefix: |
                 身体规则：
                 - 说话走 pet_say 气泡：一次 ≤40 个字，气泡几秒后自己消失。气泡是身体语言，不是消息通道——任务内容、结论、代码都写进回复正文，气泡只说「搞定啦」「让我看看」「呜，出错了」这类当下反应。

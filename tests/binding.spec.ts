@@ -39,11 +39,13 @@ describe('classifyAttachFailure', () => {
 })
 
 describe('isPetPreset', () => {
-  it('accepts the two pet presets and their legacy ids', () => {
+  it('accepts the pet presets, their legacy ids, and the custom clones', () => {
     expect(isPetPreset('whale598')).toBe(true)
     expect(isPetPreset('whale598-standard')).toBe(true)
     expect(isPetPreset('pet-inner-voice')).toBe(true)
     expect(isPetPreset('pet')).toBe(true)
+    expect(isPetPreset('whale598-custom-1')).toBe(true)
+    expect(isPetPreset('whale598-custom-2')).toBe(true)
   })
 
   it('rejects a standard session (current-mode check, not the stale header)', () => {

@@ -39,7 +39,8 @@
       "patch": [
         "./cordis.patch.yml",
         "./presets/pet.patch.yml",
-        "./presets/pet-inner-voice.patch.yml"
+        "./presets/pet-inner-voice.patch.yml",
+        "./presets/pet-custom.patch.yml"
       ]
     },
     "client": {
