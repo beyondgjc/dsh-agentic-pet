@@ -686,13 +686,7 @@ window.__ModuleLoader__.load({
                 onBlur: function (e) { commitPresetName(presetId, e.target.value) },
                 onKeyDown: function (e) { if (e.key === 'Enter') { commitPresetName(presetId, e.target.value); e.target.blur() } },
                 'aria-label': '人设名 · ' + presetId }),
-              slot.inherited ? h('span', { style: muted }, '继承卡') : h('span', { style: muted }, '独立卡'),
-              // 改过名的槽标注对应的内置预设（没改名时名字=预设标签，不重复）
-              (function () {
-                var builtIn = PRESET_SLOT_LABELS[presetId] || presetId
-                var custom = settings.presetNames && settings.presetNames[presetId]
-                return custom && custom !== builtIn ? h('span', { style: muted }, '预设：' + builtIn) : null
-              })(),
+              h('span', { style: muted }, '对应预设：' + (PRESET_SLOT_LABELS[presetId] || presetId)),
               !open ? h('span', { style: muted }, '点 ▾ 展开编辑') : null)
             if (!open) return h('div', { key: presetId, style: { marginBottom: 10 } }, header)
             return h('div', { key: presetId, style: { marginBottom: 14 } },
