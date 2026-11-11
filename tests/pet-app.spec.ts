@@ -13,6 +13,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import * as yaml from 'js-yaml'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { servePetStatic } from '../src/index.ts'
+import { MOOD_IDS, normalizeMoodInput } from '../src/driver.ts'
 
 describe('dsh-pet-app bundle', () => {
   it('declares a parseable patch list through the dsh.bundle.patch manifest field', () => {
@@ -151,4 +152,21 @@ describe('servePetStatic', () => {
   afterAll(() => {
     rmSync(dist, { recursive: true, force: true })
   })
+
+
+
+describe('normalizeMoodInput (B10 表达连续性词表)', () => {
+  it('accepts the ten moods case-insensitively and trims', () => {
+    for (const id of MOOD_IDS) expect(normalizeMoodInput(id.toUpperCase())).toBe(id)
+    expect(normalizeMoodInput('  Happy ')).toBe('happy')
+  })
+
+  it('returns undefined for omission/empty/neutral, throws with the menu on junk', () => {
+    expect(normalizeMoodInput(undefined)).toBeUndefined()
+    expect(normalizeMoodInput('')).toBeUndefined()
+    expect(normalizeMoodInput('neutral')).toBe('neutral')
+    expect(() => normalizeMoodInput('ecstatic')).toThrow(/happy.*neutral|neutral.*happy/)
+    expect(() => normalizeMoodInput(42)).toThrow(/mood 必须是/)
+  })
+})
 })

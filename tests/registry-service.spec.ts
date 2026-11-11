@@ -109,6 +109,20 @@ describe('service normalizeStatus (the /status field matrix)', () => {
     expect(mistyped.world).toBeNull()
   })
 
+  it('passes the B10 mood through bodyRuntime defensively (absent = legacy body)', () => {
+    const newBody = normalizeStatus('electron', {
+      state: 'idle',
+      bodyRuntime: { facing: 'right', mood: 'happy' },
+    }, true)
+    expect(newBody.bodyRuntime).toMatchObject({ facing: 'right', mood: 'happy' })
+    // 老载体：bodyRuntime 里没有 mood 键 = 不透传（字段矩阵容忍灰度错配）。
+    const legacy = normalizeStatus('electron', { state: 'idle', bodyRuntime: { facing: 'left' } }, true)
+    expect(legacy.bodyRuntime).toEqual({ facing: 'left' })
+    // 非字符串的 mood 折掉，不影响其余字段。
+    const mistyped = normalizeStatus('electron', { state: 'idle', bodyRuntime: { facing: 'right', mood: 7 } }, true)
+    expect(mistyped.bodyRuntime).toEqual({ facing: 'right' })
+  })
+
   it('maps the legacy lastAction triple onto the v3 single object', () => {
     const snap = normalizeStatus('electron', {
       lastAction: 'celebrate',
