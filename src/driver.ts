@@ -1251,29 +1251,26 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
     if (last !== undefined && last.state === state && last.since === target.since && last.autonomy === autonomyKey) return
     lastPushedByPet.set(target.id, { state, since: target.since, autonomy: autonomyKey })
     try {
-      // One-shot loopback POST: the same 5s budget the seam's callBudget
-      // applies. A frozen pet (listening socket, silent HTTP) must not park
-      // this await on undici's multi-minute default — the dedup entry set
-      // above would then swallow every identical state push until it fires.
-      const response = await fetch(`http://127.0.0.1:${String(target.port)}/state`, {
+      // The seam's one-shot budget (5s, transport-fail retry with fresh
+      // discovery) applies through pet.call. A frozen pet (listening socket,
+      // silent HTTP) must not park this await on undici's multi-minute
+      // default — the dedup entry set above would then swallow every
+      // identical state push until it fires.
+      await pet.call(target, '/state', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ state, autonomy }),
-        signal: AbortSignal.timeout(5_000),
       })
-      if (!response.ok) {
-        console.error(`pet-surface driver: /state answered HTTP ${String(response.status)}`)
-        lastPushedByPet.delete(target.id) // failed: the next event re-pushes
-      } else if (state === 'error') {
+      if (state === 'error') {
         // The error flash is transient: a follow-up identical 'error' must
         // flash again, so the dedup entry does not survive an error push.
         lastPushedByPet.delete(target.id)
       }
-    } catch {
-      // The port was stale (the pet was swapped or restarted): the entry is
-      // dropped so the next event re-pushes; pid + probe validation keeps
-      // dead and frozen entries out of the route.
-      console.error(`pet-surface driver: /state to ${target.id} failed`)
+    } catch (error: unknown) {
+      // HTTP failure or the port was stale (the pet was swapped or
+      // restarted): the entry is dropped so the next event re-pushes; pid +
+      // probe validation keeps dead and frozen entries out of the route.
+      console.error(`pet-surface driver: /state to ${target.id} failed: ${error instanceof Error ? error.message : String(error)}`)
       lastPushedByPet.delete(target.id)
     }
   }
@@ -1697,7 +1694,7 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
   // connection, not on req.signal, which aborts only for whole-request
   // cancellation (session stop), never because another answerer won.
   const startAskPet = (
-    pet: PetEntry,
+    entry: PetEntry,
     body: Record<string, unknown>,
     signal: AbortSignal | undefined,
   ): { promise: Promise<{ answer?: unknown } | undefined>; abort: () => void } => {
@@ -1706,14 +1703,17 @@ export function installPetDriver(ctx: Context, home: string, pet: PetService): P
     signal?.addEventListener('abort', abort)
     const promise = (async (): Promise<{ answer?: unknown } | undefined> => {
       try {
-        const response = await fetch(`http://127.0.0.1:${String(pet.port)}/interaction`, {
+        // The seam's /interaction budget (45s, never retried — a retried
+        // ask would raise a second bubble) applies through pet.call; the
+        // race controller rides as callerSignal so a lost arm's connection
+        // is cut when another answerer wins. Every non-answer (HTTP error,
+        // stale port, abort) folds to undefined — the arm simply loses.
+        return await pet.call(entry, '/interaction', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
           signal: controller.signal,
-        })
-        if (!response.ok) return undefined
-        return JSON.parse(await response.text()) as { answer?: unknown }
+        }) as { answer?: unknown }
       } catch {
         return undefined
       } finally {
@@ -2501,11 +2501,13 @@ ${text}`
       const pets = await pet.list()
       const target = pets.find(pet => pet.id === petId)
       if (target !== undefined) {
-        void fetch(`http://127.0.0.1:${String(target.port)}/action`, {
+        // The seam's /action budget (5s) applies; transport-fail retry is
+        // acceptable here — a celebrate that lands twice is cosmetic, and
+        // the retry's fresh discovery is what beats a stale port.
+        void pet.call(target, '/action', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ action: 'celebrate' }),
-          signal: AbortSignal.timeout(5_000), // fire-and-forget must still die: no leaked multi-minute hangs
         }).catch(() => { /* the pet may be gone; the ledger still holds */ })
       }
     }
