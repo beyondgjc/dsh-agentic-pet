@@ -61,12 +61,13 @@ export interface PetSnapshot {
     readonly bodyRuntime?: PetBodyRuntime | undefined;
     readonly pid?: number | undefined;
 }
-/** B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段。所有字段可选——
- * 载体按能力逐项上报。 */
+/** B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段 / 表达情绪
+ * （B10）。所有字段可选——载体按能力逐项上报。 */
 export interface PetBodyRuntime {
     readonly facing?: 'left' | 'right' | undefined;
     readonly idleNextAt?: number | undefined;
     readonly lastClip?: string | undefined;
+    readonly mood?: string | undefined;
 }
 /** The v3 action witness: accepted-on-write four fields, completion backfilled
  * in place (`endedAt`/`durationMs`); `id` matches the /action response's

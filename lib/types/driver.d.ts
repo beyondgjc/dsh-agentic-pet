@@ -69,6 +69,8 @@ declare module '@deepseek-ai/cordis' {
         }, next: () => Promise<unknown>): Promise<unknown>;
     }
 }
+export declare const MOOD_IDS: readonly ["neutral", "happy", "excited", "calm", "focused", "sleepy", "sad", "angry", "shy", "curious"];
+export declare function normalizeMoodInput(raw: unknown): string | undefined;
 /** Local-time log stamp: the driver log is the user's primary debugging
  * tool, so timestamps show the USER's wall clock, not UTC (toISOString's Z
  * form read 8h off and cost a confusion round). Sortable, zero-padded. */

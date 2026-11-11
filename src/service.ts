@@ -60,12 +60,13 @@ export interface PetSnapshot {
   readonly pid?: number | undefined
 }
 
-/** B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段。所有字段可选——
- * 载体按能力逐项上报。 */
+/** B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段 / 表达情绪
+ * （B10）。所有字段可选——载体按能力逐项上报。 */
 export interface PetBodyRuntime {
   readonly facing?: 'left' | 'right' | undefined
   readonly idleNextAt?: number | undefined
   readonly lastClip?: string | undefined
+  readonly mood?: string | undefined
 }
 
 /** The v3 action witness: accepted-on-write four fields, completion backfilled
@@ -184,7 +185,7 @@ export function normalizeStatus(id: string, raw: Record<string, unknown>, online
   }
 }
 
-/** B08 bodyRuntime 防御提取：三字段逐个判型，全空 = 老身体（键缺席）。 */
+/** B08 bodyRuntime 防御提取：逐字段判型，全空 = 老身体（键缺席）。 */
 function normalizeBodyRuntime(raw: Record<string, unknown>): PetBodyRuntime | undefined {
   const value = raw.bodyRuntime
   if (typeof value !== 'object' || value === null) return undefined
@@ -194,11 +195,14 @@ function normalizeBodyRuntime(raw: Record<string, unknown>): PetBodyRuntime | un
     ? record.idleNextAt
     : undefined
   const lastClip = typeof record.lastClip === 'string' && record.lastClip !== '' ? record.lastClip : undefined
-  if (facing === undefined && idleNextAt === undefined && lastClip === undefined) return undefined
+  // B10：表达情绪（pet_set_rhythm 同代际的模型杠杆；老载体键缺席 = 不透传）。
+  const mood = typeof record.mood === 'string' && record.mood !== '' ? record.mood : undefined
+  if (facing === undefined && idleNextAt === undefined && lastClip === undefined && mood === undefined) return undefined
   return {
     ...(facing === undefined ? {} : { facing }),
     ...(idleNextAt === undefined ? {} : { idleNextAt }),
     ...(lastClip === undefined ? {} : { lastClip }),
+    ...(mood === undefined ? {} : { mood }),
   }
 }
 
