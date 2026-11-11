@@ -261,10 +261,10 @@ window.__ModuleLoader__.load({
       // Unicode 码点数，和宿主的截断口径一致。inherited=true 的槽显示的是
       // 回落来的卡（全局卡或默认），一编辑就物化到该槽。
       var PRESET_SLOT_LABELS = {
-        whale598: '鲸鱼娘（精简）',
-        'whale598-standard': '鲸鱼娘(标准)',
-        'whale598-custom-1': '病娇',
-        'whale598-custom-2': '小满',
+        whale598: '精简（仅表达）',
+        'whale598-standard': '普通（含工作工具）',
+        'whale598-custom-1': '自定义1',
+        'whale598-custom-2': '自定义2',
       }
       var PRESET_SLOT_IDS = ['whale598-standard', 'whale598', 'whale598-custom-1', 'whale598-custom-2']
       var personaSlots = (data && data.personas) || null

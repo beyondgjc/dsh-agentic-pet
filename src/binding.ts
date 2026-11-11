@@ -20,10 +20,10 @@ export const PET_PRESET_IDS: ReadonlySet<string> = new Set([
  * custom ids are placeholder-named (自定义1/2) until the user renames them —
  * ids are sticky (creation-time session metadata), display names are free. */
 export const PET_PRESET_LABELS: Readonly<Record<string, string>> = {
-  whale598: '鲸鱼娘（精简）',
-  'whale598-standard': '鲸鱼娘(标准)',
-  'whale598-custom-1': '病娇',
-  'whale598-custom-2': '小满',
+  whale598: '精简（仅表达）',
+  'whale598-standard': '普通（含工作工具）',
+  'whale598-custom-1': '自定义1',
+  'whale598-custom-2': '自定义2',
 }
 
 export function isPetPreset(preset: string | undefined | null): boolean {
