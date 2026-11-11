@@ -174,3 +174,15 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 - tail/hand 命中区坐标来自单帧标注（`docs/body-hitboxes-preview.png`），未逐帧校准；`method: "clips"`（按朝向选片段）留作升级路径。
 - B06 默认表对现白名单是统计性差异（10 片段中 3 个 ×1.5），观感 subtle——可调 `pet-settings.json rhythm.idleBias.weights`。
 - carrier 的 `stdio: 'ignore'` 吞 stdout——诊断靠 `carrier-runtime.log`（§8），别再找 stdout。
+
+## 11. 并行窗口协作纪律（2026-11-12 定；源自 0.4.15 攒批期 4 次互冲 + settings-page 0 字节误读）
+
+两个会话窗口同时在本仓（及 persona-presets / monorepo）工作时按此执行：
+
+1. **部署循环单源**：任意时刻只允许**一个窗口**跑「构建 → 部署安装位 → monorepo 镜像」循环；另一窗口只写码 + 提交（src/tests/docs/presets），不碰 `lib/`、安装位、vendor、monorepo。开工时两窗口先声明角色（部署方/写码方），由用户仲裁——0.4.15 期双方同时跑部署循环，安装位/lib 被来回覆盖 4 次。
+2. **动笔先树外快照**：跨文件批次开工前，把要动的文件快照到仓外 `../<feature>-snapshot-<date>/`——2026-11-11 快照三次救回被冲的批次。
+3. **恢复基于最新 HEAD，不盲抄快照**：被冲后先 diff 定向（对方叠了新内容 vs 纯回退），从最新 HEAD 重施自己的编辑——快照可能落后于对方已提交的工作（settings-page 恢复时快照缺 presetNames，盲抄会丢对方功能）。
+4. **「污染」先查 git log 全序**：树上看到陌生改动，大半是对方窗口**已入库**的工作——先 `git log --oneline -8` + `git show --stat` 对账再定性，禁止上来就清理（对方 amend 曾把我方标记当污染清过）。
+5. **0 字节/异常文件 ≠ 对方在重构**：发现工作树文件被清空，先用 mtime + git status 定性并向用户确认——双方曾互把对方的中间态误读成「正在重构」。
+6. **终验择隙 + 时效标注**：cmp / 双岸 grep 必须在对方循环的间隙做，部署完立即验；汇报部署结论时注明「截至 HH:MM 有效」。
+7. **宿主重启窗口**：重启桌面端前确认没有窗口在部署中——重启落在部署前 = 旧宿主 + 新盘上文件的错位期（persona-presets 401 教训；client 热加载、host lib 才需要重启，错位期症状 = 区块渲染但 read/write 404/401）。
