@@ -1,1325 +1,1336 @@
 /**
- * dsh-pet Electron main process. Owns the pet window (transparent,
- * always-on-top, click-through outside the pet body), the pet-profile child
- * process (spawned through Electron's own binary in Node mode, mirroring
- * apps/desktop-host), and the pet-asset protocol that streams the pet's
- * animation media from a local directory without vendoring it into the
- * repository.
- *
- * Window drag is manual: the renderer captures the pointer over the pet body
- * and reports screen coordinates; the main process follows with setBounds
- * whose size is pinned to the canonical WINDOW_SIZE and whose position
- * recomputes from the gesture anchor, so neither the DWM re-measure ratchet
- * nor a per-call nudge can accumulate (DSH-PET.md §5 error chain #11-12).
+ * dsh-pet renderer: a minimal authenticated dsh client. Boots the Cordis
+ * client stack directly — Typert registry, Connection, and the API gateway
+ * client — with no web-frontend module system, then drives a pet state
+ * machine from the forwarded `api-session/*` events and answers
+ * `approval/request` and `user-questions/request` waterfalls through the
+ * official `$events/result` RPC, exactly like the Web GUI's cards.
  */
 
-import { app, BrowserWindow, ipcMain, Menu, protocol, screen, session } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import type { ServerResponse } from 'node:http'
-import { createServer } from 'node:http'
-import { homedir } from 'node:os'
-import { dirname, join, normalize, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
-import { createSayTts } from './tts.ts'
+import './pet.css'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-const PET_PROFILE_NAME = 'pet'
-const ASSET_SCHEME = 'pet-asset'
-/** Bounded wait for the profile child's graceful shutdown before it is left to the OS. */
-const SHUTDOWN_TIMEOUT_MS = 10_000
-
-/** The dsh home this carrier shares with the driver (manifest, settings). */
-const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-
-/** This carrier's pet identity (env from the spawning plugin): scopes the
- * per-pet state files (pet-window/pet-world under whale598/<id>/) and the
- * registry manifest name (pet-http.d/<id>.json). The default keeps manual
- * launches (`electron <carrier-dir>`) on the electron identity. */
-const PET_ID = process.env.DSH_PET_ID ?? 'electron'
-/** The asset/behavior family: all electron-kind instances (electron,
- * electron-2, …) share one body.json and one clip catalog; the id is the
- * instance, the kind is what it looks like. */
-const PET_KIND = PET_ID.replace(/-\d+$/, '')
-/** Desktop placement stagger: fresh instances (no saved position) offset by
- * slot so N pets do not stack on the same spot. */
-const PET_SLOT = Number.isFinite(Number(process.env.DSH_PET_SLOT))
-  ? Math.max(0, Math.floor(Number(process.env.DSH_PET_SLOT)))
-  : 0
-
-/** This pet's per-pet state file (whale598/<PET_ID>/<name>) — the carrier's
- * own state follows the plugin's whale598 ownership rule. */
-const petStateFile = (name: string): string => join(DSH_HOME, 'whale598', PET_ID, name)
-
-/** First parseable JSON file in a layout chain (per-pet file → whale598 root
- * → ~/.dsh root). The per-site `parse` validates the shape; a layer that
- * parses but fails validation yields undefined and the next layer answers —
- * same contract as the plugin's petStatePaths/readPetStateJson chain. */
-function readFirstJson<T>(files: string[], parse: (raw: unknown) => T | undefined): T | undefined {
-  for (const file of files) {
-    try {
-      const parsed = parse(JSON.parse(readFileSync(file, 'utf8')))
-      if (parsed !== undefined) return parsed
-    } catch {
-      // Missing or unreadable layout: try the next one.
-    }
-  }
-  return undefined
-}
-
-/**
- * The character the pet page displays. Keep in sync with
- * src/renderer/main.ts (no shared module: the renderer is a separate vite
- * build; the catalog scan and the /action validation must cover the SAME
- * character the renderer can actually play).
- */
 const CHARACTER = 'whale'
 
-/** One playable action: `id` is the wire name (pet_do / capabilities),
- * `dir`/`file` locate the clip under videos/ (may contain a nested segment,
- * e.g. events/balance). */
-interface CatalogEntry {
-  id: string
+type BaseState = 'idle' | 'thinking' | 'working'
+
+interface PetGlobals {
+  petDesktop: {
+    setBubbleVisible(visible: boolean): void
+    dragStart(screenX: number, screenY: number): void
+    dragMove(screenX: number, screenY: number): void
+    dragEnd(): void
+    onState(listener: (state: unknown) => void): void
+    onAction(listener: (action: unknown) => void): void
+    onCatalog(listener: (catalog: unknown) => void): void
+    /** B01 朝向：main 的 click-through 轮询顺带算好的光标偏移（光标 x −
+     * 窗口中心 x，px；右为正）。迟滞/去抖在渲染层。 */
+    onCursor(listener: (cursor: { offsetX: number }) => void): void
+    onInteraction(listener: (request: unknown) => void): void
+    onInteractionCancel(listener: (notice: { id: string }) => void): void
+    answerInteraction(id: string, answer: unknown): void
+    onSay(listener: (notice: { text: string; audio?: Uint8Array<ArrayBuffer>; mood?: unknown }) => void): void
+    reportStatus(snapshot: Record<string, unknown>): void
+    reportTouch(touch: { part: string; rects?: string }): void
+    reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void
+    sendChat(text: string): Promise<{ ok: boolean; reason?: string }>
+  }
+}
+
+const globals = globalThis as unknown as Partial<PetGlobals>
+
+// ── animation mapping (whale media, via the pet-asset:// protocol) ──────────
+
+interface AnimationName {
   dir: string
   file: string
-  tags?: string[]
-  energy?: 'low' | 'mid' | 'high'
-  durationHintMs?: number
-  textInFrame?: boolean
-  loop?: boolean
-  /** B02：待机白名单（actions.tags.json 标注）——idle theater 的池。 */
-  idleEligible?: boolean
-  /** B01：文字镜像豁免，唯一来源 = text_clips.json 的 no_mirror（单一来源
-   * 裁定；actions.tags.json 的 textInFrame 读取保留但数据侧禁新增）。 */
-  noMirror?: boolean
 }
 
-/** The body-owned tag file: keyed by clip id, authored next to the media. */
-type ActionTagMeta = Pick<CatalogEntry, 'tags' | 'energy' | 'durationHintMs' | 'textInFrame' | 'loop' | 'idleEligible'>
-
-async function readActionTags(): Promise<Map<string, ActionTagMeta>> {
-  const file = join(resolveAssetsRoot(), CHARACTER, 'actions.tags.json')
-  try {
-    const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
-    const map = new Map<string, ActionTagMeta>()
-    for (const [id, value] of Object.entries(raw)) {
-      if (id.startsWith('_')) continue // B05：_meta 容器不是片段
-      if (typeof value !== 'object' || value === null) continue
-      const record = value as Record<string, unknown>
-      const tags = Array.isArray(record.tags)
-        ? record.tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '')
-        : []
-      const energy = record.energy === 'low' || record.energy === 'mid' || record.energy === 'high'
-        ? record.energy
-        : undefined
-      const durationHintMs = typeof record.durationHintMs === 'number' && Number.isFinite(record.durationHintMs)
-        ? record.durationHintMs
-        : undefined
-      const textInFrame = typeof record.textInFrame === 'boolean' ? record.textInFrame : undefined
-      const loop = record.loop === true ? true : undefined
-      const idleEligible = record.idleEligible === true ? true : undefined
-      map.set(id, {
-        tags,
-        ...(energy === undefined ? {} : { energy }),
-        ...(durationHintMs === undefined ? {} : { durationHintMs }),
-        ...(textInFrame === undefined ? {} : { textInFrame }),
-        ...(loop === undefined ? {} : { loop }),
-        ...(idleEligible === undefined ? {} : { idleEligible }),
-      })
-    }
-    return map
-  } catch {
-    return new Map() // tags are optional: the id catalog still works
-  }
+const ANIMATION: Record<string, AnimationName[]> = {
+  idle: [{ dir: 'idle', file: '待机呼吸休闲' }],
+  thinking: [{ dir: 'random', file: '深度思考碎碎念' }],
+  working: [
+    { dir: 'random', file: '工作状态-忙碌点按' },
+    { dir: 'random', file: '写代码' },
+    { dir: 'random', file: '原地敲击桌面互动' },
+  ],
+  waiting: [{ dir: 'turn', file: '东张西望' }],
+  error: [{ dir: 'random', file: '被吓一跳' }],
+  celebrate: [{ dir: 'click', file: '点击回应-开心跃动' }],
+  // One is picked at random per touch: the reaction is local and instant —
+  // it never waits on the runtime round trip.
+  touch: [
+    { dir: 'click', file: '点击回应-开心跃动' },
+    { dir: 'click', file: '点击回应-元气挥手' },
+    { dir: 'click', file: '点击回应-害羞惊讶' },
+    { dir: 'click', file: '点击回应-傲娇生气' },
+    { dir: 'click', file: '点击回应-挠痒咯咯笑' },
+  ],
 }
 
-/** The body's own description (body/1), next to the media. Missing or
- * unreadable is the legacy path: /body 404s and the v4 contract is untouched. */
-async function readBodyDocument(): Promise<Record<string, unknown> | null> {
-  const file = join(resolveAssetsRoot(), CHARACTER, 'body.json')
-  try {
-    const raw = JSON.parse(await readFile(file, 'utf8')) as unknown
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
-    const body = raw as Record<string, unknown>
-    if (typeof body.bodyId !== 'string') body.bodyId = CHARACTER
-    return body
-  } catch {
-    return null
-  }
+// The random-pool clips that double as STATE animations — excluded from the
+// idle theater so a working/thinking clip never pops up while resting.
+const THEATER_EXCLUDED = new Set(['深度思考碎碎念', '工作状态-忙碌点按', '写代码', '原地敲击桌面互动', '被吓一跳'])
+
+function requireElement<T extends Element>(selector: string): T {
+  const element = document.querySelector<T>(selector)
+  if (element === null) throw new Error(`pet renderer: missing element ${selector}`)
+  return element
 }
 
-/**
- * Derive the action catalog from the media tree: categories are the
- * directories under characters/<id>/videos, clips are the .webm files inside
- * them (one nested level is flattened — events/balance). Scanning disk (not
- * a checked-in index) keeps an asset-package update from requiring a code
- * change. Failure degrades to an empty catalog — the pet then advertises
- * only the universal `celebrate` alias, i.e. yesterday's behavior.
- */
-/** 文字镜像豁免的唯一来源（body 契约 §3.1 裁定）：videos/text_clips.json 的
- * no_mirror 数组。缺文件/缺键 = 空集（未登记任何豁免）。 */
-async function readNoMirrorClips(videosRoot: string): Promise<Set<string>> {
-  const raw = await readFile(join(videosRoot, 'text_clips.json'), 'utf8').catch(() => null)
-  if (raw === null) return new Set()
-  try {
-    const parsed = JSON.parse(raw) as { no_mirror?: unknown }
-    const list = Array.isArray(parsed.no_mirror)
-      ? parsed.no_mirror.filter((item): item is string => typeof item === 'string')
-      : []
-    return new Set(list)
-  } catch {
-    return new Set()
-  }
-}
-
-async function scanActionCatalog(): Promise<CatalogEntry[]> {
-  const videosRoot = join(resolveAssetsRoot(), CHARACTER, 'videos')
-  const entries: CatalogEntry[] = []
-  const seen = new Set<string>()
-  const collect = async (dir: string, relativeDir: string): Promise<void> => {
-    const items = await readdir(dir, { withFileTypes: true }).catch(() => null)
-    if (items === null) return
-    for (const item of items) {
-      if (item.isDirectory()) {
-        await collect(join(dir, item.name), relativeDir === '' ? item.name : `${relativeDir}/${item.name}`)
-        continue
-      }
-      if (!item.name.toLowerCase().endsWith('.webm')) continue
-      const id = item.name.slice(0, -5)
-      if (id === '' || seen.has(id)) continue // first wins; clip ids are unique in practice
-      seen.add(id)
-      entries.push({ id, dir: relativeDir, file: id })
-    }
-  }
-  const categories = await readdir(videosRoot, { withFileTypes: true }).catch(() => null)
-  if (categories === null) return entries // no media: celebrate-only catalog
-  for (const category of categories) {
-    if (category.isDirectory()) await collect(join(videosRoot, category.name), category.name)
-  }
-  const tags = await readActionTags()
-  const noMirror = await readNoMirrorClips(videosRoot)
-  return entries.map((entry) => {
-    const merged = { ...entry, ...(tags.get(entry.id) ?? {}) }
-    return noMirror.has(entry.id) ? { ...merged, noMirror: true } : merged
-  })
-}
-
-/**
- * The window's one canonical size: creation and every drag setBounds pin it.
- * A position-only setPosition re-sends whatever size DWM last re-measured the
- * transparent frameless window to, which ratchets +1px per call; an explicit
- * size can at worst oscillate, never accumulate.
- */
-const WINDOW_SIZE = { width: 460, height: 560 } as const
-
-// ── world-rect primitives (§6 v2) ───────────────────────────────────────────
-// A world is a screen-coordinate rect the pet may roam. Pure functions so the
-// /world validation and the drag clamp cannot drift apart.
-
-interface Rect { x: number; y: number; width: number; height: number }
-
-/** A rect from a loose payload; null unless all four members are finite
- * numbers (defensive extraction — the /status, /world and persistence paths
- * share it). */
-function rectOf(value: unknown): Rect | null {
-  if (typeof value !== 'object' || value === null) return null
-  const record = value as Record<string, unknown>
-  const num = (key: string): number | null =>
-    typeof record[key] === 'number' && Number.isFinite(record[key]) ? record[key] as number : null
-  const x = num('x')
-  const y = num('y')
-  const width = num('width')
-  const height = num('height')
-  return x !== null && y !== null && width !== null && height !== null ? { x, y, width, height } : null
-}
-
-/** Open-interval intersection: touching edges share no area. */
-function rectsIntersect(a: Rect, b: Rect): boolean {
-  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
-}
-
-/** Clamp a scalar into [low, high]; a degenerate range (smaller world than
- * the window) collapses to its low edge so the rect still pins inside. */
-function clampInto(value: number, low: number, high: number): number {
-  return high < low ? low : Math.min(Math.max(value, low), high)
-}
-
-process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true'
-// ── boot logger (diagnostic injection, remove after incident) ──────────────
-import { appendFileSync as __afs } from 'node:fs'
-const __bootLog = (line: string): void => {
-  try { __afs('C:/Users/beyondguo/.dsh/whale598/carrier-boot.log', `${new Date().toISOString()} ${line}\n`) } catch { /* ignore */ }
-}
-__bootLog(`BOOT pid=${process.pid} argv=${JSON.stringify(process.argv.slice(1))} runAsNode=${process.env.ELECTRON_RUN_AS_NODE ?? 'unset'} nodeOptions=${process.env.NODE_OPTIONS ?? 'unset'} dshPetUrl=${process.env.DSH_PET_URL ? 'set' : 'unset'} cwd=${process.cwd()}`)
-process.on('uncaughtException', (e) => { __bootLog(`UNCAUGHT ${e.stack ?? String(e)}`) })
-process.on('unhandledRejection', (e) => { __bootLog(`REJECTION ${String(e)}`) })
-// ── boot logger end ─────────────────────────────────────────────────────────
-
-
-// Route main-process crashes to the log instead of the dialog: an uncaught
-// exception in an IPC handler or poller otherwise dies as a modal error box
-// with the stack truncated, leaving nothing to diagnose from.
-process.on('uncaughtException', (error) => {
-  console.error(`[pet] uncaughtException: ${error.stack ?? String(error)}`)
+// 当前身指针（switchClip 乒乓重赋值）；videoA 钉住 A 元素引用。
+let video = requireElement<HTMLVideoElement>('#video')
+video.addEventListener('error', () => {
+  console.error(`[pet-video] source failed: ${video.src} ${String(video.error?.message ?? '')}`)
 })
-process.on('unhandledRejection', (reason) => {
-  console.error(`[pet] unhandledRejection: ${String(reason)}`)
+// B04 v2 双缓冲：A/B 两个【固定】元素乒乓，`video` 是"当前身"指针。v1 的
+// 冻结根因 = 用全局指针算 incoming（返回切换时指针已指向 outgoing，三元式
+// 塌缩成 incoming===outgoing → 自交叉自暂停）。v2 以固定元素引用乒乓，与
+// 指针解耦——首次切换与返回切换走同一条路。
+const videoA: HTMLVideoElement = video
+const videoB = document.createElement('video')
+videoB.muted = true
+videoB.playsInline = true
+videoB.crossOrigin = 'anonymous'
+videoB.addEventListener('error', () => {
+  console.error(`[pet-video] source failed: ${videoB.src} ${String(videoB.error?.message ?? '')}`)
 })
+// 交叉期旧层引用（under-lay：旧层恒 alpha 1，桌面永不透出——v1 实测"双身
+// 透底"的根因是双层各半透明）。淡入完成后旧层暂停并清引用。
+let prevVideo: HTMLVideoElement | undefined
+let fadeStart = 0
+let fadeMs = 0
+// WebGL 不可用 = 无交叉能力（switchClip 走可见节点直换降级）。
+let glFailed = false
+const stage = requireElement<HTMLCanvasElement>('#stage')
+const bubble = requireElement<HTMLDivElement>('#bubble')
 
-// CDP diagnostics (page state reads, synthetic input), requested by the
-// DSH_PET_CDP env or the settings page's debug switch (read synchronously —
-// this runs pre-ready; the switch only takes hold on the next launch).
-let cdpRequested = process.env.DSH_PET_CDP === '1'
-try {
-  // pet-settings.json is plugin-level global state: the whale598 copy is
-  // current, the ~/.dsh root copy is the pre-migration legacy layer. The
-  // first parseable layer wins, whatever the flag says (matches the
-  // settings-page's own read order).
-  const settings = readFirstJson(
-    [join(DSH_HOME, 'whale598', 'pet-settings.json'), join(DSH_HOME, 'pet-settings.json')],
-    (raw) => (typeof raw === 'object' && raw !== null ? raw as { debug?: { cdp?: unknown } } : undefined),
-  )
-  if (settings?.debug?.cdp === true) cdpRequested = true
-} catch {
-  // Absent or unreadable settings: env is the only request channel.
-}
-if (cdpRequested) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9222')
-}
+// ── B01 朝向（镜像语义见 body 契约 §3.1 + 需求 REQ-B01）────────────────────
+// 基准朝向 = 素材原始朝向 right；facing=left → 舞台画布 scaleX(-1)（气泡是
+// 独立元素，不随镜像）。迟滞 ±20px、时间去抖 40ms；one-shot 播放期间锁定。
 
-// Registered before app ready, per Electron protocol registration rules. The
-// scheme carries the pet's media under its path; media elements load it
-// no-cors, so no CORS privilege is required.
-protocol.registerSchemesAsPrivileged([
-  // corsEnabled + an ACAO header on every response: the WebGL stage uploads
-  // the video frames as textures, and a cross-origin media element without a
-  // CORS-clean response taints the context (texImage2D SecurityError).
-  { scheme: ASSET_SCHEME, privileges: { supportFetchAPI: true, stream: true, corsEnabled: true } },
-])
+type Facing = 'left' | 'right'
 
-if (!app.requestSingleInstanceLock()) {
-  app.quit()
-} else {
-  app.on('second-instance', () => {
-    const window = BrowserWindow.getAllWindows()[0]
-    window?.show()
-  })
-  void main()
+let facing: Facing = 'right'
+let lastFacingDecisionAt = 0
+let lastCursorOffsetX: number | undefined
+let facingLocked = false
+
+/** 空间迟滞判定（与 pet-app idle-selector.facingForOffset 同语义——渲染层
+ * 无法跨包导入，此处镜像实现，行为由验收清单钉住）。 */
+function facingForOffset(offsetPx: number, current: Facing, hysteresisPx = 40): Facing {
+  if (Math.abs(offsetPx) <= hysteresisPx) return current
+  return offsetPx > 0 ? 'right' : 'left'
 }
 
-/** The local directory the pet's animation media is read from. */
-function resolveAssetsRoot(): string {
-  const configured = process.env.DSH_PET_ASSETS_DIR
-  if (configured !== undefined && configured !== '') return resolve(configured)
-  // Packaged layout: the carrier ships beside an assets directory (a junction
-  // or copy staged next to lib/).
-  const besideCarrier = resolve(HERE, '..', 'assets', 'characters')
-  if (existsSync(besideCarrier)) return besideCarrier
-  // npm assets package: dsh-agentic-pet-assets ships assets/characters as
-  // plain files — the media channel for plugin installs from the registry
-  // (the 50MB media deliberately stays out of the pet-app package itself).
-  try {
-    const require = createRequire(import.meta.url)
-    const pkg = require.resolve('dsh-agentic-pet-assets/package.json')
-    const packaged = resolve(dirname(pkg), 'assets', 'characters')
-    if (existsSync(packaged)) return packaged
-  } catch {
-    // assets package not installed: fall through
-  }
-  // Source-checkout fallback: the media lives in the bundle's carrier tree
-  // (gitignored, staged locally). lib/ → apps/pet → apps → deepseek-harness,
-  // then into packages/bundle/pet-app/carrier.
-  return resolve(HERE, '..', '..', '..', 'packages', 'bundle', 'pet-app', 'carrier', 'assets', 'characters')
+function applyFacing(): void {
+  stage.style.transform = facing === 'left' ? 'scaleX(-1)' : ''
+  reportStatus()
 }
 
-function registerAssetProtocol(): void {
-  const assetsRoot = resolveAssetsRoot()
-  protocol.handle(ASSET_SCHEME, (request) => {
-    const url = new URL(request.url)
-    const relative = decodeURIComponent(url.pathname)
-    const target = resolve(normalize(join(assetsRoot, relative)))
-    if (target !== assetsRoot && !target.startsWith(assetsRoot + sep)) {
-      return new Response(null, { status: 403 })
-    }
-    return netFetchFile(target)
-  })
-}
-
-async function netFetchFile(target: string): Promise<Response> {
-  try {
-    const bytes = await readFile(target)
-    return new Response(bytes, {
-      headers: {
-        'content-type': mimeOf(target),
-        'access-control-allow-origin': '*',
-      },
-    })
-  } catch {
-    return new Response(null, { status: 404 })
+function decideFacing(rawOffsetX: number): void {
+  // 【用户感知校准 2026-11-07】素材原始帧的视觉朝向读作"朝左"——光标在右
+  // （offsetX > 0）时镜像后才算"扭向光标"，故取负号进判定。
+  const offsetX = -rawOffsetX
+  lastCursorOffsetX = offsetX
+  if (facingLocked) return
+  const now = Date.now()
+  if (now - lastFacingDecisionAt < 40) return
+  lastFacingDecisionAt = now
+  const next = facingForOffset(offsetX, facing)
+  if (next !== facing) {
+    facing = next
+    applyFacing()
   }
 }
 
-function mimeOf(target: string): string {
-  switch (target.split('.').pop()?.toLowerCase()) {
-    case 'webm': return 'video/webm'
-    case 'gif': return 'image/gif'
-    case 'png': return 'image/png'
-    case 'json': return 'application/json'
-    default: return 'application/octet-stream'
-  }
-}
+globals.petDesktop?.onCursor?.((cursor) => { decideFacing(cursor.offsetX) })
 
-interface HostChildHandle {
-  child: ChildProcess
-  url: Promise<string>
-  shutdown: () => Promise<void>
+function animationSource(key: string): string {
+  const names = ANIMATION[key]
+  if (names === undefined) throw new Error(`pet renderer: unknown animation ${key}`)
+  // A random draw per (re)render: state re-entries and post-one-shot returns
+  // rotate through the pool instead of always showing its first member.
+  const name = names[Math.floor(Math.random() * names.length)] ?? names[0]
+  return `pet-asset:///${CHARACTER}/videos/${name.dir}/${encodeURIComponent(name.file)}.webm`
 }
 
 /**
- * Spawn the pet profile child (Electron binary in Node mode running the
- * profile runner) and resolve its authenticated URL. The child owns the
- * Cordis tree; the carrier only supervises it.
+ * Render the video into the stage canvas. The webm assets carry a real alpha
+ * channel (the retired standalone pet's offline unblend-white-v6 output), so
+ * the pass is a plain blit: an earlier luminance "white matte" key — written
+ * under the belief the sources were white-background — only ever damaged the
+ * character's own pure whites (headscarf, apron, face highlights landed
+ * inside the key band and turned semi-transparent). Chroma-keying is only the
+ * fallback for an opaque source.
  */
-function spawnHostChild(): HostChildHandle {
-  const hostChild = join(HERE, 'host-child.js')
-  if (!existsSync(hostChild)) {
-    throw new Error('pet: this carrier build has no self-spawn support (host-child.js absent); it expects DSH_PET_URL from a spawning runtime')
-  }
-  const child = spawn(process.execPath, [hostChild], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  })
-  let stderr = ''
-  child.stderr?.setEncoding('utf8')
-  child.stderr?.on('data', (chunk: string) => { stderr += chunk })
-  // Forward the profile's console (the readiness URL line is the carrier
-  // user's entry point to the Web GUI) instead of letting it sit in the pipe.
-  child.stdout?.setEncoding('utf8')
-  child.stdout?.on('data', (chunk: string) => { process.stdout.write(chunk) })
-  child.stderr?.on('data', (chunk: string) => { process.stderr.write(chunk) })
-  const url = new Promise<string>((resolveUrl, rejectUrl) => {
-    const timer = setTimeout(() => {
-      rejectUrl(new Error(`pet host: the profile child did not report ready within 120s\n${stderr.slice(-2000)}`))
-    }, 120_000)
-    child.on('message', (message: unknown) => {
-      if ((message as { type?: string } | null)?.type !== 'ready') return
-      clearTimeout(timer)
-      resolveUrl(String((message as { url: string }).url))
-    })
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      rejectUrl(new Error(`pet host: the profile child exited with code ${String(code)} before ready\n${stderr.slice(-2000)}`))
-    })
-  })
-  return {
-    child,
-    url,
-    shutdown: () => new Promise<void>((resolveShutdown) => {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        resolveShutdown()
-        return
-      }
-      const timer = setTimeout(() => {
-        child.kill()
-        resolveShutdown()
-      }, SHUTDOWN_TIMEOUT_MS)
-      child.on('message', (message: unknown) => {
-        if ((message as { type?: string } | null)?.type !== 'shutdown-complete') return
-        clearTimeout(timer)
-        resolveShutdown()
-      })
-      child.send({ type: 'shutdown' })
-    }),
-  }
-}
-
-/**
- * The pet-surface locator: pet-app bundles inside a running runtime publish
- * their authenticated root here (the desktop shell keeps its URL in process
- * memory only). A published URL wins over spawning a dedicated profile, so the
- * pet follows whichever live runtime serves /whale598/ — the user's desktop when it
- * runs, otherwise the last publisher still alive.
- */
-async function readLocatorUrl(): Promise<string | undefined> {
-  // whale598/ first (current publisher), then the legacy root copy — the
-  // locator moved with the whale598 consolidation (publishLocator writes the
-  // new path; old copies answer as fallback).
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  for (const path of [join(home, 'whale598', 'pet-surface-url.json'), join(home, 'pet-surface-url.json')]) {
-    try {
-      const record = JSON.parse(await readFile(path, 'utf8')) as { url?: unknown; pid?: unknown }
-      if (typeof record.url !== 'string' || record.url === '') continue
-      if (typeof record.pid === 'number') {
-        try { process.kill(record.pid, 0) } catch { return undefined } // publisher gone
-      }
-      return record.url
-    } catch { /* try the next location */ }
-  }
-  return undefined
-}
-
-/**
- * The pet surface URL for an authenticated web root: path `/whale598/` with the
- * token **dropped** — authorizeIndex mints the root cookie from the token and
- * rejects any token-carrying request on a subpath, so the pet page itself is
- * entered cookie-only after the root mint.
- */
-function petSurfaceUrl(authenticated: string): string {
-  const parsed = new URL(authenticated)
-  // MUST stay in lockstep with the plugin's PET_PATH_PREFIX (/whale598) —
-  // separate builds, so the literal is duplicated here by design.
-  parsed.pathname = '/whale598/'
-  parsed.search = ''
-  parsed.hash = ''
-  return parsed.toString()
-}
-
-/** The remembered window position, validated against the current displays so
- * a stale save (monitor unplugged, resolution change) cannot spawn the pet
- * off-screen. The WHOLE window rectangle must fit inside some work area —
- * a corner check admits positions whose body hangs past the edge, which is
- * how x=2125 (DIP work area 1707 wide) passed and the pet vanished. When no
- * display fits it, clamp fully into the primary work area. Undefined =
- * default placement. */
-function readSavedPosition(): { x: number; y: number } | undefined {
-  // Per-pet file first (whale598/<PET_ID>/), then the two migration layers
-  // (whale598 root, ~/.dsh root) — pre-split writes still answer.
-  const coords = readFirstJson(
-    [petStateFile('pet-window.json'), join(DSH_HOME, 'whale598', 'pet-window.json'), join(DSH_HOME, 'pet-window.json')],
-    (raw) => {
-      const record = raw as { x?: unknown; y?: unknown }
-      const x = typeof record.x === 'number' ? Math.round(record.x) : Number.NaN
-      const y = typeof record.y === 'number' ? Math.round(record.y) : Number.NaN
-      return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined
-    },
-  )
-  if (coords === undefined) return undefined
-  const { x, y } = coords
-  const fits = (area: Electron.Rectangle): boolean =>
-    x >= area.x && y >= area.y
-    && x + WINDOW_SIZE.width <= area.x + area.width
-    && y + WINDOW_SIZE.height <= area.y + area.height
-  if (screen.getAllDisplays().some(display => fits(display.workArea))) return { x, y }
-  const primary = screen.getPrimaryDisplay().workArea
-  return {
-    x: Math.min(primary.x + primary.width - WINDOW_SIZE.width, Math.max(primary.x, x)),
-    y: Math.min(primary.y + primary.height - WINDOW_SIZE.height, Math.max(primary.y, y)),
-  }
-}
-
-/** The persisted roaming area (§6 /world): `pet-world.json` holds the
- * effective rect or an explicit null (unset). Anything unreadable or
- * mistyped degrades to unset — the default work-area clamping applies. */
-function readSavedWorld(): Rect | null {
-  return readFirstJson(
-    [petStateFile('pet-world.json'), join(DSH_HOME, 'whale598', 'pet-world.json'), join(DSH_HOME, 'pet-world.json')],
-    (raw) => rectOf(raw),
-  ) ?? null
-}
-
-function createPetWindow(): BrowserWindow {
-  const saved = readSavedPosition()
-  // Fresh instances (no saved position) stagger by slot so N pets do not
-  // stack on the same spot; the primary (slot 0) keeps the OS default.
-  let placement: { x: number; y: number } | undefined = saved
-  if (placement === undefined && PET_SLOT > 0) {
-    const area = screen.getPrimaryDisplay().workArea
-    placement = {
-      x: Math.max(area.x, area.x + area.width - WINDOW_SIZE.width - 24 - PET_SLOT * 48),
-      y: Math.max(area.y, area.y + area.height - WINDOW_SIZE.height - 24 - PET_SLOT * 24),
-    }
-  }
-  const window = new BrowserWindow({
-    ...(placement === undefined ? {} : { x: placement.x, y: placement.y }),
-    width: WINDOW_SIZE.width,
-    height: WINDOW_SIZE.height,
-    transparent: true,
-    frame: false,
-    hasShadow: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    backgroundColor: '#00000000',
-    webPreferences: {
-      preload: join(HERE, 'preload.js'),
-      // ESM preloads require the sandbox off; contextIsolation stays on.
-      sandbox: false,
-      contextIsolation: true,
-      nodeIntegration: false,
-      webSecurity: true,
-    },
-  })
-  window.setAlwaysOnTop(true, 'screen-saver')
-  // Mouse events start forwarded: the main-process poller toggles ignore off
-  // while the cursor is over the pet body or a bubble, so the desktop
-  // underneath stays clickable everywhere else.
-  window.setIgnoreMouseEvents(true, { forward: true })
-  return window
-}
-
-async function main(): Promise<void> {
-  // protocol.handle touches the default session: registration must follow
-  // app ready (registerSchemesAsPrivileged above is the only pre-ready call).
-  await app.whenReady()
-  // The runtime re-attaches to a fresh random port every boot, but cookies
-  // ignore ports and pile up on the shared 127.0.0.1 domain — hundreds of
-  // mints later the Cookie header outgrows the server's 16KB limit and every
-  // page request is rejected (observed: 431 accumulated cookies). The boot's
-  // token URL re-mints everything the page needs, so persistence is worthless.
-  await session.defaultSession.clearStorageData({ storages: ['cookies'] })
-  registerAssetProtocol()
-  const actionCatalog = await scanActionCatalog()
-  // The advertised menu: the universal celebrate alias first, then every
-  // clip id the media tree holds.
-  const actionIds = ['celebrate', ...actionCatalog.map(entry => entry.id)]
-  const actionTagVocabulary = [...new Set(actionCatalog.flatMap(entry => entry.tags ?? []))]
-  const tagged = actionCatalog.some(entry => (entry.tags?.length ?? 0) > 0)
-  const bodyDocument = await readBodyDocument()
-  const bootLine = `[pet] boot: assets root: ${resolveAssetsRoot()} actions=${String(actionCatalog.length)} tags=${String(actionTagVocabulary.length)} body=${bodyDocument === null ? 'none' : String(bodyDocument.schema ?? 'missing-schema')}`
-  console.log(bootLine)
-  __bootLog(bootLine) // carrier-boot.log：启动标记 = "跑的是哪一版"的地面真值
-
-  let handle: HostChildHandle | undefined
-  const attachUrl = process.env.DSH_PET_URL ?? await readLocatorUrl()
-  let authenticated: string
-  try {
-    if (attachUrl !== undefined && attachUrl !== '') {
-      console.log(`[pet] attaching to a published pet surface: ${new URL(attachUrl).origin}`)
-      authenticated = attachUrl
-    } else {
-      // The self-spawn branch alone needs the profile machinery; the packaged
-      // carrier always arrives with DSH_PET_URL from its spawning runtime and
-      // carries none of these dependencies.
-      const [{ initProfile }, { dshHomePath }, { PROFILE_TEMPLATES }] = await Promise.all([
-        import('@deepseek-ai/dsh-app-boot'),
-        import('@deepseek-ai/dsh-home-paths'),
-        import('@deepseek-ai/dsh-official-bundles'),
-      ])
-      const template = PROFILE_TEMPLATES[PET_PROFILE_NAME]
-      if (template === undefined) throw new Error('pet: no shipped profile template named "pet"')
-      initProfile(dshHomePath('profiles', PET_PROFILE_NAME), template.bundles)
-      handle = spawnHostChild()
-      authenticated = await handle.url
-    }
-  } catch (error) {
-    new BrowserWindow({ width: 520, height: 320 }).loadURL(
-      'data:text/html;charset=utf-8,' + encodeURIComponent(
-        `<pre style="font-family:monospace;white-space:pre-wrap">dsh pet 载体启动失败：\n\n${String(error instanceof Error ? error.message : error)}` +
-        `\n\n素材目录（可配置 DSH_PET_ASSETS_DIR）：${resolveAssetsRoot()}</pre>`,
-      ),
-    )
+function setupStage(canvas: HTMLCanvasElement): void {
+  // 无 video 参数：B04 双缓冲下当前身是模块级 `video` 指针（乒乓重赋值），
+  // 参数会把它遮蔽成 boot 时的 A 元素——draw 永远上传退役元素，画布冻结
+  // 在旧身最后一帧（v2 首测实锤）。draw 闭包读指针才是"当前身"。
+  const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false })
+  if (gl === null) {
+    // No WebGL: fall back to the raw video (white matte visible, still usable).
+    canvas.replaceWith(video)
+    video.style.display = 'block'
     return
   }
+  const compile = (type: number, source: string): WebGLShader => {
+    const shader = gl.createShader(type)
+    if (shader === null) throw new Error('pet renderer: shader allocation failed')
+    gl.shaderSource(shader, source)
+    gl.compileShader(shader)
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(`pet renderer: shader compile failed: ${String(gl.getShaderInfoLog(shader))}`)
+    }
+    return shader
+  }
+  const program = gl.createProgram()
+  if (program === null) throw new Error('pet renderer: program allocation failed')
+  gl.attachShader(program, compile(gl.VERTEX_SHADER,
+    'attribute vec2 p; varying vec2 v;'
+    + 'void main(){ v = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }'))
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER,
+    'precision highp float; varying vec2 v; uniform sampler2D t; uniform float uAlpha;'
+    + 'void main(){ vec4 c = texture2D(t, v); gl_FragColor = vec4(c.rgb, c.a * uAlpha); }'))
+  gl.linkProgram(program)
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(`pet renderer: program link failed: ${String(gl.getProgramInfoLog(program))}`)
+  }
+  gl.useProgram(program)
+  const quad = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
+  const position = gl.getAttribLocation(program, 'p')
+  gl.enableVertexAttribArray(position)
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
+  const uAlpha = gl.getUniformLocation(program, 'uAlpha')
+  // B04：每层一个纹理（WeakMap 随元素回收）。
+  const textures = new WeakMap<object, WebGLTexture>()
+  const textureFor = (el: HTMLVideoElement): WebGLTexture => {
+    const existing = textures.get(el)
+    if (existing !== undefined) return existing
+    const texture = gl.createTexture()
+    if (texture === null) throw new Error('pet renderer: texture allocation failed')
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    textures.set(el, texture)
+    return texture
+  }
+  gl.enable(gl.BLEND)
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+  gl.clearColor(0, 0, 0, 0)
 
-  const window = createPetWindow()
-  // Say-side TTS: the /say pipeline's audio companion (see tts.ts). It owns
-  // the DELIVERY to the page — bubble alone when synthesis is off, bubble +
-  // voice as one message when the mp3 lands in time. Failures never touch
-  // the bubble beyond showing it alone.
-  const sayTts = createSayTts({
-    home: DSH_HOME,
-    petId: PET_ID,
-    window,
-    deliver: (text, audio) => {
-      window.webContents.send('pet:say', audio === undefined ? { text } : { text, audio })
-    },
-  })
-  window.on('resize', () => {
-    console.log(`[pet] resized: ${JSON.stringify(window.getBounds())}`)
-  })
-  // 拖拽/位置诊断落文件（stdio: 'ignore' 会吞掉 stdout 日志——2026-11-07
-  // 拖拽振荡排查时发现的盲区）。
-  const runtimeLog = (line: string): void => {
-    try { __afs(join(DSH_HOME, 'whale598', 'carrier-runtime.log'), `${new Date().toISOString()} ${line}\n`) } catch { /* ignore */ }
-  }
-  window.on('moved', () => {
-    const line = `[pet] moved: ${JSON.stringify(window.getBounds())}`
-    console.log(line)
-    runtimeLog(line)
-  })
-  const primary = screen.getPrimaryDisplay()
-  console.log(`[pet] window bounds: ${JSON.stringify(window.getBounds())} scaleFactor=${primary.scaleFactor} workarea=${JSON.stringify(primary.workArea)}`)
-  // Forward the renderer console: the pet page's own diagnostics (connection,
-  // shader, video failures) never reach a terminal otherwise.
-  // Electron 44 的 console-message 传事件对象（level 为字符串）；旧版是位置
-  // 参数——两种签名都接，诊断日志才不会全被过滤掉（实测盲区）。
-  window.webContents.on('console-message', (...args: unknown[]) => {
-    const first = args[0] as { level?: unknown; message?: unknown; lineNumber?: unknown; sourceId?: unknown } | undefined
-    let level: number | string | undefined = args.length > 1 ? args[1] as number : undefined
-    let message: string | undefined
-    let source: string | undefined
-    let line: number | undefined
-    if (typeof first === 'object' && first !== null && ('message' in first || 'level' in first)) {
-      level = typeof first.level === 'number' ? first.level : String(first.level ?? '')
-      message = typeof first.message === 'string' ? first.message : undefined
-      line = typeof first.lineNumber === 'number' ? first.lineNumber : undefined
-      source = typeof first.sourceId === 'string' ? first.sourceId : undefined
-    } else {
-      level = typeof args[1] === 'number' ? args[1] as number : undefined
-      message = typeof args[2] === 'string' ? args[2] : undefined
-      line = typeof args[3] === 'number' ? args[3] : undefined
-      source = typeof args[4] === 'string' ? args[4] : undefined
+  const draw = (): void => {
+    // B04 交叉期两层混绘：旧层恒 alpha 1 在下（桌面不透出，双身读作动作
+    // 起手的过渡影），新层按进度盖上；淡完暂停旧层并清引用。非交叉期单层。
+    const now = performance.now()
+    const prev = prevVideo
+    const fading = prev !== undefined && fadeMs > 0 && now - fadeStart < fadeMs
+    const layers: Array<{ el: HTMLVideoElement; alpha: number }> = fading && prev !== undefined
+      ? [
+        { el: prev, alpha: 1 },
+        { el: video, alpha: Math.min(1, (now - fadeStart) / fadeMs) },
+      ]
+      : [{ el: video, alpha: 1 }]
+    if (!fading && prev !== undefined) {
+      // 淡入完成：旧层退场（pause 即可，元素留在乒乓池里复用）。
+      prev.pause()
+      prevVideo = undefined
     }
-    const severity = typeof level === 'number' ? level : ({ verbose: 0, info: 1, warning: 2, error: 3 } as Record<string, number>)[level ?? ''] ?? 1
-    console.log(`[pet-renderer] ${source ?? '?'}:${String(line ?? '?')} ${message ?? ''}`)
-    if (severity >= 1) runtimeLog(`[pet-renderer:${String(level)}] ${message ?? ''} (${source ?? '?'}:${String(line ?? '?')})`)
-  })
-  window.webContents.on('did-fail-load', (_event, code, description, url) => {
-    console.log(`[pet-renderer] did-fail-load ${code} ${description} ${url}`)
-  })
-  // Right-click anywhere on the window (pet body or bubble — the click-through
-  // poller lets those through) opens the close menu: the MVP has no taskbar
-  // entry or tray, so this is the only self-service exit.
-  window.webContents.on('context-menu', () => {
-    Menu.buildFromTemplate([
-      { label: '退出 dsh pet', click: () => { window.close() } },
-    ]).popup({ window })
-  })
-  // Connection's token exchange is root-path-only (authorizeIndex admits
-  // `/?token=…`, never a subpath): load the authenticated root once to mint
-  // the browser cookie, then enter /whale598/ with it. The root load starts the
-  // Web GUI; the second navigation aborts it, so the web app is at most a
-  // flash.
-  await window.loadURL(authenticated).catch(() => { /* the cookie is minted by the 303 */ })
-  await window.loadURL(petSurfaceUrl(authenticated)).catch((error) => {
-    console.error('[pet] the pet surface failed to load:', String(error))
-  })
-  // Hand the renderer the action catalog (its /action name resolution and
-  // idle theater both consume it). The page has finished loading here, so
-  // its listener is registered and nothing is lost.
-  // B02/B03：body 自述随 catalog 一起推（渲染层的 bodyIdle/命中区消费它）——
-  // 不依赖渲染层 pet-asset fetch（该路径在实机上不稳，2026-11-07 实测）。
-  window.webContents.send('pet:catalog', {
-    character: CHARACTER,
-    actions: actionCatalog,
-    ...(bodyDocument === null ? {} : { body: bodyDocument }),
-  })
-
-  // Click-through is decided by the MAIN process: setIgnoreMouseEvents(forward)
-  // does not deliver forwarded moves on this Electron/Windows combination, so
-  // the renderer never sees the cursor. The main process knows the window
-  // bounds and the pet/bubble rects (they mirror the renderer CSS), polls the
-  // cursor, and toggles ignore accordingly — no renderer participation.
-  // The pet/bubble rects mirror the renderer CSS (pet: 340x200 bottom-center,
-  // 12px margin; bubble: 400x300 above it), computed against the CURRENT
-  // window size every poll — a fixed rect desyncs the moment the window
-  // changes size for any reason.
-  const PET_SIZE = { width: 340, height: 200 }
-  const BUBBLE_SIZE = { width: 400, height: 300 }
-  let bubbleVisible = false
-  // The v3 action witness, ONE object: acceptance writes id/action/
-  // requestedBy/startedAt (endedAt/durationMs null), the renderer's clip-end
-  // report backfills endedAt/durationMs IN PLACE against the same id — the
-  // four acceptance fields never move, so an id-matching poller cannot
-  // misread a newer action's record. Consumers poll this instead of the
-  // renderer's override, which may set and clear within a tick. A
-  // pet-local one-shot (touch reaction, work-landing celebrate) writes its
-  // record on completion with id: null. null = no record yet (constant
-  // output — the field is always present in /status).
-  let lastAction: {
-    id: string | null
-    action: string
-    requestedBy: 'tool' | 'user'
-    startedAt: number
-    durationMs: number | null
-    endedAt: number | null
-  } | null = null
-  // Tool-initiated /action requests awaiting their completion report: the
-  // renderer echoes the requestId when the clip ends, so the witness can
-  // carry the REQUESTED action name (not the clip file) and the actor.
-  // Swept on each acceptance: a report that never comes (a clip id the
-  // renderer cannot resolve) must not let the map grow without bound.
-  const pendingActionRequests = new Map<string, { requested: string; at: number }>()
-  // The v2 roaming area (§6 /world): null = unset (default work-area
-  // clamping applies). Absent/unsupported is NOT expressible here — this
-  // implementation always supports /world, so /status reports an explicit
-  // null until one is set.
-  let activeWorld: Rect | null = readSavedWorld()
-  let lastIgnore: boolean | undefined
-  // B01：上一次发给渲染层的光标偏移——变化 ≥4px 才重发，压 IPC 噪音。
-  let lastCursorOffset = Number.POSITIVE_INFINITY
-  const updateClickThrough = (): void => {
-    try {
-      const bounds = window.getBounds()
-      const cursor = screen.getCursorScreenPoint()
-      const localX = cursor.x - bounds.x
-      const localY = cursor.y - bounds.y
-      const centeredX = (width: number): number => (bounds.width - width) / 2
-      const petRect = { x: centeredX(PET_SIZE.width), y: bounds.height - 12 - PET_SIZE.height, ...PET_SIZE }
-      const bubbleRect = { x: centeredX(BUBBLE_SIZE.width), y: bounds.height - 224 - BUBBLE_SIZE.height, ...BUBBLE_SIZE }
-      const inRect = (rect: { x: number; y: number; width: number; height: number }): boolean =>
-        localX >= rect.x && localX <= rect.x + rect.width
-          && localY >= rect.y && localY <= rect.y + rect.height
-      const overInteractive = inRect(petRect) || (bubbleVisible && inRect(bubbleRect))
-      if (lastIgnore !== overInteractive) {
-        console.log(`[pet] ignore -> ${String(!overInteractive)} cursorDIP=${cursor.x},${cursor.y} bounds=${JSON.stringify(bounds)}`)
-        lastIgnore = overInteractive
-      }
-      window.setIgnoreMouseEvents(!overInteractive)
-      // B01 朝向：同一个 120ms 轮询顺带喂光标偏移（右为正）。渲染层做
-      // 迟滞（±20px）与 40ms 去抖，main 只供数不判定。
-      const offsetX = cursor.x - (bounds.x + bounds.width / 2)
-      if (Math.abs(offsetX - lastCursorOffset) >= 4) {
-        lastCursorOffset = offsetX
-        window.webContents.send('pet:cursor', { offsetX })
-      }
-    } catch (error) {
-      console.error(`[pet] click-through poll failed: ${String(error)}`)
+    if (video.videoWidth === 0) return
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+    }
+    gl.viewport(0, 0, canvas.width, canvas.height)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    for (const { el, alpha } of layers) {
+      // 未就绪的层跳帧（incoming 首帧解码前不画，旧层还满屏顶着——无空窗）。
+      if (el.readyState < 2 || el.videoWidth === 0) continue
+      gl.bindTexture(gl.TEXTURE_2D, textureFor(el))
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el)
+      gl.uniform1f(uAlpha, alpha)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     }
   }
-  ipcMain.on('pet:bubble-visibility', (event, visible: unknown) => {
-    try {
-      if (event.sender !== window.webContents) return
-      bubbleVisible = visible === true
-    } catch (error) {
-      console.error('[pet] bubble-visibility failed:', String(error))
-    }
-  })
-  setInterval(updateClickThrough, 120)
-
-  // ── manual drag ───────────────────────────────────────────────────────────
-  // The believed origin: initialized once after creation and updated only by
-  // our own setBounds — never re-read from getBounds(), which reports whatever
-  // DWM last re-measured and would import the ratchet drift into the math.
-  let windowOrigin = { x: window.getBounds().x, y: window.getBounds().y }
-  let dragAnchor: {
-    pointerX: number
-    pointerY: number
-    originX: number
-    originY: number
-  } | undefined
-  ipcMain.on('pet:drag-start', (event, screenX: unknown, screenY: unknown) => {
-    try {
-      if (event.sender !== window.webContents) return
-      if (typeof screenX !== 'number' || typeof screenY !== 'number'
-        || !Number.isFinite(screenX) || !Number.isFinite(screenY)) return
-      dragAnchor = { pointerX: screenX, pointerY: screenY, originX: windowOrigin.x, originY: windowOrigin.y }
-    } catch (error) {
-      console.error('[pet] drag-start failed:', String(error), 'args:', JSON.stringify([screenX, screenY]))
-    }
-  })
-  ipcMain.on('pet:drag-move', (event, screenX: unknown, screenY: unknown) => {
-    try {
-      const anchor = dragAnchor
-      if (event.sender !== window.webContents || anchor === undefined) return
-      if (typeof screenX !== 'number' || typeof screenY !== 'number'
-        || !Number.isFinite(screenX) || !Number.isFinite(screenY)) {
-        console.error(`[pet] drag-move rejected args: ${JSON.stringify([screenX, screenY])}`)
-        return
-      }
-      const next = {
-        x: Math.round(anchor.originX + (screenX - anchor.pointerX)),
-        y: Math.round(anchor.originY + (screenY - anchor.pointerY)),
-        width: WINDOW_SIZE.width,
-        height: WINDOW_SIZE.height,
-      }
-      // The roaming area binds the DRAG too (§6: location always sits inside
-      // a set world) — an unset world leaves the default work-area regime.
-      if (activeWorld !== null) {
-        next.x = clampInto(next.x, activeWorld.x, activeWorld.x + activeWorld.width - WINDOW_SIZE.width)
-        next.y = clampInto(next.y, activeWorld.y, activeWorld.y + activeWorld.height - WINDOW_SIZE.height)
-      }
-      if (next.x === windowOrigin.x && next.y === windowOrigin.y) return
-      windowOrigin = { x: next.x, y: next.y }
-      window.setBounds(next)
-    } catch (error) {
-      console.error('[pet] drag-move failed:', String(error), 'args:', JSON.stringify([screenX, screenY]))
-    }
-  })
-  ipcMain.on('pet:drag-end', (event) => {
-    try {
-      if (event.sender !== window.webContents) return
-      dragAnchor = undefined
-      // Remember where the user parked the pet (per-pet state file, per the
-      // whale598 ownership rule); restored on the next launch and clearable
-      // from the settings page.
-      try {
-        mkdirSync(join(DSH_HOME, 'whale598', PET_ID), { recursive: true })
-      } catch { /* the directory usually exists; the write below reports */ }
-      void writeFile(petStateFile('pet-window.json'), `${JSON.stringify(windowOrigin)}\n`, 'utf8')
-        .catch((error: unknown) => { console.error('[pet] could not save the window position:', String(error)) })
-    } catch (error) {
-      console.error('[pet] drag-end failed:', String(error))
-    }
-  })
-
-  // ── roaming-area helpers (§6 /world) ──────────────────────────────────────
-  const currentLocation = (): Rect => {
-    const bounds = window.getBounds()
-    return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+  // 双缓冲后 rVFC 只能挂一个元素——统一 rAF 驱动（两层都要喂；rAF 空转的
+  // 成本低于逐层 rVFC 管理的复杂度）。
+  const schedule = (): void => {
+    requestAnimationFrame(() => { draw(); schedule() })
   }
-  const writeWorld = (): void => {
-    try {
-      mkdirSync(join(DSH_HOME, 'whale598', PET_ID), { recursive: true })
-    } catch { /* the directory usually exists; the write below reports */ }
-    void writeFile(petStateFile('pet-world.json'), `${JSON.stringify(activeWorld)}\n`, 'utf8')
-      .catch((error: unknown) => { console.error('[pet] could not save the roaming area:', String(error)) })
-  }
-  // Pull the window rect fully inside the roaming area (a world smaller than
-  // the window pins the low edge). Returns whether the window moved.
-  const clampWindowIntoWorld = (): boolean => {
-    if (activeWorld === null) return false
-    const bounds = window.getBounds()
-    const x = clampInto(bounds.x, activeWorld.x, activeWorld.x + activeWorld.width - WINDOW_SIZE.width)
-    const y = clampInto(bounds.y, activeWorld.y, activeWorld.y + activeWorld.height - WINDOW_SIZE.height)
-    if (x === bounds.x && y === bounds.y) return false
-    windowOrigin = { x, y }
-    window.setBounds({ x, y, width: WINDOW_SIZE.width, height: WINDOW_SIZE.height })
-    return true
-  }
-  // The default regime (world unset): the whole window rect must fit some
-  // display's work area (readSavedPosition's rule); when none does, clamp
-  // fully into the primary work area.
-  const clampWindowIntoDefaultArea = (): boolean => {
-    const bounds = window.getBounds()
-    const fits = (area: Electron.Rectangle): boolean =>
-      bounds.x >= area.x && bounds.y >= area.y
-      && bounds.x + bounds.width <= area.x + area.width
-      && bounds.y + bounds.height <= area.y + area.height
-    if (screen.getAllDisplays().some(display => fits(display.workArea))) return false
-    const primary = screen.getPrimaryDisplay().workArea
-    const x = clampInto(bounds.x, primary.x, primary.x + primary.width - WINDOW_SIZE.width)
-    const y = clampInto(bounds.y, primary.y, primary.y + primary.height - WINDOW_SIZE.height)
-    if (x === bounds.x && y === bounds.y) return false
-    windowOrigin = { x, y }
-    window.setBounds({ x, y, width: WINDOW_SIZE.width, height: WINDOW_SIZE.height })
-    return true
-  }
-
-  // ── control interface ─────────────────────────────────────────────────────
-  // The driver's four operations (§6 of DSH-PET.md) as local HTTP, hosted by
-  // the main process (renderers cannot listen); the renderer consumes them
-  // over IPC. v1 is loopback without auth — the callers are this machine's
-  // runtime driver and petctl.
-  const pendingInteractions = new Map<string, ServerResponse>()
-  // The renderer's latest self-report; the /status mirror serves it beside the
-  // main process's own facts.
-  let statusSnapshot: Record<string, unknown> = { state: 'idle' }
-  // §6 chat 上行：每宠至多一条在途——该事件被 /events 响应实际携出前
-  // 不收新输入（输入卡模态），携出即发送成功。
-  let pendingChatSeq: number | null = null
-  const touchEvents: Array<{ seq: number; type: 'touch' | 'chat'; part?: string; text?: string; at: number }> = []
-  let touchSeq = 0
-  // Parked GET /events?hold=N requests, woken the moment an event lands.
-  const eventWaiters = new Set<() => void>()
-  const wakeEventWaiters = (): void => {
-    for (const waiter of [...eventWaiters]) waiter()
-  }
-  ipcMain.on('pet:touch', (event, touch: { part?: unknown; rects?: unknown }) => {
-    try {
-      if (event.sender !== window.webContents) return
-      const part = touch?.part === 'head' || touch?.part === 'body'
-        || touch?.part === 'tail' || touch?.part === 'hand' ? touch.part : 'unknown'
-      touchSeq += 1
-      touchEvents.push({ seq: touchSeq, type: 'touch', part, at: Date.now() })
-      if (touchEvents.length > 200) touchEvents.splice(0, touchEvents.length - 200)
-      wakeEventWaiters()
-      // B03 诊断：part + 渲染层可用的分区矩形一起落盘——tail 摸不到时先看这
-      // 行（rects 缺 tail = body.json 没送达渲染层）。
-      const rects = typeof touch?.rects === 'string' ? touch.rects : ''
-      console.log(`[pet] touch #${String(touchSeq)} (${part}) rects=${rects}`)
-      runtimeLog(`[pet-touch] #${String(touchSeq)} part=${part} rects=${rects}`)
-    } catch (error) {
-      console.error('[pet] touch failed:', String(error))
-    }
-  })
-  ipcMain.handle('pet:chat', (event, message: { text?: unknown }) => {
-    try {
-      if (event.sender !== window.webContents) return { ok: false }
-      const text = typeof message?.text === 'string' ? message.text.trim().slice(0, 2000) : ''
-      if (text === '') return { ok: false, reason: 'empty' }
-      if (pendingChatSeq !== null) return { ok: false, reason: 'busy' }
-      touchSeq += 1
-      pendingChatSeq = touchSeq
-      touchEvents.push({ seq: touchSeq, type: 'chat', text, at: Date.now() })
-      if (touchEvents.length > 200) touchEvents.splice(0, touchEvents.length - 200)
-      wakeEventWaiters()
-      console.log(`[pet] chat #${String(touchSeq)} (${String(text.length)} chars)`)
-      return { ok: true }
-    } catch (error) {
-      console.error('[pet] chat failed:', String(error))
-      return { ok: false }
-    }
-  })
-  ipcMain.on('pet:status-report', (event, snapshot: Record<string, unknown>) => {
-    try {
-      if (event.sender !== window.webContents) return
-      statusSnapshot = snapshot
-    } catch (error) {
-      console.error('[pet] status-report failed:', String(error))
-    }
-  })
-  ipcMain.on('pet:action-done', (event, done: { action?: unknown; durationMs?: unknown; requestId?: unknown }) => {
-    try {
-      if (event.sender !== window.webContents) return
-      if (typeof done?.action !== 'string') return
-      const requestId = typeof done.requestId === 'string' ? done.requestId : undefined
-      const durationMs = typeof done.durationMs === 'number' && Number.isFinite(done.durationMs)
-        ? done.durationMs
-        : null
-      const at = Date.now()
-      const pending = requestId !== undefined ? pendingActionRequests.get(requestId) : undefined
-      if (pending !== undefined && requestId !== undefined) pendingActionRequests.delete(requestId)
-      if (requestId !== undefined && lastAction !== null && lastAction.id === requestId && lastAction.endedAt === null) {
-        // Completion backfill IN PLACE: the four acceptance fields stay
-        // frozen, so an id-matching poller never misreads this record.
-        lastAction.durationMs = durationMs
-        lastAction.endedAt = at
-        return
-      }
-      // A pet-local one-shot (touch reaction, work-landing celebrate) never
-      // had an /action acceptance: write the witness directly, the clip's
-      // own duration approximating its start.
-      lastAction = {
-        id: requestId ?? null,
-        action: pending !== undefined ? pending.requested : done.action,
-        requestedBy: pending !== undefined ? 'tool' : 'user',
-        startedAt: durationMs !== null ? at - durationMs : at,
-        durationMs,
-        endedAt: at,
-      }
-    } catch (error) {
-      console.error('[pet] action-done failed:', String(error))
-    }
-  })
-  ipcMain.on('pet:interaction-answer', (event, message: { id?: unknown; answer?: unknown }) => {
-    try {
-      if (event.sender !== window.webContents) return
-      if (typeof message?.id !== 'string' || !pendingInteractions.has(message.id)) return
-      const response = pendingInteractions.get(message.id)
-      pendingInteractions.delete(message.id)
-      response?.end(` ${JSON.stringify({ ok: true, answer: message.answer ?? null })}`)
-    } catch (error) {
-      console.error('[pet] interaction-answer failed:', String(error))
-    }
-  })
-  const control = createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    const send = (status: number, body: unknown): void => {
-      res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-      res.end(JSON.stringify(body))
-    }
-    if (req.method === 'GET' && url.pathname === '/events') {
-      // The poll endpoint for driver-side consumption: everything the user
-      // did to the pet since `since`, plus the newest seq (a smaller newest
-      // than the caller's last means the pet restarted; re-pull from 0).
-      // v4 long-poll: `hold` (seconds, clamped ≤30) parks the request while
-      // the queue is empty and answers the instant an event lands or the
-      // budget lapses (an empty batch — the caller re-arms). Backlog and a
-      // rewind (`latest < since` = the pet restarted) always answer
-      // immediately, hold or not.
-      const since = Number(url.searchParams.get('since') ?? '0')
-      const rawHold = Number(url.searchParams.get('hold') ?? '0')
-      const hold = Number.isFinite(rawHold) ? Math.min(30, Math.max(0, rawHold)) : 0
-      const answer = (): void => {
-        const events = touchEvents.filter(entry => entry.seq > since)
-        // chat 模态释放：事件被本响应实际携出 = 发送成功（§6 修订）
-        if (pendingChatSeq !== null && events.some(entry => entry.seq === pendingChatSeq)) {
-          pendingChatSeq = null
-        }
-        send(200, { events, latest: touchSeq })
-      }
-      const hasBacklog = touchEvents.some(entry => entry.seq > since)
-      if (hold <= 0 || touchSeq < since || hasBacklog) {
-        answer()
-        return
-      }
-      let settled = false
-      const finish = (): void => {
-        if (settled) return
-        settled = true
-        eventWaiters.delete(finish)
-        clearTimeout(timer)
-        answer()
-      }
-      const timer = setTimeout(finish, hold * 1000)
-      eventWaiters.add(finish)
-      res.on('close', () => {
-        // The caller left (restart, crash, re-discovery): release without
-        // writing to the dead socket.
-        if (settled) return
-        settled = true
-        eventWaiters.delete(finish)
-        clearTimeout(timer)
-      })
-      return
-    }
-    if (req.method === 'GET' && url.pathname === '/capabilities') {
-      // v4: the endpoints/events word-lists retired — the version field
-      // carries endpoint existence, the event body's own `type` field
-      // carries event-type tolerance (§6 revision record).
-      // 2026-11-06: actionCatalog/actionTagVocabulary/tagged are additive —
-      // per §6, added fields do not bump the contract version.
-      send(200, {
-        contractVersion: 4,
-        states: ['idle', 'thinking', 'working', 'error'],
-        // The pet's own action menu, scanned from the media tree at boot —
-        // celebrate first (the universal alias), then every playable clip.
-        actions: actionIds,
-        // Body-owned catalog: tags are whatever this body declares in
-        // characters/whale/actions.tags.json; no cross-body vocabulary.
-        actionCatalog: actionCatalog.map(entry => ({
-          id: entry.id,
-          tags: entry.tags ?? [],
-          ...(entry.energy === undefined ? {} : { energy: entry.energy }),
-          ...(entry.durationHintMs === undefined ? {} : { durationHintMs: entry.durationHintMs }),
-          ...(entry.textInFrame === undefined ? {} : { textInFrame: entry.textInFrame }),
-          ...(entry.loop === undefined ? {} : { loop: entry.loop }),
-        })),
-        actionTagVocabulary,
-        tagged,
-        interactions: ['approval', 'question'],
-      })
-      return
-    }
-    if (req.method === 'GET' && url.pathname === '/body') {
-      // body/1 is a separate channel: a legacy pet 404s here, and the driver
-      // treats that as "no self-description" without touching v4.
-      if (bodyDocument === null) {
-        send(404, { error: 'no body.json' })
-        return
-      }
-      send(200, bodyDocument)
-      return
-    }
-    if (req.method === 'POST' && url.pathname === '/expression') {
-      // Contract-test stub: only the whale-test fixture acknowledges an
-      // expression. The production body has no expression layer; a real body
-      // replaces this with its own renderer.
-      if (bodyDocument === null || bodyDocument.bodyId !== 'whale-test') {
-        send(422, { ok: false, error: 'expression layer not supported' })
-        return
-      }
-      // The /expression stub sits before the shared POST body reader below,
-      // so it reads and parses its own request body (event style — this
-      // handler is not async).
-      let raw = ''
-      req.setEncoding('utf8')
-      req.on('data', (chunk: string) => { raw += chunk })
-      req.on('error', () => { send(400, { error: 'request error' }) })
-      req.on('end', () => {
-        let body: Record<string, unknown>
-        try {
-          body = JSON.parse(raw) as Record<string, unknown>
-        } catch {
-          send(400, { error: 'invalid json' })
-          return
-        }
-        const expression = typeof body.expression === 'string' ? body.expression.trim() : ''
-        if (expression === '') {
-          send(422, { ok: false, error: 'expression required' })
-          return
-        }
-        console.log(`[pet] expression test: ${expression}`)
-        send(200, { ok: true, expression })
-      })
-      return
-    }
-    if (url.pathname === '/status') {
-      // The mirror: what the pet currently is doing, where it stands. v2:
-      // `location` (the pet-body rect) + `world` (the roaming area, null =
-      // unset) replace the retired `window`; v3: `lastAction` is ONE object
-      // — accepted-on-write, completion backfilled in place, null = no
-      // record yet (constant output). `bubble` is the delivery receipt for
-      // /say; a conditionally-absent field is a JSON.stringify footgun, so
-      // both witnesses stay always-present.
-      const bounds = window.getBounds()
-      send(200, {
-        ...statusSnapshot,
-        bubble: bubbleVisible,
-        lastAction,
-        interaction: pendingInteractions.size > 0,
-        location: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-        world: activeWorld,
-        visible: window.isVisible(),
-        pid: process.pid,
-      })
-      return
-    }
-    if (req.method !== 'POST') {
-      send(405, { error: 'POST only' })
-      return
-    }
-    let raw = ''
-    req.setEncoding('utf8')
-    req.on('data', (chunk: string) => { raw += chunk })
-    req.on('end', () => {
-      let body: Record<string, unknown>
-      try {
-        body = JSON.parse(raw) as Record<string, unknown>
-      } catch {
-        send(400, { error: 'invalid json' })
-        return
-      }
-      if (url.pathname === '/state') {
-        console.log(`[pet] control /state ${JSON.stringify(body)}`)
-        window.webContents.send('pet:set-state', body)
-        send(200, { ok: true })
-        return
-      }
-      if (url.pathname === '/say') {
-        // Fire-and-forget: the driver says something through the pet; the
-        // bubble self-dismisses and never blocks a turn. The TTS module owns
-        // the delivery: immediate bubble when synthesis is off, otherwise
-        // bubble + voice as ONE message once the mp3 lands (held ≤ holdMs —
-        // text and voice appear together instead of the voice trailing).
-        const text = typeof body.text === 'string' ? body.text.slice(0, 200) : ''
-        sayTts.deliver(text)
-        send(200, { ok: true })
-        return
-      }
-      if (url.pathname === '/action') {
-        // Validate at the boundary: the driver pre-validates against
-        // /capabilities, but a raw consumer gets this pet's own menu here.
-        // A rejected request is NOT recorded as an action (no requestId, no
-        // forwarding) so the wait machinery never waits on nothing.
-        const requested = typeof body.action === 'string' ? body.action : 'unknown'
-        if (requested !== 'celebrate' && !actionCatalog.some(entry => entry.id === requested)) {
-          send(422, { ok: false, error: `unknown action "${requested}"`, available: actionIds })
-          return
-        }
-        // Record the request observably: one-shot playback is fire-and-forget
-        // and the renderer's override is not a reliable witness (it may
-        // set/clear within one tick) — consumers poll the v3 witness instead
-        // of guessing from override. The requestId threads through the
-        // renderer's completion report, so the witness names the REQUESTED
-        // action and pet_do(wait) can match precisely.
-        const requestId = randomUUID()
-        const startedAt = Date.now()
-        lastAction = {
-          id: requestId,
-          action: requested,
-          requestedBy: 'tool',
-          startedAt,
-          durationMs: null,
-          endedAt: null,
-        }
-        for (const [key, value] of pendingActionRequests) {
-          if (startedAt - value.at > 120_000) pendingActionRequests.delete(key)
-        }
-        pendingActionRequests.set(requestId, { requested, at: startedAt })
-        window.webContents.send('pet:action', { ...body, requestId })
-        send(200, { ok: true, action: requested, requestId })
-        return
-      }
-      if (url.pathname === '/interaction') {
-        // Long-poll: the response IS the user's choice. A driver that gives
-        // up aborts the connection; the close handler withdraws the bubble.
-        const id = randomUUID()
-        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-        pendingInteractions.set(id, res)
-        // Leading whitespace is valid JSON framing: keepalive spaces stop an
-        // idle-body timeout on the driver's fetch without touching the answer.
-        const keepalive = setInterval(() => { res.write(' ') }, 60_000)
-        res.on('close', () => {
-          clearInterval(keepalive)
-          if (pendingInteractions.delete(id)) {
-            window.webContents.send('pet:interaction-cancel', { id })
-          }
-        })
-        window.webContents.send('pet:interaction', { id, ...body })
-        return
-      }
-      if (url.pathname === '/world') {
-        // §6 v2: set the roaming area. Effective IMMEDIATELY — a pet outside
-        // the rect is clamped in before the response leaves. `{"reset":true}`
-        // returns to default work-area clamping. The 200 body carries the
-        // EFFECTIVE rect (not a request echo — an implementation may shrink
-        // or clamp) and the post-clamp location. A rect that is not four
-        // finite positive numbers, or that intersects no display's work
-        // area, is a 422, not a silent no-op.
-        if (body.reset === true) {
-          activeWorld = null
-          writeWorld()
-          const moved = clampWindowIntoDefaultArea()
-          send(200, { ok: true, world: null, location: currentLocation(), moved })
-          return
-        }
-        const rect = rectOf(body)
-        if (rect === null || rect.width <= 0 || rect.height <= 0
-          || !screen.getAllDisplays().some(display => rectsIntersect(rect, display.workArea))) {
-          send(422, { ok: false, error: 'invalid world: expected {x,y,width,height} intersecting a display work area, or {"reset":true}' })
-          return
-        }
-        activeWorld = rect
-        writeWorld()
-        const moved = clampWindowIntoWorld()
-        send(200, { ok: true, world: activeWorld, location: currentLocation(), moved })
-        return
-      }
-      send(404, { error: 'unknown endpoint' })
-    })
-  })
-  control.listen(Number(process.env.DSH_PET_HTTP_PORT ?? 0), '127.0.0.1', () => {
-    const address = control.address()
-    const port = typeof address === 'object' && address !== null ? address.port : 0
-    console.log(`[pet] control interface on 127.0.0.1:${String(port)}`)
-    // Registry publish: one file per pet under whale598/pet-http.d/ — no
-    // shared name, no last-writer-wins race (the incident class that produced
-    // repeated swap blindness). The registry is the SINGLE discovery source:
-    // the legacy root pet-http.d/ and the single-file manifests are retired
-    // on both the write and the read side.
-    const manifest = `${JSON.stringify({ port, pid: process.pid, since: Date.now(), pet: PET_ID, kind: PET_KIND })}\n`
-    const registryDir = join(DSH_HOME, 'whale598', 'pet-http.d')
-    try {
-      mkdirSync(registryDir, { recursive: true })
-    } catch (error: unknown) {
-      console.error('[pet] could not create the pet registry:', String(error))
-    }
-    const writeManifest = (): void => {
-      void writeFile(join(registryDir, `${PET_ID}.json`), manifest, 'utf8')
-        .catch((error: unknown) => { console.error('[pet] could not write the registry entry:', String(error)) })
-    }
-    writeManifest()
-    // Re-assert on a cadence so a stale publisher cannot shadow a live pet.
-    setInterval(writeManifest, 10_000)
-  })
-
-  // Runtime watchdog: a driver-spawned pet outlives nothing. Dispose-time
-  // kill only runs on the runtime's graceful shutdown; a terminated runtime
-  // leaves a detached pet orphaned on the desktop. Poll the spawning
-  // runtime's pid and exit with it.
-  //
-  // Only ESRCH means gone: a confined carrier can run at a lower integrity
-  // level than the runtime, where probing a heavier process answers EPERM —
-  // "it exists, you may not signal it". Counting that as death made the pet
-  // quit ten seconds after an otherwise fine start.
-  const runtimePid = Number(process.env.DSH_PET_RUNTIME_PID)
-  if (Number.isInteger(runtimePid) && runtimePid > 0) {
-    setInterval(() => {
-      try {
-        process.kill(runtimePid, 0)
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return
-        console.log('[pet] the spawning runtime is gone; exiting')
-        app.quit()
-      }
-    }, 10_000)
-  }
-
-  window.on('closed', () => {
-    // The window is the carrier's whole surface: closing it tears the profile down.
-    void handle?.shutdown()
-  })
-  app.on('before-quit', (event) => {
-    // Withdraw our registry entry (and the legacy mirror) so consumers never
-    // find a dead port in pet-http.d/ — stale entries were the "旧端点残留"
-    // incident class. Best effort: a killed carrier leaves the file, and the
-    // readers' pid+probe validation is the backstop.
-    for (const file of [`whale598/pet-http.d/${PET_ID}.json`, `pet-http.d/${PET_ID}.json`, `pet-http-${PET_ID}.json`, 'whale598/pet-http.d/electron.json']) {
-      void rm(join(DSH_HOME, file), { force: true }).catch(() => { /* best effort */ })
-    }
-    if (handle === undefined) return
-    event.preventDefault()
-    const closing = handle.shutdown()
-    handle = undefined
-    void closing.then(() => app.quit())
-  })
+  schedule()
 }
 
-app.on('window-all-closed', () => {
-  app.quit()
+// ── state machine ───────────────────────────────────────────────────────────
+
+let baseState: BaseState = 'idle'
+let override: 'waiting_approval' | 'waiting_question' | null = null
+let errorUntil = 0
+
+/** 片段切换的交叉时长（body.json capabilities.transition，0-500 钳制）。
+ * toIdle（动作收尾回到待机）用更从容的 toIdleMs，起手用 defaultMs。 */
+function transitionMsFor(toIdle: boolean): number {
+  const t = _bodyTransitions
+  if (t === undefined) return 0
+  return Math.max(0, toIdle ? t.toIdleMs : t.defaultMs)
+}
+
+/** 拖拽/异常路径的交叉终局：旧层立即退场，屏上永远只有一个身形。
+ * （v1 实测：拖拽撞上交叉窗口会看到两个身位。） */
+function finalizeFade(): void {
+  const prev = prevVideo
+  if (prev !== undefined) {
+    prev.pause()
+    prevVideo = undefined
+    fadeMs = 0
+  }
+}
+
+/** B04 v2 片段切换：固定元素乒乓 + under-lay 交叉淡入。无 GL 或零交叉时长
+ * 降级为直换（旧层立即暂停）。同源重入（状态重渲染）= 同步 loop 标记 +
+ * 确保播放，不重启不换层。 */
+function switchClip(source: string, loop: boolean, transitionMs: number): void {
+  if (video.src === source) {
+    video.loop = loop
+    void video.play().catch(() => { /* autoplay muted: always allowed */ })
+    return
+  }
+  const outgoing = video
+  // v2 修复核心：incoming 永远是"另一块"固定元素，与全局指针无关——
+  // v1 用 `outgoing === videoB ? video : videoB` 算 incoming，返回切换时
+  // video 已指向 outgoing，塌缩成自交叉自暂停（单动作后冻结的根因）。
+  const incoming = outgoing === videoA ? videoB : videoA
+  // 在途交叉先终局：换层即旧层的旧层退场，避免泄漏播放或冻结垫底。
+  finalizeFade()
+  incoming.src = source
+  incoming.loop = loop
+  void incoming.play().catch(() => { /* autoplay muted: always allowed */ })
+  if (glFailed) {
+    // 无 GL 的降级：可见节点直换（无交叉能力）。outgoing 可能已被上一次
+    // 直换摘出 DOM——无父节点时直接挂到 body。
+    incoming.style.display = 'block'
+    if (outgoing.parentNode !== null) outgoing.parentNode.replaceChild(incoming, outgoing)
+    else document.body.appendChild(incoming)
+  } else if (transitionMs > 0) {
+    // under-lay 交叉：旧层保持 alpha 1 继续垫底，新层按进度盖上；淡入
+    // 完成后由 draw() 统一暂停旧层。outgoing 与 incoming 恒为不同元素。
+    prevVideo = outgoing
+    fadeStart = performance.now()
+    fadeMs = transitionMs
+  } else {
+    outgoing.pause()
+  }
+  video = incoming
+}
+
+function play(key: string): void {
+  const source = animationSource(key)
+  // State animations loop (a state persists until an event changes it);
+  // the celebration is a one-shot that hands back via its ended event.
+  switchClip(source, key !== 'celebrate', key === 'idle' ? transitionMsFor(true) : transitionMsFor(false))
+}
+
+function render(): void {
+  if (Date.now() < errorUntil) {
+    play('error')
+  } else if (override !== null) {
+    play('waiting')
+  } else if (baseState === 'working') {
+    play('working')
+  } else {
+    play(baseState)
+  }
+  scheduleTheater()
+  reportStatus()
+}
+
+
+function setBase(state: BaseState): void {
+  if (baseState === state) return
+  const finishedWork = baseState === 'working' && state === 'idle'
+  baseState = state
+  if (state !== 'idle') {
+    // 离开 idle：待机计时取消，bodyRuntime.idleNextAt 一并清零（过期值
+    // 留在 /status 里会误导"她下一次自己动是什么时候"）。
+    idleNextAt = 0
+    if (theaterTimer !== undefined) {
+      // Leaving idle cancels the pending theater clip; re-entering idle
+      // re-arms through render().
+      clearTimeout(theaterTimer)
+      theaterTimer = undefined
+    }
+  }
+  if (finishedWork) {
+    // One celebration hop when a turn lands back at idle.
+    playOneShot('celebrate')
+    return
+  }
+  render()
+}
+
+/**
+ * Play a one-shot animation and hand control back when it ends. Recovery must
+ * not depend on `ended` alone: a source that fails to load never ends and
+ * would freeze the state machine on the stale frame — `error` hands back too.
+ * Loop must be off or `ended` never fires (it stays on from looping state
+ * animations).
+ */
+function playOneShot(key: string, requestId?: string): void {
+  playOneShotAt(ANIMATION[key]?.[0] ?? { dir: 'click', file: key }, requestId)
+}
+
+function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirror?: boolean }): void {
+  const source = `pet-asset:///${CHARACTER}/videos/${name.dir}/${encodeURIComponent(name.file)}.webm`
+  if (video.src === source) return
+  oneShotActive = true
+  // B01：播放期间朝向锁定。文字片段（noMirror）在 facing=left 时临时锁
+  // right（素材朝向即 right，镜像会反写文字），播完按最后已知光标偏移重判。
+  facingLocked = true
+  const facingBeforeLock = facing
+  if (opts?.noMirror === true && facing !== 'right') {
+    facing = 'right'
+    applyFacing()
+  }
+  const handBack = (): void => {
+    video.onended = null
+    video.onerror = null
+    oneShotActive = false
+    facingLocked = false
+    if (lastCursorOffsetX !== undefined) {
+      const restored = facingForOffset(lastCursorOffsetX, facingBeforeLock)
+      if (restored !== facing) {
+        facing = restored
+        applyFacing()
+      }
+    } else if (facing !== facingBeforeLock) {
+      facing = facingBeforeLock
+      applyFacing()
+    }
+    // Report completion with the clip's own duration — the one observable
+    // trace that a one-shot actually FINISHED (override/animation are not).
+    globals.petDesktop?.reportActionDone({
+      action: name.file,
+      durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : undefined,
+      ...(requestId === undefined ? {} : { requestId }),
+    })
+    render()
+  }
+  // B04：切层先于挂钩——onended/onerror 必须落在即将播放的新身元素上
+  // （switchClip 已把 video 指到 incoming 并带交叉起播）。
+  switchClip(source, false, transitionMsFor(false))
+  video.onended = handBack
+  video.onerror = handBack
+  // past the same-src early return above: the stage really changed — record
+  // it for bodyRuntime.lastClip (the "最近播放的片段" the B08 docstring
+  // promises; a video.src snapshot structurally misses the gesture window).
+  lastPlayedClip = `${name.file}.webm`
+}
+
+function flashError(): void {
+  errorUntil = Date.now() + 6_000
+  render()
+  setTimeout(render, 6_100)
+}
+
+// ── action catalog + idle theater ───────────────────────────────────────────
+
+/** The pet's playable clips, scanned by the main process at boot and pushed
+ * over IPC: what /action names resolve against and where the idle theater
+ * draws from. Populated by the `pet:catalog` push (main sends it once the
+ * page has loaded). Entries carry the body 迭代的两个池标记：idleEligible
+ * （B02 待机白名单）与 noMirror（B01 文字镜像豁免，来源 text_clips.json）。 */
+type CatalogClip = AnimationName & { id: string; tags?: string[]; idleEligible?: boolean; noMirror?: boolean }
+
+const actionCatalog = new Map<string, CatalogClip>()
+
+globals.petDesktop?.onCatalog?.((catalog) => {
+  const entries = (catalog as { actions?: unknown }).actions
+  if (!Array.isArray(entries)) return
+  actionCatalog.clear()
+  for (const entry of entries) {
+    const record = entry as { id?: unknown; dir?: unknown; file?: unknown; tags?: unknown; idleEligible?: unknown; noMirror?: unknown }
+    if (typeof record.id !== 'string' || typeof record.dir !== 'string' || typeof record.file !== 'string') continue
+    const entryTags = Array.isArray(record.tags) ? record.tags.filter((t): t is string => typeof t === 'string') : undefined
+    actionCatalog.set(record.id, {
+      id: record.id,
+      dir: record.dir,
+      file: record.file,
+      ...(entryTags !== undefined && entryTags.length > 0 ? { tags: entryTags } : {}),
+      ...(record.idleEligible === true ? { idleEligible: true } : {}),
+      ...(record.noMirror === true ? { noMirror: true } : {}),
+    })
+  }
+  // B02/B03：body 自述随 catalog 推送（main 已读好 body.json——IPC 主路径，
+  // 实测渲染层 pet-asset fetch 不稳）。推送未带 body 时回落 fetch。
+  const pushedBody = (catalog as { body?: unknown }).body
+  if (typeof pushedBody === 'object' && pushedBody !== null) {
+    applyBodyDescription(pushedBody as Record<string, unknown>)
+  }
+  // 启动竞速修复：渲染层 boot 时的首份 status 报告早于 main 注册
+  // 'pet:status-report'，会丢——且 reportedSnapshot 已被置位，等值补报会被
+  // 去重静默跳过（实测：/status 冻结在初始值、bodyRuntime 消失的根因）。
+  // 清掉去重位强制重发。
+  reportedSnapshot = ''
+  reportStatus()
 })
+
+/**
+ * The idle theater (the animation half of the settings page's 自主表达):
+ * while idle — no override bubble, no error flash, no one-shot in flight —
+ * the pet occasionally plays a clip. 双模式（B02 定案）：
+ *  - bodyIdle（body.json capabilities.idle.supported=true）：40–120s 随机
+ *    节奏 + noRepeat 2，池 = catalog 的 idleEligible 白名单（facing=left 时
+ *    排除 noMirror 片段）；**autonomy 的 GapMinutes 退役**（设置页开关仍管
+ *    总开关）。
+ *  - legacy（无 body idle 能力）：现状行为，autonomy.gapMinutes 节奏、
+ *    random 池减 THEATER_EXCLUDED。
+ * Config arrives on /state pushes (`autonomy`); a pet that never receives a
+ * push keeps the theater off, so behavior is unchanged until the driver
+ * speaks. bodyIdle 由 body.json 自述（boot 时经 pet-asset:// 拉取）。
+ */
+interface TheaterConfig {
+  enabled: boolean
+  gapMinutes: number
+}
+
+interface BodyIdleConfig {
+  intervalMs: readonly [number, number]
+  noRepeat: number
+}
+
+let theater: TheaterConfig = { enabled: false, gapMinutes: 10 }
+let bodyIdle: BodyIdleConfig | undefined
+let idleBias: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> } | undefined
+let _bodyTransitions: { defaultMs: number; toIdleMs: number } | undefined
+let bodyRects: Record<string, readonly (readonly number[])[]> | undefined
+let theaterTimer: ReturnType<typeof setTimeout> | undefined
+let theaterLastFile: string | undefined
+let idleRecent: string[] = []
+let idleNextAt = 0
+
+// ── B10 表达连续性：情绪状态 ────────────────────────────────────────────────
+// 判断是模型的：pet_say/pet_do 携带的 mood（她说话时最清楚自己的情绪）落
+// 在这里；系统只存状态、做 10 分钟衰减、并把它翻译成剧场的标签加权。语
+// 表 = actions.tags.json 的中文词表；无匹配标签的池回落无加权（不锁死）。
+let moodName = 'neutral'
+let moodUntil = 0
+const MOOD_TTL_MS = 10 * 60_000
+const MOOD_TAGS: Record<string, readonly string[]> = {
+  happy: ['开心', '搞笑', '庆祝', '活泼'],
+  excited: ['活泼', '开心', '才艺', '庆祝'],
+  calm: ['放松', '自处', '日常'],
+  focused: ['专注', '思考', '工作'],
+  sleepy: ['疲惫', '自处'],
+  sad: ['悲伤', '委屈'],
+  angry: ['生气'],
+  shy: ['害羞', '撒娇'],
+  curious: ['好奇', '张望'],
+}
+function setMood(raw: unknown): void {
+  if (typeof raw !== 'string') return
+  const name = raw.toLowerCase()
+  if (name === '' || name === 'neutral') {
+    moodName = 'neutral'
+    moodUntil = 0
+    return
+  }
+  if (!(name in MOOD_TAGS)) return
+  moodName = name
+  moodUntil = Date.now() + MOOD_TTL_MS
+  reportStatus()
+}
+function effectiveMood(): string {
+  return Date.now() < moodUntil ? moodName : 'neutral'
+}
+/** 情绪标签与片段 tags 有交集 → ×4 加权（max-not-product 与 B06 同构）；
+ * neutral/无匹配 = ×1，剧场保持原有随机面。 */
+function moodWeightOf(entry: CatalogClip): number {
+  const tags = MOOD_TAGS[effectiveMood()]
+  if (tags === undefined) return 1
+  const matched = (entry.tags ?? []).some(tag => tags.includes(tag))
+  return matched ? 4 : 1
+}
+// bodyRuntime.lastClip 的来源：最近一次换上舞台的 one-shot 片段（小动作/
+// 触摸反应//action/celebrate）。基础循环的换回（handback → play(baseState)）
+// 不改写它——否则 lastClip 会退回"当前 src 快照"，小动作的几秒窗口外取
+// 样永远只拍到 待机呼吸休闲（2026-11-10 实测诊断：idleNextAt 在跳、
+// lastClip 18 秒纹丝不动）。存 `.webm` 全名，与旧快照格式一致。
+let lastPlayedClip = ''
+// A one-shot in flight (touch reaction, /action, a theater clip itself): the
+// pending timer must not hijack the stage mid-clip.
+let oneShotActive = false
+
+function theaterPool(): CatalogClip[] {
+  return [...actionCatalog.values()].filter(entry =>
+    entry.dir === 'random'
+    && !THEATER_EXCLUDED.has(entry.file)
+    && entry.file !== theaterLastFile)
+}
+
+/** B02 池：idleEligible 白名单；facing=left 排除 noMirror；noRepeat 排除
+ * 最近 2 个（排除后空则回落全白名单——软化不锁死）。与 pet-app
+ * idle-selector.eligibleIdlePool 同语义（渲染层镜像实现）。 */
+/** B06 偏置权重（与 pet-app idle-selector.biasWeightOf 同语义——渲染层镜像
+ * 实现）：最强匹配标签的乘数；无表/窗外 = ×1。 */
+function biasWeightOf(
+  entry: CatalogClip,
+  bias: { hours: readonly [number, number]; weights: Readonly<Record<string, number>> } | undefined,
+  hour: number,
+): number {
+  if (bias === undefined) return 1
+  const [from, to] = bias.hours
+  const inWindow = from <= to ? hour >= from && hour < to : hour >= from || hour < to
+  if (!inWindow) return 1
+  let weight = 1
+  for (const tag of entry.tags ?? []) {
+    const w = bias.weights[tag]
+    if (typeof w === 'number' && Number.isFinite(w) && w > weight) weight = w
+  }
+  return weight
+}
+
+function bodyIdlePool(): CatalogClip[] {
+  if (bodyIdle === undefined) return []
+  const eligible = [...actionCatalog.values()].filter(entry => entry.idleEligible === true)
+  const facingPool = facing === 'left'
+    ? eligible.filter(entry => entry.noMirror !== true)
+    : eligible
+  const excluded = new Set(idleRecent.slice(0, bodyIdle.noRepeat))
+  // 正在循环播放的 idle 状态片段也排除——抽到它会在 playOneShotAt 里因
+  // src 相同被早退，theater 计时器不再重铺（Phase 1 实测死亡路径）。
+  const playingFile = decodeURIComponent(video.src.split('/').pop() ?? '').replace(/\.webm$/, '')
+  if (playingFile !== '') excluded.add(playingFile)
+  const fresh = facingPool.filter(entry => !excluded.has(entry.id))
+  return fresh.length > 0 ? fresh : facingPool.filter(entry => entry.id !== playingFile)
+}
+
+const sampleIdleInterval = (bounds: readonly [number, number]): number => {
+  const [min, max] = bounds
+  const base = min + Math.random() * (max - min)
+  return Math.round(Math.min(max, Math.max(min, base * (1 + (Math.random() * 2 - 1) * 0.2))))
+}
+
+function scheduleTheater(): void {
+  if (theaterTimer !== undefined) return
+  if (!theater.enabled || baseState !== 'idle' || override !== null || Date.now() < errorUntil) return
+  const bodyIdleConfig = bodyIdle
+  const bodyMode = bodyIdleConfig !== undefined && bodyIdlePool().length > 0
+  if (!bodyMode && theaterPool().length === 0) return
+  // B02 反馈：自由活动的 GapMinutes 不退役，作为身体节奏的间隔上限——
+  // 用户把间隔调小，待机就变快（下限仍为 body.json 的 min）。
+  const gapCapMs = Math.max(1, theater.gapMinutes) * 60_000
+  const idleBounds: readonly [number, number] = bodyMode
+    ? [
+      bodyIdleConfig.intervalMs[0],
+      Math.max(bodyIdleConfig.intervalMs[0], Math.min(bodyIdleConfig.intervalMs[1], gapCapMs)),
+    ]
+    : [60_000, 60_000]
+  const delay = bodyMode ? sampleIdleInterval(idleBounds) : gapCapMs
+  idleNextAt = Date.now() + delay
+  reportStatus()
+  theaterTimer = setTimeout(() => {
+    theaterTimer = undefined
+    if (!theater.enabled || baseState !== 'idle' || override !== null || oneShotActive || Date.now() < errorUntil) {
+      scheduleTheater() // conditions changed while pending: re-arm from now
+      return
+    }
+    const pool = bodyIdle !== undefined ? bodyIdlePool() : theaterPool()
+    if (bodyIdle !== undefined && pool.length === 0) {
+      scheduleTheater()
+      return
+    }
+    // B06：时段偏置加权（max-not-product；权重表随 /state 载荷下发）×
+    // B10 情绪标签加权（matched ×4）——两个乘数独立作用。
+    let pick: CatalogClip | undefined
+    if (bodyIdle !== undefined) {
+      const hour = new Date().getHours()
+      const weights = pool.map(entry => biasWeightOf(entry, idleBias, hour) * moodWeightOf(entry))
+      const total = weights.reduce((sum, w) => sum + w, 0)
+      let roll = Math.random() * total
+      pick = pool[pool.length - 1]
+      for (let i = 0; i < pool.length; i += 1) {
+        roll -= weights[i] ?? 0
+        if (roll < 0) {
+          pick = pool[i]
+          break
+        }
+      }
+    } else {
+      // legacy 池也吃情绪加权（无偏置表）。
+      const weights = pool.map(entry => moodWeightOf(entry))
+      const total = weights.reduce((sum, w) => sum + w, 0)
+      let roll = Math.random() * total
+      pick = pool[pool.length - 1]
+      for (let i = 0; i < pool.length; i += 1) {
+        roll -= weights[i] ?? 0
+        if (roll < 0) {
+          pick = pool[i]
+          break
+        }
+      }
+    }
+    if (pick !== undefined) {
+      theaterLastFile = pick.file
+      idleRecent.unshift(pick.id)
+      idleRecent = idleRecent.slice(0, Math.max(2, bodyIdle?.noRepeat ?? 2))
+      playOneShotAt(pick, undefined, pick.noMirror === true ? { noMirror: true } : undefined)
+    }
+    // The next interval arms inside playOneShotAt's handback (render →
+    // scheduleTheater); nothing to do here.
+  }, delay)
+}
+
+// ── bubbles ─────────────────────────────────────────────────────────────────
+
+type PendingAnswer = (outcome: 'allowed-once' | 'rejected') => void
+
+const questionSelections = new Map<string, string[]>()
+
+function hideBubble(): void {
+  bubble.hidden = true
+  bubble.replaceChildren()
+  globals.petDesktop?.setBubbleVisible(false)
+}
+
+/** Localized payload text arrives as a locale→string map; pick the page's best match. */
+type LocalizedText = string | { readonly en?: string; readonly [locale: string]: string | undefined } | undefined
+
+function localizedText(value: LocalizedText): string | undefined {
+  if (value === undefined || typeof value === 'string') return value
+  const languages = navigator.languages ?? [navigator.language]
+  for (const language of languages) {
+    const hit = value[language.split('-')[0] ?? '']
+    if (typeof hit === 'string') return hit
+  }
+  return typeof value.en === 'string' ? value.en : undefined
+}
+
+function showApprovalBubble(request: {
+  toolName?: string
+  reason?: string
+  displayReason?: LocalizedText
+}, answer: PendingAnswer): void {
+  bubble.replaceChildren()
+  const title = document.createElement('p')
+  title.className = 'bubble-title'
+  title.textContent = request.toolName === undefined || request.toolName === ''
+    ? '请求执行'
+    : `请求执行：${request.toolName}`
+  const detail = document.createElement('p')
+  detail.className = 'bubble-detail'
+  detail.textContent = localizedText(request.displayReason) ?? request.reason ?? ''
+  const actions = document.createElement('div')
+  actions.className = 'bubble-actions'
+  const allow = document.createElement('button')
+  allow.className = 'bubble-button primary'
+  allow.textContent = '允许'
+  allow.addEventListener('click', () => {
+    hideBubble()
+    answer('allowed-once')
+  })
+  const reject = document.createElement('button')
+  reject.className = 'bubble-button danger'
+  reject.textContent = '拒绝'
+  reject.addEventListener('click', () => {
+    hideBubble()
+    answer('rejected')
+  })
+  actions.append(allow, reject)
+  bubble.append(title, detail, actions)
+  bubble.hidden = false
+  globals.petDesktop?.setBubbleVisible(true)
+  render()
+}
+
+interface PetQuestion {
+  id: string
+  question: LocalizedText
+  detail?: LocalizedText
+  header?: LocalizedText
+  options?: { label: LocalizedText; description?: LocalizedText }[]
+  multiSelect?: boolean
+}
+
+function showQuestionBubble(questions: PetQuestion[], answer: (value: { answers: { id: string; selected: string[] }[] }) => void): void {
+  questionSelections.clear()
+  bubble.replaceChildren()
+  for (const question of questions) {
+    questionSelections.set(question.id, [])
+    const heading = document.createElement('p')
+    heading.className = 'bubble-question'
+    const questionText = localizedText(question.question) ?? ''
+    const headerText = localizedText(question.header)
+    heading.textContent = headerText === undefined || headerText === ''
+      ? questionText
+      : `${headerText} · ${questionText}`
+    bubble.append(heading)
+    const detailText = localizedText(question.detail)
+    if (detailText !== undefined && detailText !== '') {
+      const detail = document.createElement('p')
+      detail.className = 'bubble-detail'
+      detail.textContent = detailText
+      bubble.append(detail)
+    }
+    const options = document.createElement('div')
+    options.className = 'bubble-options'
+    for (const option of question.options ?? []) {
+      const label = localizedText(option.label) ?? ''
+      const button = document.createElement('button')
+      button.className = 'bubble-button'
+      button.textContent = label
+      const description = localizedText(option.description)
+      if (description !== undefined) button.title = description
+      button.addEventListener('click', () => {
+        questionSelections.set(question.id, [label])
+        for (const sibling of options.children) {
+          (sibling as HTMLButtonElement).classList.remove('primary')
+        }
+        button.classList.add('primary')
+        if (questions.every(entry => (questionSelections.get(entry.id) ?? []).length > 0)) {
+          answer({
+            answers: questions.map(entry => ({
+              id: entry.id,
+              selected: questionSelections.get(entry.id) ?? [],
+            })),
+          })
+        }
+      })
+      options.append(button)
+    }
+    bubble.append(options)
+  }
+  bubble.hidden = false
+  globals.petDesktop?.setBubbleVisible(true)
+  render()
+}
+
+// ── interaction lifecycle ───────────────────────────────────────────────────
+
+interface InteractionMessage {
+  kind?: unknown
+  toolName?: string
+  reason?: string
+  displayReason?: LocalizedText
+  questions?: PetQuestion[]
+}
+
+/** Bumped whenever the displayed bubble changes identity; a settle callback
+ * from a superseded display must not touch the newer bubble. */
+let interactionEpoch = 0
+// The interaction whose bubble is currently on screen. New arrivals and
+// cancel notices are routed against it.
+let currentInteractionId: string | undefined
+// Interactions that arrived while a bubble was up. FIFO: the next one shows
+// the moment the current bubble settles or is withdrawn. Earlier behavior
+// was last-arrival-wins: the overwritten approval silently lost its only
+// pet-side answer surface, and the user had no way to know it existed.
+const interactionQueue: Array<{ id: string; message: InteractionMessage }> = []
+
+// ── boot ────────────────────────────────────────────────────────────────────
+
+/** B02：拉取身体自述，capabilities.idle.supported 时以身体节奏接管 idle
+ * theater（autonomy 的 GapMinutes 退役，总开关仍归设置页）。失败 = legacy。 */
+type BodyCapabilityWire = {
+  kind?: unknown
+  supported?: unknown
+  intervalMs?: unknown
+  noRepeat?: unknown
+  defaultMs?: unknown
+  toIdleMs?: unknown
+}
+
+/** B02/B03：身体自述入库——idle 节奏 / transition / 命中区（含多矩形）。
+ * bodyIdle 激活时清掉 legacy 计时器再重铺（否则第一个动作要等满 legacy
+ * 间隔——实测 idleNextAt 缺失的根因）。 */
+function applyBodyDescription(raw: Record<string, unknown>): void {
+  const capabilities = raw.capabilities as
+    | Record<string, BodyCapabilityWire>
+    | undefined
+  const transition = capabilities?.transition
+  if (transition?.kind === 'transition' && transition.supported === true
+    && typeof transition.defaultMs === 'number' && Number.isFinite(transition.defaultMs)) {
+    _bodyTransitions = {
+      defaultMs: Math.min(500, Math.max(0, transition.defaultMs)),
+      toIdleMs: typeof transition.toIdleMs === 'number' && Number.isFinite(transition.toIdleMs)
+        ? Math.min(500, Math.max(0, transition.toIdleMs))
+        : Math.min(500, Math.max(0, transition.defaultMs)),
+    }
+  }
+  const rects = (raw.hitboxes as { rects?: unknown } | undefined)?.rects
+  if (typeof rects === 'object' && rects !== null) {
+    const cleaned: Record<string, readonly (readonly number[])[]> = {}
+    for (const [part, shape] of Object.entries(rects as Record<string, unknown>)) {
+      if (!Array.isArray(shape)) continue
+      if (shape.every(n => typeof n === 'number' && Number.isFinite(n))) {
+        cleaned[part] = [shape as readonly number[]]
+        continue
+      }
+      const multi = shape.filter(entry =>
+        Array.isArray(entry) && (entry as unknown[]).every(n => typeof n === 'number' && Number.isFinite(n)))
+      if (multi.length > 0) cleaned[part] = multi as readonly (readonly number[])[]
+    }
+    if (Object.keys(cleaned).length > 0) bodyRects = cleaned
+  }
+  const idle = capabilities?.idle
+  const interval: readonly unknown[] = Array.isArray(idle?.intervalMs) ? idle.intervalMs : []
+  const min = typeof interval[0] === 'number' && Number.isFinite(interval[0]) ? interval[0] : undefined
+  const max = typeof interval[1] === 'number' && Number.isFinite(interval[1]) ? interval[1] : undefined
+  const idleOk = idle?.kind === 'idle' && idle.supported === true
+    && min !== undefined && max !== undefined && min < max
+  console.info(`[pet-body] 应用完成：idle=${idleOk ? `${String(min)}-${String(max)}ms` : '未声明（待机走 legacy 节奏）'}，hitboxes=${Object.keys(bodyRects ?? {}).join('+') || '无'}`)
+  if (!idleOk) return
+  bodyIdle = {
+    intervalMs: [min, max],
+    noRepeat: typeof idle.noRepeat === 'number' && Number.isInteger(idle.noRepeat) && idle.noRepeat >= 1
+      ? idle.noRepeat
+      : 2,
+  }
+  if (theaterTimer !== undefined) {
+    clearTimeout(theaterTimer)
+    theaterTimer = undefined
+  }
+  scheduleTheater()
+}
+
+async function loadBodyDescription(): Promise<void> {
+  // pet-asset fetch 是降级路径：主路径 = pet:catalog 推送（main 已读好
+  // body.json，随 catalog 一起发——实机实测 fetch 不稳）。
+  try {
+    const response = await fetch(`pet-asset:///${CHARACTER}/body.json`)
+    if (!response.ok) {
+      console.error(`[pet] body.json fetch HTTP ${String(response.status)}——bodyIdle/命中区走 legacy`)
+      return
+    }
+    const raw = await response.json() as Record<string, unknown>
+    applyBodyDescription(raw)
+  } catch (error) {
+    console.error(`[pet] body.json fetch failed: ${String(error)}——bodyIdle/命中区走 legacy`)
+  }
+}
+
+function boot(): void {
+  setupStage(stage)
+  render()
+  void loadBodyDescription()
+}
+
+// ── window drag ─────────────────────────────────────────────────────────────
+
+// Manual drag (app-region is inert under transparent+ignore toggling, §5 #9):
+// the page captures the pointer over the pet body and reports fractional DIP
+// screen coordinates in one space for the whole gesture; the main process
+// follows with size-pinned setBounds so the DWM ratchet cannot accumulate
+// (§5 #11-12).
+const petBody = requireElement<HTMLDivElement>('#pet')
+
+/**
+ * Which body region a pet-body click landed on, in the 640x360 video frame
+ * the stage shows (object-fit contain inside the 340x200 box): head and body
+ * boxes come from the character manifest.
+ */
+function touchPartOf(clientX: number, clientY: number): string {
+  const rect = petBody.getBoundingClientRect()
+  const scale = Math.min(rect.width / 640, rect.height / 360)
+  const drawWidth = 640 * scale
+  const drawHeight = 360 * scale
+  const visualX = (clientX - rect.left - (rect.width - drawWidth) / 2) / scale
+  const videoY = (clientY - rect.top - (rect.height - drawHeight) / 2) / scale
+  // B01/B03：舞台镜像后，视觉坐标先折回原始帧坐标，再比对 body.json 的矩形
+  //（缺 body.json 回落 head/body 两个既有矩形）。判定顺序 = 特定分区优先。
+  const frameX = facing === 'left' ? 640 - visualX : visualX
+  const rects: Record<string, readonly (readonly number[])[]> = bodyRects ?? {
+    head: [[185, 60, 436, 195]],
+    body: [[212, 60, 428, 330]],
+  }
+  const inBox = (box: readonly number[]): boolean =>
+    frameX >= box[0] && frameX <= box[2] && videoY >= box[1] && videoY <= box[3]
+  // 判定顺序 = 特定分区优先；一个分区允许多矩形（尾巴的双侧尾鳍）。
+  for (const part of ['tail', 'hand', 'head', 'body']) {
+    const shape = rects[part]
+    if (shape === undefined) continue
+    // 单矩形视作单元素多矩形，统一走同一条命中路径（避免跨形状断言）。
+    for (const box of shape) {
+      if (inBox(box)) return part
+    }
+  }
+  return 'body' // B03 有意变更：unknown 兜底改按 body
+}
+
+/** B03 分区专属反应：尾巴 → 吐泡泡（吐魂近似），手 → 元气挥手；其余走通用
+ * 点击回应组。片段经 catalog 解析，未收录时回落通用组。 */
+const PART_REACTIONS: Record<string, readonly string[]> = {
+  tail: ['鲸鱼吐泡泡特效'],
+  hand: ['点击回应-元气挥手'],
+}
+
+/** A completed gesture that never moved far nor lasted long is a touch. */
+const CLICK_MAX_DISTANCE = 5
+const CLICK_MAX_MS = 500
+
+// The touch REPORT is deferred by the dblclick window (~260ms): a
+// double-click (open the chat card) must not also register as two pats —
+// the instant reaction animation still plays, only the ledger report
+// waits for the click pattern to settle. Rapid petting then counts as
+// one touch per 260ms burst, which matches the gesture.
+let touchReportTimer: ReturnType<typeof setTimeout> | undefined
+function handleTouch(clientX: number, clientY: number): void {
+  const part = touchPartOf(clientX, clientY)
+  // 触摸诊断：分区命中与可用矩形进 runtime log——tail 摸不到时先看这行
+  // （bodyRects 若是 FALLBACK，说明 body.json 没送达渲染层）。
+  console.info(`[pet-touch] part=${part} rects=${Object.keys(bodyRects ?? {}).join('+') || 'FALLBACK'} facing=${facing}`)
+  const named = PART_REACTIONS[part]
+    ?.map(name => actionCatalog.get(name))
+    .filter((entry): entry is CatalogClip => entry !== undefined)
+  const reactions: CatalogClip[] = named !== undefined && named.length > 0
+    ? named
+    : ANIMATION.touch.map(entry => ({ ...entry, id: entry.file }))
+  if (reactions.length > 0 && override === null && Date.now() >= errorUntil) {
+    const pick = reactions[Math.floor(Math.random() * reactions.length)]
+    if (pick !== undefined) {
+      playOneShotAt(pick, undefined, pick.noMirror === true ? { noMirror: true } : undefined)
+    }
+  }
+  if (touchReportTimer !== undefined) clearTimeout(touchReportTimer)
+  touchReportTimer = setTimeout(() => {
+    touchReportTimer = undefined
+    globals.petDesktop?.reportTouch({ part, rects: Object.keys(bodyRects ?? {}).join('+') || 'FALLBACK' })
+  }, 260)
+}
+
+petBody.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return
+  // B04：开拖即终局交叉——拖拽撞上交叉窗口会看到两个身位（v1 实测教训），
+  // 拖拽永远单一身形（新身继续播，旧身立即退场）。
+  finalizeFade()
+  try { petBody.setPointerCapture(event.pointerId) } catch { /* pointer already gone */ }
+  const startX = event.screenX
+  const startY = event.screenY
+  const startAt = Date.now()
+  globals.petDesktop?.dragStart(startX, startY)
+  const onMove = (move: PointerEvent): void => {
+    globals.petDesktop?.dragMove(move.screenX, move.screenY)
+  }
+  const onUp = (up: PointerEvent): void => {
+    petBody.removeEventListener('pointermove', onMove)
+    petBody.removeEventListener('pointerup', onUp)
+    petBody.removeEventListener('pointercancel', onUp)
+    globals.petDesktop?.dragEnd()
+    const moved = Math.hypot(up.screenX - startX, up.screenY - startY)
+    if (moved <= CLICK_MAX_DISTANCE && Date.now() - startAt <= CLICK_MAX_MS) {
+      handleTouch(up.clientX, up.clientY)
+    }
+  }
+  petBody.addEventListener('pointermove', onMove)
+  petBody.addEventListener('pointerup', onUp)
+  petBody.addEventListener('pointercancel', onUp)
+})
+
+// ── chat input card (§6 chat上行) ───────────────────────────────────────────
+// Double-click the pet body to talk to it: the text rides a /events `chat`
+// event to the driver's inner-voice session, and the reply comes back as a
+// normal /say bubble. One message in flight per pet (the contract's input
+// modal): a busy send is refused with an inline hint, not silently dropped.
+
+function openChatCard(): void {
+  // One bubble at a time: an interaction card outranks the chat input, and
+  // the chat card itself parks inside THE bubble (hidden by hideBubble()).
+  if (override !== null || Date.now() < errorUntil) return
+  stopSayAudio() // the chat card replaces the say bubble; its voice stops too
+  bubble.replaceChildren()
+  const row = document.createElement('div')
+  row.className = 'bubble-chat'
+  const input = document.createElement('input')
+  input.className = 'bubble-chat-input'
+  input.maxLength = 2000
+  input.placeholder = '和鲸鱼娘说点什么…'
+  const send = document.createElement('button')
+  send.className = 'bubble-button primary'
+  send.textContent = '发送'
+  const cancel = document.createElement('button')
+  cancel.className = 'bubble-button'
+  cancel.textContent = '取消'
+  cancel.addEventListener('click', () => { hideBubble() })
+  const submit = async (): Promise<void> => {
+    const text = input.value.trim()
+    if (text === '' || send.disabled) return
+    send.disabled = true
+    input.disabled = true
+    const result = await globals.petDesktop?.sendChat(text)
+    if (result?.ok === true) {
+      hideBubble() // the reply arrives later as a plain /say bubble
+      return
+    }
+    send.disabled = false
+    input.disabled = false
+    input.placeholder = result?.reason === 'busy' ? '上一条还没送达，稍等一下…' : '没发出去，再试一次'
+    input.focus()
+  }
+  send.addEventListener('click', () => { void submit() })
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      void submit()
+    } else if (event.key === 'Escape') {
+      hideBubble()
+    }
+  })
+  row.append(input, send, cancel)
+  bubble.append(row)
+  bubble.hidden = false
+  globals.petDesktop?.setBubbleVisible(true)
+  render()
+  input.focus()
+}
+
+petBody.addEventListener('dblclick', (event) => {
+  event.stopPropagation()
+  // A double-click is INTENT TO TALK, not two pats: cancel the deferred
+  // touch reports from both clicks of the gesture.
+  if (touchReportTimer !== undefined) {
+    clearTimeout(touchReportTimer)
+    touchReportTimer = undefined
+  }
+  openChatCard()
+})
+
+// ── control interface (driver path) ─────────────────────────────────────────
+// The four operations, delivered over IPC from the main-process HTTP host.
+// During the transition this and the in-page WS event path drive the same
+// state machine side by side; the WS path retires when the driver-side lands
+// (DSH-PET.md §7.2).
+
+// The say bubble's hide timer, ONE slot: a fresh /say re-arms it with the
+// text-length formula, an arriving TTS track re-arms it to cover the audio —
+// so the text never disappears mid-sentence. The guard re-checks the bubble:
+// a timer from a superseded display must not close a newer one.
+let sayHideTimer: ReturnType<typeof setTimeout> | undefined
+
+function armSayHide(text: string, delayMs: number): void {
+  if (sayHideTimer !== undefined) clearTimeout(sayHideTimer)
+  sayHideTimer = setTimeout(() => {
+    sayHideTimer = undefined
+    if (override !== null || bubble.textContent !== text) return
+    hideBubble()
+  }, Math.max(1000, delayMs))
+}
+
+// ── say voice (BreezeBlue, carrier-side synthesis) ──────────────────────────
+// When TTS is configured, the main process holds the bubble until the mp3
+// lands (bounded) and delivers text + audio as ONE message. Playback rules:
+// the track starts the moment its bubble appears (they are the same event),
+// the bubble lifetime extends to the audio's duration, and when it ends the
+// bubble goes with it. A delivery without audio (synthesis off, slow, or
+// failed) is exactly yesterday's bubble.
+let sayAudio: HTMLAudioElement | undefined
+let sayAudioUrl: string | undefined
+
+function stopSayAudio(): void {
+  const audio = sayAudio
+  if (audio !== undefined && !audio.paused) audio.pause()
+}
+
+function playSayAudio(text: string, bytes: Uint8Array<ArrayBuffer>): void {
+  if (sayAudioUrl !== undefined) URL.revokeObjectURL(sayAudioUrl)
+  const audio = sayAudio ?? (sayAudio = new Audio())
+  sayAudioUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
+  audio.src = sayAudioUrl
+  audio.onloadedmetadata = () => {
+    // The authoritative lifetime: the track's own length plus a small tail,
+    // replacing the text-length estimate for as long as this bubble lives.
+    if (Number.isFinite(audio.duration) && audio.duration > 0) armSayHide(text, audio.duration * 1000 + 1500)
+  }
+  audio.onended = () => {
+    if (override === null && bubble.textContent === text) hideBubble()
+  }
+  audio.onerror = () => { /* the say timer already governs the bubble */ }
+  void audio.play().catch(() => { /* synthesis is an enhancement: silence is fine */ })
+}
+
+globals.petDesktop?.onSay((notice) => {
+  // Fire-and-forget speech: self-dismisses, never blocks, and an interaction
+  // bubble in flight outranks it (single-bubble design). A new say also
+  // stops the previous utterance — the voice follows the newest bubble.
+  setMood(notice.mood)
+  if (override !== null || notice.text === '') return
+  stopSayAudio()
+  bubble.replaceChildren()
+  const text = document.createElement('p')
+  text.className = 'bubble-detail'
+  text.textContent = notice.text
+  bubble.append(text)
+  bubble.hidden = false
+  globals.petDesktop?.setBubbleVisible(true)
+  armSayHide(notice.text, 4000 + Math.min(notice.text.length * 60, 4000))
+  const bytes = notice.audio
+  if (bytes !== undefined && bytes.length > 0) playSayAudio(notice.text, bytes)
+})
+
+let reportedSnapshot = ''
+const reportStatus = (): void => {
+  // B08 bodyRuntime：朝向 / 下一次待机时刻 / 最近播放的片段。lastClip 读
+  // lastPlayedClip（最近一次 one-shot，不被基础循环的换回覆盖）——`clip`
+  // 是当前 src 快照，只供 animation 字段用；快照口径曾让 lastClip 在小动
+  // 作窗口外永远显示基础循环，失去"她刚才做了什么"的信息量。
+  const clip = decodeURIComponent(video.src.split('/').pop() ?? '')
+  const bodyRuntime = {
+    facing,
+    // B10：当前表达情绪（恒定输出；pet_state 经 normalizeStatus 透传给模型
+    // ——她能看到自己此刻的身体情绪，10 分钟无续期回落 neutral）。
+    mood: effectiveMood(),
+    ...(idleNextAt > 0 ? { idleNextAt } : {}),
+    ...(lastPlayedClip !== '' ? { lastClip: lastPlayedClip } : {}),
+  }
+  const snapshot = JSON.stringify({ state: baseState, override, animation: clip, bodyRuntime })
+  if (snapshot === reportedSnapshot) return
+  reportedSnapshot = snapshot
+  globals.petDesktop?.reportStatus(JSON.parse(snapshot) as Record<string, unknown>)
+}
+
+globals.petDesktop?.onState((message) => {
+  const payload = message as { state?: unknown; autonomy?: unknown }
+  // The autonomy half rides on every push: the driver reads the settings
+  // page's idle-theater switches fresh each time. A change re-arms the
+  // timer (or disarms it when switched off).
+  const autonomy = payload.autonomy
+  if (typeof autonomy === 'object' && autonomy !== null) {
+    const record = autonomy as { idleAnimation?: unknown; gapMinutes?: unknown; idleBias?: unknown }
+    // B06：偏置表随载荷下发（absent = 旧驱动保持现状；null = 显式关闭）。
+    if ('idleBias' in record) {
+      const value = record.idleBias
+      if (typeof value === 'object' && value !== null) {
+        const candidate = value as { hours?: unknown; weights?: unknown }
+        if (Array.isArray(candidate.hours) && candidate.hours.length === 2
+          && typeof candidate.weights === 'object' && candidate.weights !== null) {
+          idleBias = {
+            hours: [candidate.hours[0] as number, candidate.hours[1] as number],
+            weights: candidate.weights as Record<string, number>,
+          }
+        } else {
+          idleBias = undefined
+        }
+      } else {
+        idleBias = undefined
+      }
+    }
+    const enabled = typeof record.idleAnimation === 'boolean' ? record.idleAnimation : theater.enabled
+    const gapMinutes = typeof record.gapMinutes === 'number' && Number.isFinite(record.gapMinutes)
+      ? Math.min(120, Math.max(1, Math.round(record.gapMinutes)))
+      : theater.gapMinutes
+    if (enabled !== theater.enabled || gapMinutes !== theater.gapMinutes) {
+      theater = { enabled, gapMinutes }
+      if (theaterTimer !== undefined) {
+        clearTimeout(theaterTimer)
+        theaterTimer = undefined
+      }
+      scheduleTheater()
+    }
+  }
+  const state = payload.state
+  if (state === 'idle' || state === 'thinking' || state === 'working') setBase(state)
+  else if (state === 'error') flashError()
+})
+globals.petDesktop?.onAction((message) => {
+  const payload = message as { action?: unknown; requestId?: unknown; mood?: unknown }
+  setMood(payload.mood)
+  const action = payload.action
+  const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined
+  if (action === 'celebrate') playOneShot('celebrate', requestId)
+  else if (action === 'error') flashError()
+  else if (typeof action === 'string') {
+    // Named clip playback: the main process validated the name against its
+    // catalog before forwarding, so an unresolvable id here can only come
+    // from a stale catalog — ignoring it keeps the state machine intact.
+    const hit = actionCatalog.get(action)
+    if (hit !== undefined) playOneShotAt(hit, requestId, hit.noMirror === true ? { noMirror: true } : undefined)
+  }
+})
+/** Keep the queue badge (`.bubble-queue`, appended inside the bubble) in
+ * step with the queue: create/update/remove in one place. */
+function refreshQueueBadge(): void {
+  const badge = bubble.querySelector('.bubble-queue')
+  if (interactionQueue.length === 0) {
+    badge?.remove()
+    return
+  }
+  const text = `还有 ${String(interactionQueue.length)} 个待处理`
+  if (badge !== null) {
+    badge.textContent = text
+    return
+  }
+  const fresh = document.createElement('p')
+  fresh.className = 'bubble-queue'
+  fresh.textContent = text
+  bubble.append(fresh)
+}
+
+/** Present one interaction as THE bubble. Only called when nothing is
+ * displayed — later arrivals queue until this one settles or is withdrawn. */
+function displayInteraction(id: string, message: InteractionMessage): void {
+  stopSayAudio() // the say bubble (if any) is superseded; its voice stops with it
+  const epoch = ++interactionEpoch
+  currentInteractionId = id
+  const settle = (answer: unknown): void => {
+    if (epoch !== interactionEpoch) return
+    hideBubble()
+    override = null
+    currentInteractionId = undefined
+    render()
+    globals.petDesktop?.answerInteraction(id, answer)
+    const next = interactionQueue.shift()
+    if (next !== undefined) displayInteraction(next.id, next.message)
+  }
+  if (message.kind === 'question') {
+    override = 'waiting_question'
+    render()
+    showQuestionBubble(message.questions ?? [], settle)
+  } else {
+    override = 'waiting_approval'
+    render()
+    showApprovalBubble({
+      toolName: message.toolName,
+      reason: message.reason,
+      ...(message.displayReason === undefined ? {} : { displayReason: message.displayReason }),
+    }, settle)
+  }
+  refreshQueueBadge()
+}
+
+globals.petDesktop?.onInteraction((request) => {
+  const message = request as InteractionMessage & { id?: unknown }
+  const id = message.id
+  if (typeof id !== 'string') return
+  // One bubble at a time: while one is up, later interactions queue and
+  // display the moment the current one settles or is withdrawn.
+  if (currentInteractionId !== undefined) {
+    interactionQueue.push({ id, message })
+    refreshQueueBadge()
+    return
+  }
+  displayInteraction(id, message)
+})
+globals.petDesktop?.onInteractionCancel((notice) => {
+  // A queued interaction quietly leaves the queue; the displayed bubble is
+  // untouched and only its badge count changes.
+  const queuedIndex = interactionQueue.findIndex(entry => entry.id === notice.id)
+  if (queuedIndex !== -1) {
+    interactionQueue.splice(queuedIndex, 1)
+    refreshQueueBadge()
+    return
+  }
+  // The DISPLAYED interaction was withdrawn: clear the stage and show the
+  // next queued one, if any. A stale cancel for an already-settled id finds
+  // neither the queue nor the displayed bubble and is ignored.
+  if (notice.id !== currentInteractionId) return
+  interactionEpoch += 1
+  currentInteractionId = undefined
+  hideBubble()
+  override = null
+  render()
+  const next = interactionQueue.shift()
+  if (next !== undefined) displayInteraction(next.id, next.message)
+})
+
+void boot()
