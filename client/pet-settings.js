@@ -263,8 +263,8 @@ window.__ModuleLoader__.load({
       var PRESET_SLOT_LABELS = {
         whale598: '鲸鱼娘（精简）',
         'whale598-standard': '鲸鱼娘(标准)',
-        'whale598-custom-1': '自定义1',
-        'whale598-custom-2': '自定义2',
+        'whale598-custom-1': '病娇',
+        'whale598-custom-2': '小满',
       }
       var PRESET_SLOT_IDS = ['whale598-standard', 'whale598', 'whale598-custom-1', 'whale598-custom-2']
       var personaSlots = (data && data.personas) || null

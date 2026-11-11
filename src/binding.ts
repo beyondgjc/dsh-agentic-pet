@@ -22,8 +22,8 @@ export const PET_PRESET_IDS: ReadonlySet<string> = new Set([
 export const PET_PRESET_LABELS: Readonly<Record<string, string>> = {
   whale598: '鲸鱼娘（精简）',
   'whale598-standard': '鲸鱼娘(标准)',
-  'whale598-custom-1': '自定义1',
-  'whale598-custom-2': '自定义2',
+  'whale598-custom-1': '病娇',
+  'whale598-custom-2': '小满',
 }
 
 export function isPetPreset(preset: string | undefined | null): boolean {
