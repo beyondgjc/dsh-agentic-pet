@@ -153,7 +153,7 @@ export function createSayTts(deps) {
     let inflight;
     let lastSpoken;
     let mutedUntil = 0;
-    const deliver = (text) => {
+    const deliver = (text, extras) => {
         generation += 1;
         const gen = generation;
         inflight?.abort();
@@ -169,15 +169,15 @@ export function createSayTts(deps) {
         const dup = lastSpoken !== undefined
             && lastSpoken.text === trimmed && Date.now() - lastSpoken.at < DEDUPE_MS;
         if (!speakable || dup) {
-            deps.deliver(trimmed);
+            deps.deliver(trimmed, undefined, extras);
             return;
         }
         lastSpoken = { text: trimmed, at: Date.now() };
-        holdAndDeliver(trimmed, config, gen);
+        holdAndDeliver(trimmed, config, gen, extras);
     };
     /** Race the synthesis against the bubble's patience; the first to land
      * delivers (audio or alone) and the loser is discarded, never late. */
-    const holdAndDeliver = (text, config, gen) => {
+    const holdAndDeliver = (text, config, gen, extras) => {
         const abort = new AbortController();
         inflight = abort;
         const holdMs = config.holdMs ?? DEFAULT_HOLD_MS;
@@ -190,7 +190,7 @@ export function createSayTts(deps) {
             if (inflight === abort)
                 inflight = undefined;
             if (gen === generation)
-                deps.deliver(text, audio);
+                deps.deliver(text, audio, extras);
         };
         const timer = setTimeout(() => finish(), holdMs);
         void synthesize(text, config, abort).then((audio) => { finish(audio); }, (error) => {

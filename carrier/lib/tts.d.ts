@@ -51,14 +51,14 @@ interface SayTtsDeps {
     window: BrowserWindow;
     /** The one delivery channel to the page: the bubble, optionally with its
      * voice. Main process owns the wire shape; this module owns the timing. */
-    deliver: (text: string, audio?: Uint8Array<ArrayBuffer>) => void;
+    deliver: (text: string, audio?: Uint8Array<ArrayBuffer>, extras?: Record<string, unknown>) => void;
     log?: (line: string) => void;
 }
 export interface SayTts {
     /** Forward one /say text to the page. Fire-and-forget: returns
      * immediately, never throws, and a newer call always wins — the older
      * delivery is abandoned (the newest say owns the bubble and the voice). */
-    deliver(text: string): void;
+    deliver(text: string, extras?: Record<string, unknown>): void;
 }
 /** Resolve the section for one pet: the shared defaults with this pet's
  * `voices[petId]` entry overlaid field-by-field (voiceId / speed / volume

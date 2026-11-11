@@ -580,8 +580,8 @@ async function main() {
         home: DSH_HOME,
         petId: PET_ID,
         window,
-        deliver: (text, audio) => {
-            window.webContents.send('pet:say', audio === undefined ? { text } : { text, audio });
+        deliver: (text, audio, extras) => {
+            window.webContents.send('pet:say', { ...extras, text, ...(audio === undefined ? {} : { audio }) });
         },
     });
     window.on('resize', () => {
@@ -1150,7 +1150,9 @@ async function main() {
                 // bubble + voice as ONE message once the mp3 lands (held ≤ holdMs —
                 // text and voice appear together instead of the voice trailing).
                 const text = typeof body.text === 'string' ? body.text.slice(0, 200) : '';
-                sayTts.deliver(text);
+                // B10 表达连续性：mood 随气泡穿到渲染层（剧场按情绪标签加权挑片段）。
+                const extras = typeof body.mood === 'string' ? { mood: body.mood } : undefined;
+                sayTts.deliver(text, extras);
                 send(200, { ok: true });
                 return;
             }
