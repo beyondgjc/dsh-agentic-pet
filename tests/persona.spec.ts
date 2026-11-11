@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { DEFAULT_PERSONA, MAX_PERSONA_CHARS, readPersonaCard } from '../src/persona.ts'
+import { DEFAULT_PERSONA, MAX_PERSONA_CHARS, PRESET_BUILTIN_CARDS, readPersonaCard } from '../src/persona.ts'
 import { mergeSettings } from '../src/settings-page.ts'
 
 const dirs: string[] = []
@@ -84,12 +84,18 @@ describe('per-preset persona slots (multi-pet)', () => {
     expect(readPersonaCard(home, 'whale598-custom-1')).toBe('自定义1 的卡')
     // …an unedited slot falls back to the global card (the seed effect)…
     expect(readPersonaCard(home, 'whale598-standard')).toBe('全局卡')
-    // …and a preset on a settings file without any card answers the default.
+    // …and a preset on a settings file without any card answers ITS OWN
+    // built-in card（鲸鱼娘/病娇/小满——对齐 dsh-persona-presets 的
+    // preset-cards 架构：清槽回落该槽预制人设，而非人人一张通用默认）。
     await writeFile(join(home, 'whale598', 'pet-settings.json'), JSON.stringify({
       personas: { 'whale598-custom-1': '自定义1 的卡' },
     }), 'utf8')
     expect(readPersonaCard(home, 'whale598-custom-1')).toBe('自定义1 的卡')
-    expect(readPersonaCard(home, 'whale598-standard')).toBe(DEFAULT_PERSONA)
+    expect(readPersonaCard(home, 'whale598-standard')).toBe(PRESET_BUILTIN_CARDS['whale598-standard'])
+    expect(readPersonaCard(home, 'whale598')).toBe(PRESET_BUILTIN_CARDS['whale598'])
+    expect(readPersonaCard(home, 'whale598-custom-2')).toBe(PRESET_BUILTIN_CARDS['whale598-custom-2'])
+    // unknown key (no built-in card for it) still answers the generic default
+    expect(readPersonaCard(home, 'unknown-preset')).toBe(DEFAULT_PERSONA)
   })
 
   it('mergeSettings: personas map — partial update, clear-on-empty, trim/cap, non-string ignored', () => {

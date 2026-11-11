@@ -44,9 +44,16 @@ export declare const DEFAULT_PERSONA = "\u4F60\u662F\u300C\u9CB8\u9C7C\u5A18\u30
  * runaway card would inflate every pet-session prompt; the sync reader
  * applies the same cap so a hand-edited file cannot bypass it. */
 export declare const MAX_PERSONA_CHARS = 8000;
+/** 各预设槽的内置默认卡（B10 后的人设收口，架构对齐 dsh-persona-presets 的
+ * preset-cards.ts）：槽卡清空 = 回落到这里，而不是所有人都挤一张通用默认。
+ * 文案为用户定制 verbatim（参考项目三卡：鲸鱼娘 / 病娇 / 小满），槽 1/2 共用
+ * 鲸鱼娘标准卡。persona row 挂 interpolate:false，卡内标记是字面文本。 */
+export declare const PRESET_BUILTIN_CARDS: Readonly<Record<string, string>>;
 /**
  * Read the configured character card for one preset slot: the per-preset
- * override `personas.<key>` → the legacy global `persona` card → default.
+ * override `personas.<key>` → the legacy global `persona` card → the
+ * preset's BUILT-IN card (PRESET_BUILTIN_CARDS，清槽即回落到该槽自己的
+ * 预制人设) → the generic default.
  * Sync on purpose — PromptSection.text is a synchronous provider called once
  * per assembly, and a ~1KB JSON read per request is noise next to the LLM
  * call it feeds, so there is no cache to invalidate. Both readers (this and
