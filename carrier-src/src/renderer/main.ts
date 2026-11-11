@@ -77,10 +77,30 @@ function requireElement<T extends Element>(selector: string): T {
   return element
 }
 
-const video = requireElement<HTMLVideoElement>('#video')
+// 当前身指针（switchClip 乒乓重赋值）；videoA 钉住 A 元素引用。
+let video = requireElement<HTMLVideoElement>('#video')
 video.addEventListener('error', () => {
   console.error(`[pet-video] source failed: ${video.src} ${String(video.error?.message ?? '')}`)
 })
+// B04 v2 双缓冲：A/B 两个【固定】元素乒乓，`video` 是"当前身"指针。v1 的
+// 冻结根因 = 用全局指针算 incoming（返回切换时指针已指向 outgoing，三元式
+// 塌缩成 incoming===outgoing → 自交叉自暂停）。v2 以固定元素引用乒乓，与
+// 指针解耦——首次切换与返回切换走同一条路。
+const videoA: HTMLVideoElement = video
+const videoB = document.createElement('video')
+videoB.muted = true
+videoB.playsInline = true
+videoB.crossOrigin = 'anonymous'
+videoB.addEventListener('error', () => {
+  console.error(`[pet-video] source failed: ${videoB.src} ${String(videoB.error?.message ?? '')}`)
+})
+// 交叉期旧层引用（under-lay：旧层恒 alpha 1，桌面永不透出——v1 实测"双身
+// 透底"的根因是双层各半透明）。淡入完成后旧层暂停并清引用。
+let prevVideo: HTMLVideoElement | undefined
+let fadeStart = 0
+let fadeMs = 0
+// WebGL 不可用 = 无交叉能力（switchClip 走可见节点直换降级）。
+let glFailed = false
 const stage = requireElement<HTMLCanvasElement>('#stage')
 const bubble = requireElement<HTMLDivElement>('#bubble')
 
@@ -143,7 +163,10 @@ function animationSource(key: string): string {
  * inside the key band and turned semi-transparent). Chroma-keying is only the
  * fallback for an opaque source.
  */
-function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
+function setupStage(canvas: HTMLCanvasElement): void {
+  // 无 video 参数：B04 双缓冲下当前身是模块级 `video` 指针（乒乓重赋值），
+  // 参数会把它遮蔽成 boot 时的 A 元素——draw 永远上传退役元素，画布冻结
+  // 在旧身最后一帧（v2 首测实锤）。draw 闭包读指针才是"当前身"。
   const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false })
   if (gl === null) {
     // No WebGL: fall back to the raw video (white matte visible, still usable).
@@ -167,8 +190,8 @@ function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
     'attribute vec2 p; varying vec2 v;'
     + 'void main(){ v = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }'))
   gl.attachShader(program, compile(gl.FRAGMENT_SHADER,
-    'precision highp float; varying vec2 v; uniform sampler2D t;'
-    + 'void main(){ gl_FragColor = texture2D(t, v); }'))
+    'precision highp float; varying vec2 v; uniform sampler2D t; uniform float uAlpha;'
+    + 'void main(){ vec4 c = texture2D(t, v); gl_FragColor = vec4(c.rgb, c.a * uAlpha); }'))
   gl.linkProgram(program)
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw new Error(`pet renderer: program link failed: ${String(gl.getProgramInfoLog(program))}`)
@@ -180,38 +203,63 @@ function setupStage(video: HTMLVideoElement, canvas: HTMLCanvasElement): void {
   const position = gl.getAttribLocation(program, 'p')
   gl.enableVertexAttribArray(position)
   gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
-  const texture = gl.createTexture()
-  gl.bindTexture(gl.TEXTURE_2D, texture)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  const uAlpha = gl.getUniformLocation(program, 'uAlpha')
+  // B04：每层一个纹理（WeakMap 随元素回收）。
+  const textures = new WeakMap<object, WebGLTexture>()
+  const textureFor = (el: HTMLVideoElement): WebGLTexture => {
+    const existing = textures.get(el)
+    if (existing !== undefined) return existing
+    const texture = gl.createTexture()
+    if (texture === null) throw new Error('pet renderer: texture allocation failed')
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    textures.set(el, texture)
+    return texture
+  }
   gl.enable(gl.BLEND)
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
   gl.clearColor(0, 0, 0, 0)
 
   const draw = (): void => {
-    if (video.readyState < 2 || video.videoWidth === 0) return
+    // B04 交叉期两层混绘：旧层恒 alpha 1 在下（桌面不透出，双身读作动作
+    // 起手的过渡影），新层按进度盖上；淡完暂停旧层并清引用。非交叉期单层。
+    const now = performance.now()
+    const prev = prevVideo
+    const fading = prev !== undefined && fadeMs > 0 && now - fadeStart < fadeMs
+    const layers: Array<{ el: HTMLVideoElement; alpha: number }> = fading && prev !== undefined
+      ? [
+        { el: prev, alpha: 1 },
+        { el: video, alpha: Math.min(1, (now - fadeStart) / fadeMs) },
+      ]
+      : [{ el: video, alpha: 1 }]
+    if (!fading && prev !== undefined) {
+      // 淡入完成：旧层退场（pause 即可，元素留在乒乓池里复用）。
+      prev.pause()
+      prevVideo = undefined
+    }
+    if (video.videoWidth === 0) return
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth
       canvas.height = video.videoHeight
     }
     gl.viewport(0, 0, canvas.width, canvas.height)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
     gl.clear(gl.COLOR_BUFFER_BIT)
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-  }
-  type FrameScheduler = HTMLVideoElement & {
-    requestVideoFrameCallback?: (callback: () => void) => number
-  }
-  const scheduled = video as FrameScheduler
-  const schedule = (): void => {
-    if (typeof scheduled.requestVideoFrameCallback === 'function') {
-      // Draw per decoded frame; no work between frames.
-      scheduled.requestVideoFrameCallback(() => { draw(); schedule() })
-    } else {
-      requestAnimationFrame(() => { draw(); schedule() })
+    for (const { el, alpha } of layers) {
+      // 未就绪的层跳帧（incoming 首帧解码前不画，旧层还满屏顶着——无空窗）。
+      if (el.readyState < 2 || el.videoWidth === 0) continue
+      gl.bindTexture(gl.TEXTURE_2D, textureFor(el))
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el)
+      gl.uniform1f(uAlpha, alpha)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     }
+  }
+  // 双缓冲后 rVFC 只能挂一个元素——统一 rAF 驱动（两层都要喂；rAF 空转的
+  // 成本低于逐层 rVFC 管理的复杂度）。
+  const schedule = (): void => {
+    requestAnimationFrame(() => { draw(); schedule() })
   }
   schedule()
 }
@@ -222,15 +270,67 @@ let baseState: BaseState = 'idle'
 let override: 'waiting_approval' | 'waiting_question' | null = null
 let errorUntil = 0
 
+/** 片段切换的交叉时长（body.json capabilities.transition，0-500 钳制）。
+ * toIdle（动作收尾回到待机）用更从容的 toIdleMs，起手用 defaultMs。 */
+function transitionMsFor(toIdle: boolean): number {
+  const t = _bodyTransitions
+  if (t === undefined) return 0
+  return Math.max(0, toIdle ? t.toIdleMs : t.defaultMs)
+}
+
+/** 拖拽/异常路径的交叉终局：旧层立即退场，屏上永远只有一个身形。
+ * （v1 实测：拖拽撞上交叉窗口会看到两个身位。） */
+function finalizeFade(): void {
+  const prev = prevVideo
+  if (prev !== undefined) {
+    prev.pause()
+    prevVideo = undefined
+    fadeMs = 0
+  }
+}
+
+/** B04 v2 片段切换：固定元素乒乓 + under-lay 交叉淡入。无 GL 或零交叉时长
+ * 降级为直换（旧层立即暂停）。同源重入（状态重渲染）= 同步 loop 标记 +
+ * 确保播放，不重启不换层。 */
+function switchClip(source: string, loop: boolean, transitionMs: number): void {
+  if (video.src === source) {
+    video.loop = loop
+    void video.play().catch(() => { /* autoplay muted: always allowed */ })
+    return
+  }
+  const outgoing = video
+  // v2 修复核心：incoming 永远是"另一块"固定元素，与全局指针无关——
+  // v1 用 `outgoing === videoB ? video : videoB` 算 incoming，返回切换时
+  // video 已指向 outgoing，塌缩成自交叉自暂停（单动作后冻结的根因）。
+  const incoming = outgoing === videoA ? videoB : videoA
+  // 在途交叉先终局：换层即旧层的旧层退场，避免泄漏播放或冻结垫底。
+  finalizeFade()
+  incoming.src = source
+  incoming.loop = loop
+  void incoming.play().catch(() => { /* autoplay muted: always allowed */ })
+  if (glFailed) {
+    // 无 GL 的降级：可见节点直换（无交叉能力）。outgoing 可能已被上一次
+    // 直换摘出 DOM——无父节点时直接挂到 body。
+    incoming.style.display = 'block'
+    if (outgoing.parentNode !== null) outgoing.parentNode.replaceChild(incoming, outgoing)
+    else document.body.appendChild(incoming)
+  } else if (transitionMs > 0) {
+    // under-lay 交叉：旧层保持 alpha 1 继续垫底，新层按进度盖上；淡入
+    // 完成后由 draw() 统一暂停旧层。outgoing 与 incoming 恒为不同元素。
+    prevVideo = outgoing
+    fadeStart = performance.now()
+    fadeMs = transitionMs
+  } else {
+    outgoing.pause()
+  }
+  video = incoming
+}
+
 function play(key: string): void {
   const source = animationSource(key)
-  if (video.src !== source) {
-    video.src = source
-    // State animations loop (a state persists until an event changes it);
-    // the celebration is a one-shot that hands back via its ended event.
-    video.loop = key !== 'celebrate'
-    void video.play().catch(() => { /* autoplay muted: always allowed */ })
-  }
+  // State animations loop (a state persists until an event changes it);
+  // the celebration is a one-shot that hands back via its ended event.
+  switchClip(source, key !== 'celebrate', key === 'idle' ? transitionMsFor(true) : transitionMsFor(false))
 }
 
 function render(): void {
@@ -318,15 +418,15 @@ function playOneShotAt(name: AnimationName, requestId?: string, opts?: { noMirro
     })
     render()
   }
+  // B04：切层先于挂钩——onended/onerror 必须落在即将播放的新身元素上
+  // （switchClip 已把 video 指到 incoming 并带交叉起播）。
+  switchClip(source, false, transitionMsFor(false))
   video.onended = handBack
   video.onerror = handBack
-  video.loop = false
-  video.src = source
   // past the same-src early return above: the stage really changed — record
   // it for bodyRuntime.lastClip (the "最近播放的片段" the B08 docstring
   // promises; a video.src snapshot structurally misses the gesture window).
   lastPlayedClip = `${name.file}.webm`
-  void video.play().catch(() => { /* autoplay muted: always allowed */ })
 }
 
 function flashError(): void {
@@ -757,7 +857,7 @@ async function loadBodyDescription(): Promise<void> {
 }
 
 function boot(): void {
-  setupStage(video, stage)
+  setupStage(stage)
   render()
   void loadBodyDescription()
 }
@@ -847,6 +947,9 @@ function handleTouch(clientX: number, clientY: number): void {
 
 petBody.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return
+  // B04：开拖即终局交叉——拖拽撞上交叉窗口会看到两个身位（v1 实测教训），
+  // 拖拽永远单一身形（新身继续播，旧身立即退场）。
+  finalizeFade()
   try { petBody.setPointerCapture(event.pointerId) } catch { /* pointer already gone */ }
   const startX = event.screenX
   const startY = event.screenY
