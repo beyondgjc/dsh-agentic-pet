@@ -17,6 +17,93 @@ window.__ModuleLoader__.load({
     var READ = '/api/pet-settings/read'
     var UPDATE = '/api/pet-settings/update'
     var RUNTIME = '/api/pet-settings/electron-runtime'
+    // B10+: 人设区对齐 persona-presets——卡面路由 + 导入软警告阈值 + pps-*
+    // 样式层（hover/focus/transition 需要伪类，内联样式表达不了）。
+    var AVATAR_POST = '/api/pet-settings/persona-avatar'
+    var AVATAR_GET = '/api/pet-settings/persona-avatar/'
+    var SOFT_WARN_CHARS = 10000
+    var PPS_CSS = [
+      '.pps-fold{display:flex;align-items:center;gap:10px;padding:6px 8px;margin:0 -8px 6px;border-radius:8px;cursor:pointer;transition:background .15s ease;flex-wrap:wrap}',
+      '.pps-fold:hover{background:rgba(127,127,127,.08)}',
+      '.pps-chevron{display:inline-block;width:14px;text-align:center;font-weight:700;font-size:11px;opacity:.8;transition:transform .15s ease}',
+      '.pps-chevron-open{transform:rotate(90deg)}',
+      '.pps-input{border:1px solid rgba(127,127,127,.35);border-radius:8px;background:transparent;color:inherit;font:inherit;transition:border-color .15s ease,box-shadow .15s ease}',
+      '.pps-input:hover{border-color:rgba(127,127,127,.55)}',
+      '.pps-input:focus{outline:none;border-color:rgba(124,108,240,.7);box-shadow:0 0 0 2px rgba(124,108,240,.18)}',
+      '.pps-name-input{width:170px;font-weight:700}',
+      '.pps-textarea{width:100%;height:100%;box-sizing:border-box;resize:vertical;line-height:1.6;padding:8px 10px}',
+      '.pps-btn{border:1px solid rgba(127,127,127,.4);border-radius:8px;cursor:pointer;font:inherit;font-size:12px;padding:4px 14px;background:transparent;color:inherit;display:inline-flex;align-items:center;transition:background .15s ease,border-color .15s ease,opacity .15s ease}',
+      '.pps-btn:hover{background:rgba(127,127,127,.1);border-color:rgba(127,127,127,.6)}',
+      '.pps-btn:disabled{opacity:.45;cursor:default}',
+      '.pps-btn-primary{font-weight:700;border-color:rgba(124,108,240,.55)}',
+      '.pps-btn-primary:hover{background:rgba(124,108,240,.14);border-color:rgba(124,108,240,.8)}',
+      '.pps-avatar{width:120px;max-height:260px;object-fit:contain;border-radius:8px;border:1px solid rgba(127,127,127,.3);background:rgba(127,127,127,.06);flex:0 0 auto;align-self:flex-start}',
+      '.pps-count{color:rgba(127,127,127,.85);font-size:12px}',
+      '.pps-count-over{color:#ff7369;font-size:12px;font-weight:600}',
+      '.pps-warn{color:#e8b268;font-size:12px;background:rgba(232,178,104,.1);border:1px solid rgba(232,178,104,.3);border-radius:999px;padding:2px 10px}',
+    ].join('\n')
+
+    // ── 角色卡导入（本机解析，文件不过服务器）────────────────────────
+    // Character Card V2/V3（SillyTavern 生态标准）：角色数据以 base64 JSON
+    // 嵌在 PNG tEXt 块里（V2 关键字 chara，V3 是 ccv3）。解析出的多字段按
+    // 中文小节结构化平铺，空字段跳过；character_book（世界书）v1 不导入只提示。
+
+    var latin1 = function (bytes, start, end) {
+      var s = ''
+      for (var i = start; i < end; i++) s += String.fromCharCode(bytes[i])
+      return s
+    }
+
+    var decodeBase64Utf8 = function (b64) {
+      var bin = atob(String(b64).replace(/\s+/g, ''))
+      var bytes = new Uint8Array(bin.length)
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      return new TextDecoder('utf-8').decode(bytes)
+    }
+
+    // 遍历 PNG chunk 找 tEXt 的 chara/ccv3 块，返回解析后的卡 JSON；不是
+    // 角色卡 PNG 时返回 null（签名不对/没有块/块内容解不开都算）。
+    var pngCharaJson = function (buffer) {
+      try {
+        var dv = new DataView(buffer)
+        if (dv.byteLength < 8 || dv.getUint8(0) !== 0x89 || dv.getUint8(1) !== 0x50) return null
+        var off = 8
+        while (off + 8 <= dv.byteLength) {
+          var len = dv.getUint32(off)
+          var type = latin1(new Uint8Array(buffer, off + 4, 4), 0, 4)
+          if (type === 'tEXt') {
+            var data = new Uint8Array(buffer, off + 8, len)
+            var zero = -1
+            for (var i = 0; i < data.length; i++) { if (data[i] === 0) { zero = i; break } }
+            if (zero > 0) {
+              var keyword = latin1(data, 0, zero)
+              if (keyword === 'chara' || keyword === 'ccv3') {
+                try { return JSON.parse(decodeBase64Utf8(latin1(data, zero + 1, data.length))) } catch (e) { /* 继续扫其它块 */ }
+              }
+            }
+          }
+          if (type === 'IEND') break
+          off += 12 + len // length(4) + type(4) + data(len) + crc(4)
+        }
+      } catch (e) { /* 烂图按 null 处理 */ }
+      return null
+    }
+
+    // 卡 JSON（V1 顶层或 V2/V3 的 data 子对象）→ 结构化平铺文本。
+    function flattenCard(raw) {
+      try {
+        var d = raw && raw.data && (raw.data.name || raw.data.description) ? raw.data : raw
+        if (!d || typeof d !== 'object') return null
+        var sections = [['名字', 'name'], ['设定', 'description'], ['性格', 'personality'], ['场景', 'scenario'], ['开场白', 'first_mes'], ['对话示例', 'mes_example'], ['备注', 'creator_notes']]
+        var out = []
+        for (var i = 0; i < sections.length; i++) {
+          var v = d[sections[i][1]]
+          if (typeof v === 'string' && v.trim() !== '') out.push('【' + sections[i][0] + '】' + v.trim())
+        }
+        if (out.length === 0) return null
+        return { text: out.join('\n\n'), hasBook: !!d.character_book }
+      } catch (e) { return null }
+    }
 
     // Theme-neutral: inherit foreground, translucent borders — readable on
     // both the host's dark and light themes without a design system.
@@ -158,6 +245,14 @@ window.__ModuleLoader__.load({
       var personaOpenState = useState({})
       var personaOpen = personaOpenState[0]
       var setPersonaOpen = personaOpenState[1]
+      // 卡面（角色卡 PNG 原图，host 存 persona-avatars/<presetId>.png，纯展示
+      // 不进 prompt）：onError（404）隐藏降级；导入成功后 bust 刷新。
+      var avatarFailState = useState({})
+      var avatarFail = avatarFailState[0]
+      var setAvatarFail = avatarFailState[1]
+      var avatarBustState = useState({})
+      var avatarBust = avatarBustState[0]
+      var setAvatarBust = avatarBustState[1]
 
       // pets 镜像进 ref：轮询回调查最新列表而不用把 data 拖进依赖。
       var petsRef = useRef([])
@@ -544,6 +639,66 @@ window.__ModuleLoader__.load({
         update({ tts: { voices: next } }, doneMessage)
       }
 
+      // 导入：.md/.txt 直达草稿；.json/.png 解析角色卡后结构化平铺。结果只
+      // 填草稿（不自动保存）——检查/删减后照常走「保存人设」唯一写路径。
+      // PNG 的卡面原图单独上传（persona-avatars/，展示用不进 prompt），失败
+      // 静默——图是装饰，不该打扰卡文本的导入反馈。
+      var handleImport = function (presetId, file) {
+        if (!file) return
+        var max = Number((personaSlotOf(presetId) || {}).maxLength) || 20000
+        var name = file.name.toLowerCase()
+        var finish = function (imported) {
+          if (!imported) { setMsg(file.name + '：解析失败——不是可识别的角色卡'); return }
+          setPersonaDrafts(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = imported.text; return n })()) })
+          setPersonaOpen(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = true; return n })()) })
+        }
+        if (/\.png$/.test(name)) {
+          var reader = new FileReader()
+          reader.onload = function () {
+            var card = pngCharaJson(reader.result)
+            if (!card) { setMsg(file.name + '：不是角色卡 PNG（未找到内嵌角色数据）'); return }
+            finish(flattenCard(card))
+          }
+          reader.onerror = function () { setMsg(file.name + '：读取失败') }
+          reader.readAsArrayBuffer(file)
+          var imgReader = new FileReader()
+          imgReader.onload = function () {
+            var b64 = String(imgReader.result || '').split(',')[1] || ''
+            if (!b64) return
+            fetch(AVATAR_POST, {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ presetId: presetId, data: b64 }),
+            })
+              .then(function (r) { return r.json() })
+              .then(function (d) {
+                if (d && d.ok) {
+                  setAvatarFail(function (prev) { var n = Object.assign({}, prev); n[presetId] = false; return n })
+                  setAvatarBust(function (prev) { var n = Object.assign({}, prev); n[presetId] = Date.now(); return n })
+                }
+              })
+              .catch(function () { /* 图是装饰：失败不打扰 */ })
+          }
+          imgReader.readAsDataURL(file)
+          return
+        }
+        var textReader = new FileReader()
+        textReader.onload = function () {
+          var text = String(textReader.result || '')
+          if (/\.json$/.test(name)) {
+            try {
+              var card = flattenCard(JSON.parse(text))
+              if (card) { finish(card); return }
+              setMsg(file.name + '：JSON 里没有角色卡字段（需要 name/description 等）')
+            } catch (e) { setMsg(file.name + '：JSON 解析失败') }
+            return
+          }
+          finish({ text: text })
+        }
+        textReader.onerror = function () { setMsg(file.name + '：读取失败') }
+        textReader.readAsText(file)
+      }
+
       // 人设保存走独立的 fetch（不走 update）：保存成功才把文本框交还 host
       // 生效值（清该槽草稿），失败时草稿留在框里供重试——长文本不该因为一次
       // 请求失败就丢。text 参数显式传入，避免闭包读到旧渲染趟的草稿。空文本
@@ -564,6 +719,10 @@ window.__ModuleLoader__.load({
             else {
               setPersonaDrafts(function (prev) { var n = Object.assign({}, prev); delete n[presetId]; return n })
               setMsg(doneMessage)
+              // 清空保存 = 恢复默认：host 删了卡面文件，本地同步隐藏（避免 404 重试）。
+              if (String(text || '').trim() === '') {
+                setAvatarFail(function (prev) { var n = Object.assign({}, prev); n[presetId] = true; return n })
+              }
             }
             setWarnings(d && d.warnings && d.warnings.length ? d.warnings.join('；') : '')
             refresh()
@@ -667,46 +826,70 @@ window.__ModuleLoader__.load({
         // ── 人设（按预设 4 槽；身体规则是宿主契约，不在此编辑） ──
         personaSlots ? h(Section, { title: h('span', null, '人设 ',
           h('span', { style: { fontSize: 11, fontWeight: 400, color: 'rgba(127,127,127,.9)' } }, '每个预设一张卡 · 点 ▾ 展开编辑 · 改动会击穿会话前缀缓存')) },
+          h('style', null, PPS_CSS),
           PRESET_SLOT_IDS.map(function (presetId) {
             var slot = personaSlotOf(presetId)
             if (!slot) return null
             var draft = personaDrafts[presetId]
-            var open = personaOpen[presetId] === true || (draft !== null && draft !== undefined)
+            // 折叠纯手动（▾/▸）——有草稿不强制展开，收起时头部挂琥珀「有未
+            // 保存草稿」提示（不静默藏字、也不锁死开关；persona-presets 同款）。
+            var open = personaOpen[presetId] === true
+            var hasDraft = draft !== null && draft !== undefined
             var text = personaTextOf(presetId)
             var count = Array.from(text).length
-            var max = Number(slot.maxLength) || 8000
+            var max = Number(slot.maxLength) || 20000
             var toggle = function () {
               setPersonaOpen(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = !open; return n })()) })
             }
-            var header = h('div', { style: Object.assign({}, row, { marginBottom: 4 }) },
-              h('button', { type: 'button', onClick: toggle, 'aria-expanded': open, title: open ? '收起' : '展开编辑',
-                style: { border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', padding: '2px 4px', fontWeight: 700, font: 'inherit' } },
-                open ? '▾' : '▸'),
-              h('input', { key: 'pname-' + presetNameOf(presetId), style: Object.assign({}, inputStyle, { width: 170, fontWeight: 700 }), defaultValue: presetNameOf(presetId), title: '给人设取名；点击空白处或回车生效；清空恢复内置名',
+            var header = h('div', { className: 'pps-fold', onClick: toggle, role: 'button', 'aria-expanded': open, title: open ? '收起' : '展开编辑' },
+              h('span', { className: open ? 'pps-chevron pps-chevron-open' : 'pps-chevron', 'aria-hidden': true }, '▸'),
+              h('input', { key: 'pname-' + presetNameOf(presetId), className: 'pps-input pps-name-input', defaultValue: presetNameOf(presetId), title: '给人设取名；点击空白处或回车生效；清空恢复内置名',
+                onClick: function (e) { e.stopPropagation() },
                 onBlur: function (e) { commitPresetName(presetId, e.target.value) },
                 onKeyDown: function (e) { if (e.key === 'Enter') { commitPresetName(presetId, e.target.value); e.target.blur() } },
                 'aria-label': '人设名 · ' + presetId }),
-              h('span', { style: muted }, '对应预设：' + (PRESET_SLOT_LABELS[presetId] || presetId)))
+              h('span', { style: muted }, '对应预设：' + (PRESET_SLOT_LABELS[presetId] || presetId)),
+              hasDraft && !open ? h('span', { className: 'pps-warn' }, '有未保存草稿') : null)
             if (!open) return h('div', { key: presetId, style: { marginBottom: 10 } }, header)
+            // 编辑区：卡面图（有则展示）在左，内容 textarea 在右——图只是装饰
+            // （host 存 persona-avatars/<presetId>.png，不进 prompt），404 时
+            // onError 隐藏、textarea 占满整行；flex 默认 stretch 让有图时
+            // textarea 与图片等高，无图时高度由 minHeight 决定。
+            var avatarSrc = AVATAR_GET + presetId + (avatarBust[presetId] ? '?t=' + avatarBust[presetId] : '')
             return h('div', { key: presetId, style: { marginBottom: 14 } },
               header,
-              h('textarea', {
-                style: Object.assign({}, inputStyle, { width: '100%', minHeight: 96, resize: 'vertical', lineHeight: 1.5, padding: '6px 8px' }),
-                value: text,
-                placeholder: slot.default,
-                onChange: function (e) {
-                  setPersonaDrafts(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = e.target.value; return n })()) })
-                },
-                'aria-label': '人设文本 · ' + (PRESET_SLOT_LABELS[presetId] || presetId),
-              }),
-              h('div', { style: row },
-                h(SButton, { variant: 'primary', disabled: busy || draft === null || draft === undefined, onClick: function () { savePersonaSlot(presetId, text, '人设已保存') } }, '保存人设'),
-                h(SButton, { disabled: busy, onClick: function () { savePersonaSlot(presetId, '', '已恢复默认人设（回落继承卡）') } }, '恢复默认'),
-                h('span', { style: count > max ? { color: '#ff7369', fontSize: 12 } : muted },
-                  String(count) + ' / ' + String(max) + ' 字')))
+              h('div', { style: { display: 'flex', gap: 10, alignItems: 'stretch' } },
+                avatarFail[presetId] !== true ? h('img', {
+                  src: avatarSrc,
+                  alt: '卡面',
+                  className: 'pps-avatar',
+                  onError: function () { setAvatarFail(function (prev) { var n = Object.assign({}, prev); n[presetId] = true; return n }) },
+                }) : null,
+                h('div', { style: { flex: '1 1 auto', minWidth: 0, minHeight: 260 } },
+                  h('textarea', {
+                    className: 'pps-input pps-textarea',
+                    value: text,
+                    placeholder: slot.default,
+                    onChange: function (e) {
+                      setPersonaDrafts(function (prev) { return Object.assign({}, prev, (function () { var n = {}; n[presetId] = e.target.value; return n })()) })
+                    },
+                    'aria-label': '人设文本 · ' + presetNameOf(presetId),
+                  }))),
+              h('div', { className: 'pps-fold', style: { cursor: 'default' } },
+                h('button', { className: 'pps-btn pps-btn-primary', disabled: busy || draft === null || draft === undefined,
+                  onClick: function () { savePersonaSlot(presetId, text, '人设已保存') } }, '保存人设'),
+                h('button', { className: 'pps-btn', disabled: busy, onClick: function () { savePersonaSlot(presetId, '', '已恢复默认人设（回落内置卡）') } }, '恢复默认'),
+                h('label', { className: 'pps-btn', title: '导入 .md/.txt/.json 或角色卡 PNG（SillyTavern 格式，解析在本机完成）' },
+                  '导入',
+                  h('input', {
+                    type: 'file', accept: '.md,.txt,.json,.png', style: { display: 'none' },
+                    onChange: function (e) { handleImport(presetId, e.target.files && e.target.files[0]); e.target.value = '' },
+                  })),
+                h('span', { className: count > max ? 'pps-count-over' : 'pps-count' }, String(count) + ' / ' + String(max) + ' 字'),
+                count > SOFT_WARN_CHARS ? h('span', { className: 'pps-warn' }, '每回合注入 prompt，注意 token 消耗') : null))
           }),
           h(Hint, null, '每个预设一张角色卡：宠物用哪个预设，就带哪张卡（在上方「会话模式」按宠选择）。身体规则（气泡、动作、本子的用法）是固定契约，不在这里编辑。'),
-          h(Hint, null, '没单独编辑过的槽显示继承卡（全局卡或默认）；清空并保存即回落继承；改动下一次对话就生效，无需重启。'),
+          h(Hint, null, '导入支持 .md/.txt/.json 或角色卡 PNG（SillyTavern 生态的卡，解析在本机完成、文件不上传）；PNG 的卡面图会单独保存展示。清空并保存即回落该槽内置卡；改动下一次对话就生效，无需重启。'),
           h(Hint, null, '改人设不会改写本子里已有的记忆——换了设定，宠物还得慢慢适应自己想起来的旧事。')) : null,
 
         // ── 好感度（每宠独立账本） ──

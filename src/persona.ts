@@ -78,7 +78,7 @@ export const DEFAULT_PERSONA =
 /** Upper bound for the user-edited card, enforced by the settings merge. A
  * runaway card would inflate every pet-session prompt; the sync reader
  * applies the same cap so a hand-edited file cannot bypass it. */
-export const MAX_PERSONA_CHARS = 8000
+export const MAX_PERSONA_CHARS = 20000
 
 /** 各预设槽的内置默认卡（B10 后的人设收口，架构对齐 dsh-persona-presets 的
  * preset-cards.ts）：槽卡清空 = 回落到这里，而不是所有人都挤一张通用默认。

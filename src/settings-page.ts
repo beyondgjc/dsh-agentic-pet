@@ -26,13 +26,13 @@
 
 import { spawn } from 'node:child_process'
 
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 import { rm } from 'node:fs/promises'
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
 
@@ -407,6 +407,18 @@ function isTrusted(req: IncomingMessage): boolean {
 
 
 
+// 卡面（角色卡 PNG 原图）目录：whale598/persona-avatars/<presetId>.png，
+// 纯展示用（prompt 永远看不到图）；presetId 是插件级键（§8 允许根级）。
+const AVATAR_DIR = 'persona-avatars'
+
+function avatarPath(home: string, presetId: string): string {
+
+  return join(home, 'whale598', AVATAR_DIR, `${presetId}.png`)
+
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
 
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -417,7 +429,7 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
 
 
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+async function readJsonBody(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<Record<string, unknown> | undefined> {
 
   const chunks: Buffer[] = []
 
@@ -427,7 +439,7 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
 
     size += chunk.length
 
-    if (size > 1024 * 1024) return undefined
+    if (size > maxBytes) return undefined
 
     chunks.push(chunk as Buffer)
 
@@ -1594,6 +1606,19 @@ export function installSettingsPage(
 
     const next = mergeSettings(current, patch as Record<string, unknown>)
 
+    // 清槽 = 卡面一起退场：槽卡被删（清空保存）时同步删掉该槽的卡面文件
+    // ——卡面只在槽有卡时存在（persona-presets 同语义）。
+
+    for (const presetId of PET_PRESET_IDS) {
+
+      if ((next.personas ?? {})[presetId] === undefined) {
+
+        try { rmSync(avatarPath(home, presetId)) } catch { /* absent — fine */ }
+
+      }
+
+    }
+
     // Binding validation is patch-aware: only a save that actually edits the
 
     // electron binding is hard-blocked. An EXISTING binding that later became
@@ -1667,6 +1692,100 @@ export function installSettingsPage(
   })
 
 
+
+  // POST /api/pet-settings/persona-avatar — 存导入的角色卡图（{presetId,
+  // data: base64 PNG}）。PNG 签名必须、8MB 上限；写路径由白名单派生，
+  // presetId 无法穿越目录（persona-presets 同款边界）。
+
+  route('POST', '/api/pet-settings/persona-avatar', async (req, res) => {
+
+    const body = await readJsonBody(req, 12_000_000)
+
+    if (body === undefined) {
+
+      writeJson(res, 422, { error: 'invalid JSON body' })
+
+      return
+
+    }
+
+    const presetId = typeof body.presetId === 'string' ? body.presetId : ''
+
+    if (!PET_PRESET_IDS.has(presetId)) {
+
+      writeJson(res, 422, { error: 'unknown preset id' })
+
+      return
+
+    }
+
+    const data = typeof body.data === 'string' ? body.data : ''
+
+    let bytes: Buffer
+
+    try {
+
+      bytes = Buffer.from(data, 'base64')
+
+    } catch {
+
+      writeJson(res, 422, { error: 'bad base64' })
+
+      return
+
+    }
+
+    if (bytes.length < PNG_SIGNATURE.length || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+
+      writeJson(res, 422, { error: 'not a PNG image' })
+
+      return
+
+    }
+
+    if (bytes.length > 8_000_000) {
+
+      writeJson(res, 422, { error: 'image too large (8MB ceiling)' })
+
+      return
+
+    }
+
+    const path = avatarPath(home, presetId)
+
+    mkdirSync(dirname(path), { recursive: true })
+
+    writeFileSync(path, bytes)
+
+    writeJson(res, 200, { ok: true })
+
+  })
+
+  // GET /api/pet-settings/persona-avatar/<presetId> — 设置页 <img> 的卡面
+  // 图。每个白名单 id 一条 exact 路由（webserver 只匹配 exact 路径）；槽无
+  // 图时 404，客户端降级隐藏 <img>。
+
+  for (const avatarPresetId of PET_PRESET_IDS) {
+
+    route('GET', `/api/pet-settings/persona-avatar/${avatarPresetId}`, async (_req, res) => {
+
+      try {
+
+        const bytes = readFileSync(avatarPath(home, avatarPresetId))
+
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' })
+
+        res.end(bytes)
+
+      } catch {
+
+        writeJson(res, 404, { error: 'no avatar' })
+
+      }
+
+    })
+
+  }
 
   route('POST', '/api/pet-settings/reset-affection', async (_req, res) => {
 
