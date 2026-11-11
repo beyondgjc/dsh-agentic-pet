@@ -59,7 +59,7 @@ import { voiceBindingSnapshot, type PetDriverControl } from './driver.ts'
 
 import { readElectronRuntimeStatus } from './electron-runtime-status.ts'
 
-import { DEFAULT_PERSONA, MAX_PERSONA_CHARS } from './persona.ts'
+import { DEFAULT_PERSONA, MAX_PERSONA_CHARS, PRESET_BUILTIN_CARDS } from './persona.ts'
 import { PET_PRESET_IDS } from './binding.ts'
 
 import { parseClock } from './rhythm.ts'
@@ -1379,13 +1379,20 @@ export function installSettingsPage(
 
       const global = typeof settings.persona === 'string' ? settings.persona.trim() : ''
 
-      const value = own !== '' ? own : global !== '' ? global : DEFAULT_PERSONA
+      // B10 后的回落链与 persona row 的 readPersonaCard 保持同构：
+      // 槽卡 → 全局卡 → 该槽内置卡（PRESET_BUILTIN_CARDS）→ 通用默认。
+      // UI 显示的"生效值"必须和 prompt 组装读到的一致，否则用户看到的卡
+      // 和她实际用着的卡是两张（实测踩过：UI 显示旧通用默认=像被覆盖）。
+
+      const builtin = PRESET_BUILTIN_CARDS[presetId] ?? DEFAULT_PERSONA
+
+      const value = own !== '' ? own : global !== '' ? global : builtin
 
       personas[presetId] = {
 
         value,
 
-        default: DEFAULT_PERSONA,
+        default: builtin,
 
         maxLength: MAX_PERSONA_CHARS,
 
