@@ -1158,7 +1158,9 @@ async function main() {
                     window.webContents.send('pet:say', {
                         letter: true,
                         petId: PET_ID,
-                        letterAt: Date.now(),
+                        // letterAt 三处同值的第三处：/say 线路透传工具的档案时间戳——
+                        // 渲染层收好回执用它匹配档案条目（工具/线路/回执一个键）。
+                        letterAt: typeof body.letterAt === 'number' ? body.letterAt : Date.now(),
                         text,
                     });
                     send(200, { ok: true });
