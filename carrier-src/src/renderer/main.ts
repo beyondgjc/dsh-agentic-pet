@@ -116,7 +116,7 @@ const LETTER_CSS = [
   '.letter-opening{animation:none;cursor:default}',
   '.letter-seal{width:18px;height:18px;background:#b04a3a;border-radius:50%;margin:-30px auto 14px;box-shadow:0 1px 3px rgba(0,0,0,.3);position:relative}',
   '.letter-hint{font-size:12px;color:rgba(58,47,30,.85);margin:0}',
-  '.letter-paper{width:100%;box-sizing:border-box;padding:12px 14px;background:linear-gradient(#f4e7c8,#eeddb4);border:1px solid rgba(58,47,30,.35);border-radius:10px;color:#3a2f1e;font-family:KaiTi,STKaiti,Georgia,serif;line-height:1.7}',
+  '.letter-paper{width:300px;box-sizing:border-box;padding:14px 16px;background:linear-gradient(#f6ead0,#eeddb4);border:1px solid rgba(58,47,30,.4);border-radius:10px;box-shadow:0 6px 22px rgba(20,30,50,.28);color:#3a2f1e;font-family:KaiTi,STKaiti,Georgia,serif;line-height:1.8;font-size:14px}',
   '.letter-paper .bubble-detail{margin:0 0 8px;white-space:pre-wrap}',
   '.letter-close{border:1px solid rgba(58,47,30,.4);border-radius:6px;background:rgba(58,47,30,.08);color:#3a2f1e;font:inherit;font-size:12px;padding:2px 10px;cursor:pointer}',
 ].join('\n')
@@ -1198,7 +1198,13 @@ globals.petDesktop?.onSay((notice) => {
       globals.petDesktop?.setBubbleVisible(false)
     }
     const showPaper = function (): void {
-      bubble.replaceChildren(paper, close)
+      // 信纸卡片（.letter-paper：米色渐变底 + 楷体）承载正文与收好按钮——
+      // 密封态时 bubble 容器已脱壳（透明/auto 宽），拆开后由信纸自己给出
+      // 纸面与宽度（300px 定宽，避免 auto 宽度自引用塌缩）。
+      const card = document.createElement('div')
+      card.className = 'letter-paper'
+      card.append(paper, close)
+      bubble.replaceChildren(card)
       globals.petDesktop?.setBubbleVisible(true)
       const bytes = notice.audio
       if (bytes !== undefined && bytes.length > 0) playSayAudio(notice.text, bytes)
