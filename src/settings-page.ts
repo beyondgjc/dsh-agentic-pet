@@ -1833,6 +1833,33 @@ export function installSettingsPage(
 
   })
 
+  // GET /api/pet-settings/letters?petId= — 信件档案队列（新信在前）+ 未读数。
+  // 渲染层的信箱堆叠数据源：badge 显示未读数，收好一封拉下一封未读。
+
+  route('GET', '/api/pet-settings/letters', async (req, res) => {
+
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+
+    const petId = url.searchParams.get('petId') ?? ''
+
+    if (petId === '' || !/^[A-Za-z0-9_-]+$/.test(petId)) {
+
+      writeJson(res, 422, { error: 'invalid petId' })
+
+      return
+
+    }
+
+    const archive = await petdata.readPetStateJson(home, petId, 'pet-letters.json')
+
+    const letters = Array.isArray(archive.letters) ? archive.letters : []
+
+    const unread = letters.filter(letter => (letter as { readAt?: unknown }).readAt === undefined).length
+
+    writeJson(res, 200, { letters, unread })
+
+  })
+
   route('POST', '/api/pet-settings/reset-affection', async (_req, res) => {
 
     await petdata.writeAffectionRaw(home, 'electron', EMPTY_LEDGER)

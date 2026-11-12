@@ -3949,16 +3949,19 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
             throw new Error('今天已经留过一封信了（一天一封，系统限制）——想说的明天再写，或现在用 pet_say 说')
           }
           await petdata.writePetStateJson(home, entry.id, 'pet-inner-state.json', { ...state, letter: { lastDate: today } })
+          // archiveAt 三处同值：档案条目、/say 线路 letterAt、收好回执的匹配键
+          // ——三处不同值会让 readAt 永远打不上（设计对齐，非巧合）。
+          const archiveAt = Date.now()
           const response = await pet.call(entry, '/say', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text, letter: true }),
+            body: JSON.stringify({ text, letter: true, letterAt: archiveAt }),
           }) as { ok?: unknown }
           // 历史信件档案（pet-letters.json，宠物私有）：气泡是瞬态的，信本身
           // 必须持久——收好/重启/换代都不丢。新信在前，200 封封顶防膨胀。
           const archive = await petdata.readPetStateJson(home, entry.id, 'pet-letters.json')
           const letters = Array.isArray(archive.letters) ? archive.letters : []
-          letters.unshift({ at: Date.now(), text })
+          letters.unshift({ at: archiveAt, text })
           await petdata.writePetStateJson(home, entry.id, 'pet-letters.json', { letters: letters.slice(0, 200) })
           driverLog(home, `LETTER left pet=${entry.id} chars=${String(text.length)} archived=${String(letters.length)}`)
           return JSON.stringify({ ok: response?.ok === true, action: 'letter', archived: letters.length, note: '信已留下：粘在气泡上不自动消失，用户点「收好」前一直在；信本身已存进你的信件档案。一天一封。' })
@@ -4023,7 +4026,12 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
           const mood = moodOf(ledger.affection)
           const tier = bondTier(ledger.bond?.value ?? 0)
           const bond = { value: ledger.bond?.value ?? 0, days: ledger.bond?.days ?? 0, tier }
-          ledgers[id] = { ...ledger, mood, bond }
+          // 信箱未读数（内在生活外化）：pet-letters.json 里 readAt 缺席的条数
+          // ——她知道积了几封没拆，可以主动提；不自动清理，读不读是用户的事。
+          const letterArchive = await petdata.readPetStateJson(home, id, 'pet-letters.json')
+          const letterList = Array.isArray(letterArchive.letters) ? letterArchive.letters : []
+          const unreadLetters = letterList.filter(letter => (letter as { readAt?: unknown }).readAt === undefined).length
+          ledgers[id] = { ...ledger, mood, bond, unreadLetters }
           // Constant-null rule: an empty schedule is an empty ARRAY, never a
           // conditionally-absent field.
           wakePlans[id] = (voiceWakePlans.get(id) ?? []).map(plan => ({

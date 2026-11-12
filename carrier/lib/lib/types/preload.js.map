@@ -1,0 +1,1 @@
+{"version":3,"file":"preload.js","sourceRoot":"","sources":["../../src/preload.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AAEH,OAAO,EAAE,aAAa,EAAE,WAAW,EAAE,MAAM,UAAU,CAAA;AAErD,aAAa,CAAC,iBAAiB,CAAC,YAAY,EAAE;IAC5C,4EAA4E;IAC5E,eAAe,CAAC,OAAgB;QAC9B,WAAW,CAAC,IAAI,CAAC,mBAAmB,EAAE,OAAO,KAAK,IAAI,CAAC,CAAA;IACzD,CAAC;CACF,CAAC,CAAA"}
