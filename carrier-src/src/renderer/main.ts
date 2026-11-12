@@ -744,6 +744,10 @@ setInterval(syncLetterBox, 800)
 function renderLetterBox(): void {
   ensureLetterStyles()
   letterBox.replaceChildren()
+  // 信封/信纸占的就是主进程点击穿透判定的 bubble 区——bubbleVisible=true
+  // 让 bubbleRect 参与可交互判定（漏掉这行=光标进信封区仍是穿透态，点击
+  // 全部落到桌面上，"拆信无反应"的根因）。
+  globals.petDesktop?.setBubbleVisible(true)
   if (currentLetter === null) return
   const notice = currentLetter
   const unreadLabel = letterUnread > 1 ? ' · ' + String(letterUnread) + ' 封未读' : ''
