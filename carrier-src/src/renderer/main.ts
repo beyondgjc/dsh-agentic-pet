@@ -737,7 +737,17 @@ let letterOpened = false
 function syncLetterBox(): void {
   // 信在"气泡空档"出现：说话/审批卡占用气泡时让位（隐藏），气泡一空就回来。
   const want = currentLetter !== null && !letterDismissed && bubble.hidden
+  const was = letterBox.style.display === 'block'
   letterBox.style.display = want ? 'block' : 'none'
+  if (want === was) return
+  // 信占的就是 bubble 命中区（主进程点击穿透判定按 bubbleVisible 参与）：
+  // 让位循环回归只走这里（renderLetterBox 的上报覆盖不到）——信可见必须
+  // 重新上报，否则主进程仍判穿透，点击全落桌面；信走开且气泡也空才还域。
+  if (want) {
+    globals.petDesktop?.setBubbleVisible(true)
+  } else if (bubble.hidden) {
+    globals.petDesktop?.setBubbleVisible(false)
+  }
 }
 setInterval(syncLetterBox, 800)
 
@@ -801,6 +811,7 @@ function renderLetterBox(): void {
         if (next !== undefined) {
           currentLetter = { text: next.text, petId, letterAt: next.at }
           letterOpened = false
+          letterDismissed = false // 下一封未读顶上：浮层回归显示态（收好置位的闸门必须复位，否则 syncLetterBox 把重建好的信封藏回去）
           renderLetterBox()
         }
         syncLetterBox()
