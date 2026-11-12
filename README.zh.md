@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 简介
 
-`dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`）——模型可以借宠物说话、做动作、感知被触摸、给自己定作息。说话内容可通过 [BreezeBlue](https://breezeblue.ai) TTS 朗读——carrier 侧合成每条 `/say` 文本，语音就绪后与气泡同时下发；合成失败或超时静默降级为只显示（桌面设置页可配）。多只宠物实现可以并存：目录注册表（`~/.dsh/whale598/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
+`dsh-agentic-pet` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`）——模型可以借宠物说话、做动作、感知被触摸、给自己定作息。她还有一层「内在生活」：静默的夜晚会做梦（记忆重组写进本子）、相处里程碑会自发提起（羁绊纪念日）、觉得值得留下的话会写成信放在你桌面上（`pet_leave_letter` 留信：密封信封 → 拆信 → 收好，多封积压自动堆叠）。说话内容可通过 [BreezeBlue](https://breezeblue.ai) TTS 朗读——carrier 侧合成每条 `/say` 文本，语音就绪后与气泡同时下发；合成失败或超时静默降级为只显示（桌面设置页可配）。多只宠物实现可以并存：目录注册表（`~/.dsh/whale598/pet-http.d/`）发现全部在线宠物，状态、交互、账本按宠路由。
 
 宠物本身是零 DSH 知识的纯显示端。理解运行时的一切——事件收敛、交互瀑布、多宠路由、模型工具——都在插件的 driver 里，宠物只实现一个小型本地 HTTP 控制接口。任何讲同一 HTTP 契约的宠物实现都能被采纳，插件零改动。宠物的角色设定可在桌面设置页自由编辑（见下文「可配置人设」）：名字、性格、口吻由你定义，下一次对话即生效。
 
