@@ -16,6 +16,10 @@ import {
   buildGreetPrompt,
   buildTouchPrompt,
   buildWakePrompt,
+  anniversaryOf,
+  buildDreamPrompt,
+  isAnniversary,
+  sampleDreamMemories,
   cancelPlans,
   checkPetMessageRate,
   DEFAULT_PET_MESSAGE_LIMITS,
@@ -68,6 +72,7 @@ describe('readInnerVoiceConfig', () => {
       boundSessions: {},
       presets: {},
       selfTuning: false,
+      dreaming: true,
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
     expect((await readInnerVoiceConfig(home)).enabled).toBe(true)
@@ -89,6 +94,7 @@ describe('readInnerVoiceConfig', () => {
         boundSessions: { electron: 'whale598-electron', bad: 7, '': 'no-key' },
         presets: { electron: 'whale598-standard', ghost: 'no-such-preset', '': 'whale598' },
         selfTuning: true,
+        dreaming: true,
       },
     }), 'utf8')
     expect(await readInnerVoiceConfig(home)).toEqual({
@@ -104,6 +110,7 @@ describe('readInnerVoiceConfig', () => {
       boundSessions: { electron: 'whale598-electron' },
       presets: { electron: 'whale598-standard' },
       selfTuning: true,
+      dreaming: true,
     })
   })
 
@@ -561,5 +568,64 @@ describe('touch part wording (B03 触感分区，Phase 0 定稿)', () => {
   it('uses the part wording in the touch prompt when the body reports it', () => {
     const prompt = buildTouchPrompt({ part: 'tail', touchesToday: 1, affection: 0 })
     expect(prompt).toContain('尾巴')
+  })
+})
+
+
+describe('内在生活外化（梦境/纪念日）', () => {
+  it('anniversaryOf: 里程碑跨过即触发，错过当天由下次唤醒补上', () => {
+    expect(anniversaryOf(0, 0)).toBeNull()
+    expect(anniversaryOf(6, 0)).toBeNull()
+    expect(anniversaryOf(7, 0)).toBe(7)
+    // 错过的里程碑由下一次唤醒补贺（29 天时 7 天未贺 → 补 7）
+    expect(anniversaryOf(29, 0)).toBe(7)
+    expect(anniversaryOf(30, 0)).toBe(30)
+    expect(anniversaryOf(29, 7)).toBeNull()
+    expect(anniversaryOf(45, 0)).toBe(30)
+    expect(anniversaryOf(465, 365)).toBe(465)
+    expect(anniversaryOf(100, 100)).toBeNull()
+  })
+
+  it('sampleDreamMemories: 最新恒定入选 + 随机补足，短本子全给', () => {
+    const entries = [{ text: 'a' }, { text: 'b' }, { text: 'c' }, { text: 'newest' }]
+    const picked = sampleDreamMemories(entries, () => 0)
+    expect(picked).toHaveLength(3)
+    expect(picked[2]).toBe('newest')
+    expect(sampleDreamMemories([{ text: 'only' }])).toEqual(['only'])
+    expect(sampleDreamMemories([])).toEqual([])
+  })
+
+  it('buildDreamPrompt: 记忆素材 + 只进本子绝不出声的硬约束', () => {
+    const prompt = buildDreamPrompt(['梦的素材一', '梦的素材二'])
+    expect(prompt).toContain('梦的素材一')
+    expect(prompt).toContain('150 字')
+    expect(prompt).toContain('tags 一定要带上 "梦"')
+    expect(prompt).toContain('不要用 pet_say')
+    expect(prompt).toContain('pet_journal append')
+  })
+
+  it('buildWakePrompt: 羁绊纪念日块——第 N 天 + 最初的记忆', () => {
+    const prompt = buildWakePrompt({
+      affection: 50, bondValue: 30, bondTier: '亲近', bondDays: 30, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+      anniversary: { days: 30, earliest: ['第一天的记忆'] },
+    })
+    expect(prompt).toContain('[羁绊纪念日]')
+    expect(prompt).toContain('第 30 天')
+    expect(prompt).toContain('第一天的记忆')
+    expect(prompt).toContain('你自己决定')
+    const plain = buildWakePrompt({
+      affection: 50, bondValue: 30, bondTier: '陌生', bondDays: 3, minutesSinceLastSpoke: undefined, minutesSinceUserActivity: undefined, userActive: false,
+    })
+    expect(plain).not.toContain('[羁绊纪念日]')
+  })
+
+  it('config: dreaming 默认开、显式关生效', async () => {
+    const home = await tempHome()
+    await writeFile(join(home, 'pet-settings.json'), '{}', 'utf8')
+    expect((await readInnerVoiceConfig(home)).dreaming).toBe(true)
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({
+      innerVoice: { dreaming: false },
+    }), 'utf8')
+    expect((await readInnerVoiceConfig(home)).dreaming).toBe(false)
   })
 })

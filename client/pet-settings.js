@@ -978,6 +978,11 @@ window.__ModuleLoader__.load({
               update({ innerVoice: { selfTuning: !(iv.selfTuning === true) } })
             } }),
             h('span', { style: muted }, '开：她可用 pet_set_rhythm 自己调上面四项；关：她调用直接失败')),
+          h('div', { style: row }, '做梦',
+            h(Toggle, { value: iv.dreaming !== false, onChange: function () {
+              update({ innerVoice: { dreaming: !(iv.dreaming !== false) } })
+            } }),
+            h('span', { style: muted }, '深夜静默时段她把记忆做成梦写进本子（每晚最多一次，不出声）')),
           h('div', { style: row }, '自主唤醒遇用户忙',
             (function () {
               var seg = function (active, side) {

@@ -117,6 +117,10 @@ interface InnerVoiceSettings {
    * 覆盖层），设置页随时改回或关闸。 */
   selfTuning?: boolean
 
+  /** 梦境（默认开）：静默时段每晚最多一次「做梦」回合——模型把记忆重组成
+   * 梦写进本子（不出声不弹气泡）。关 = 深夜安静如常。 */
+  dreaming?: boolean
+
   /** 自主唤醒（pet_schedule_wake 计划）到点遇用户忙的策略：
 
    * 'fire' = 到点必醒（默认）；'defer' = 忙时顺延下一拍重试。 */
@@ -314,6 +318,8 @@ const DEFAULT_SETTINGS: PetSettings = {
     touchReplyCooldownSeconds: 30,
 
     selfTuning: false,
+
+    dreaming: true,
 
     selfWakeBusyPolicy: 'fire',
 
@@ -653,6 +659,8 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
     // 节律由用户独享；true = 模型改的就是这份全局值（无按宠覆盖层）。
 
     if (typeof v.selfTuning === 'boolean') innerVoice.selfTuning = v.selfTuning
+
+    if (typeof v.dreaming === 'boolean') innerVoice.dreaming = v.dreaming
 
   }
 

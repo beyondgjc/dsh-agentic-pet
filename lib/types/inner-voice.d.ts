@@ -60,6 +60,10 @@ export interface InnerVoiceConfig {
      * ——改的就是这里的全局值（设置页与模型写同一份，无按宠覆盖层），设置页
      * 随时改回或关闸。 */
     selfTuning: boolean;
+    /** 梦境（默认开）：静默时段的世界时钟 tick 触发一次「做梦」回合——模型把
+     * 记忆重组成一个 ≤150 字的梦写进本子（tags 带 '梦'），不出声、不弹气泡。
+     * 每自然晚最多 1 次（pet-inner-state.json 记账）。 */
+    dreaming: boolean;
     /** 自主唤醒（pet_schedule_wake 计划）到点遇用户主会话忙时的策略：
      * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
      * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
@@ -283,6 +287,13 @@ export interface WakePromptFacts {
         label?: string;
         text: string;
     };
+    /** 羁绊纪念日（内在生活外化）：bond.days 刚跨过里程碑（7/30/100/365/此后
+     * 每 100 天）时，注入「今天是第 N 天」+ 最初的记忆条目——说什么、用什么
+     * 情绪说，全是模型的判断（系统只报事实）。 */
+    anniversary?: {
+        days: number;
+        earliest: string[];
+    };
     /** 阶段摘要到点了（REQ-M05）：唤醒时提示她自己写。 */
     journalEpochDue?: string;
     /** 用户刚从一段离开中回来：最多一行的期间摘要。 */
@@ -300,6 +311,16 @@ export declare const journalClock: (at: number) => string;
  * The base blocks (ledger line + journal + epochs) ride only
  * firstWakeAfterBoot — the session history already holds their copy. */
 export declare function buildWakePrompt(facts: WakePromptFacts): string;
+/** 羁绊里程碑表：7/30/100/365，此后每 100 天。返回 days 已跨过、且尚未
+ * 祝贺过的最大里程碑（跨过即触发——错过当天由下一次唤醒补上）；无则 null。 */
+export declare function anniversaryOf(days: number, lastMilestone: number): number | null;
+/** 梦的素材：最新一条恒定入选（梦锚定在最近），其余随机抽 2 条——随机+
+ * 拼接是梦的本性，不按相关性检索（那是「想起」，不是「梦见」）。 */
+export declare function sampleDreamMemories(entries: Array<{
+    text: string;
+}>, rng?: () => number): string[];
+/** 梦的提示词：只进本子、绝不出声——深夜的模型回合必须安静。 */
+export declare function buildDreamPrompt(memories: string[]): string;
 /** A self-scheduled plan folded into a USER-initiated turn (chat 上行 / touch
  * 回应)：the plan sat within the ±60s merge window, so both wake in one —
  * the tag names the union ([用户+自主唤醒]) and the intent rides along. */

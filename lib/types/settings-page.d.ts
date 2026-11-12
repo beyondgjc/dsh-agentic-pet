@@ -55,6 +55,9 @@ interface InnerVoiceSettings {
      * 节律四项由用户独享；true = 模型可用 pet_set_rhythm 改这份全局值（无按宠
      * 覆盖层），设置页随时改回或关闸。 */
     selfTuning?: boolean;
+    /** 梦境（默认开）：静默时段每晚最多一次「做梦」回合——模型把记忆重组成
+     * 梦写进本子（不出声不弹气泡）。关 = 深夜安静如常。 */
+    dreaming?: boolean;
     /** 自主唤醒（pet_schedule_wake 计划）到点遇用户忙的策略：
   
      * 'fire' = 到点必醒（默认）；'defer' = 忙时顺延下一拍重试。 */
