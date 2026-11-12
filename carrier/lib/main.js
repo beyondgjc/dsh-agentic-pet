@@ -1150,15 +1150,23 @@ async function main() {
                 // bubble + voice as ONE message once the mp3 lands (held ≤ holdMs —
                 // text and voice appear together instead of the voice trailing).
                 const text = typeof body.text === 'string' ? body.text.slice(0, 200) : '';
-                // B10+/内在生活外化：mood 与 letter 随气泡穿到渲染层（mood→剧场加权，
-                // letter→粘性信纸气泡不自动消失）。
+                // B10+/内在生活外化：mood 随气泡穿到渲染层（mood→剧场加权）。letter
+                // 是例外——它绝不能走 sayTts 的投递竞速：模型留信后同回合往往还有
+                // pet_say（"我给你留了封信哦"），generation 竞速会把信整代放弃=信
+                // 永远不显示（实测踩过）。信是粘性物件，直接投递。
+                if (body.letter === true) {
+                    window.webContents.send('pet:say', {
+                        letter: true,
+                        petId: PET_ID,
+                        letterAt: Date.now(),
+                        text,
+                    });
+                    send(200, { ok: true });
+                    return;
+                }
                 const extras = { petId: PET_ID };
                 if (typeof body.mood === 'string')
                     extras.mood = body.mood;
-                if (body.letter === true) {
-                    extras.letter = true;
-                    extras.letterAt = Date.now();
-                }
                 sayTts.deliver(text, Object.keys(extras).length > 0 ? extras : undefined);
                 send(200, { ok: true });
                 return;
