@@ -718,6 +718,88 @@ function hideBubble(): void {
   bubble.hidden = true
   bubble.replaceChildren()
   globals.petDesktop?.setBubbleVisible(false)
+  syncLetterBox()
+}
+
+// ── 留信的独立浮层（B10+/内在生活外化）────────────────────────────────────
+// 信是"物件"，不与说话共用气泡——她随后说的每句话都会 replaceChildren 清掉
+// 旧内容（实测：密封信封被说话气泡顶掉，信直接丢失）。信件有自己的元素与
+// 生命周期：气泡显示时让位（说话/审批卡优先占位），气泡一空就回来，收好
+// 才走。pet-letters.json 档案保证重启/换代也不丢。
+const letterBox = document.createElement('div')
+letterBox.id = 'letter-box'
+letterBox.style.cssText = 'position:absolute;left:50%;transform:translateX(-50%);bottom:224px;z-index:10;display:none'
+let currentLetter: { text: string; petId?: string; letterAt?: number } | null = null
+let letterDismissed = false
+let letterOpened = false
+;(bubble.parentNode ?? document.body).appendChild(letterBox)
+
+function syncLetterBox(): void {
+  // 信在"气泡空档"出现：说话/审批卡占用气泡时让位（隐藏），气泡一空就回来。
+  const want = currentLetter !== null && !letterDismissed && bubble.hidden
+  letterBox.style.display = want ? 'block' : 'none'
+}
+setInterval(syncLetterBox, 800)
+
+function renderLetterBox(): void {
+  ensureLetterStyles()
+  letterBox.replaceChildren()
+  if (currentLetter === null) return
+  const notice = currentLetter
+  if (!letterOpened) {
+    // 密封态：信封主体 + 盖口 + 封蜡 + 「她留下了一封信」，点击拆信。
+    const env = document.createElement('div')
+    env.className = 'letter-env'
+    const flap = document.createElement('div')
+    flap.className = 'letter-flap'
+    const seal = document.createElement('div')
+    seal.className = 'letter-seal'
+    const hint = document.createElement('p')
+    hint.className = 'letter-hint'
+    hint.textContent = '她留下了一封信'
+    env.append(flap, seal, hint)
+    env.onclick = function (): void {
+      if (letterOpened) return
+      letterOpened = true
+      // 拆开 = 已读回执（fire-and-forget：失败不影响拆信仪式）
+      if (typeof notice.petId === 'string' && typeof notice.letterAt === 'number') {
+        fetch('/api/pet-settings/letter-read', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ petId: notice.petId, at: notice.letterAt }),
+        }).catch(function () { /* 回执失败不影响拆信 */ })
+      }
+      env.classList.add('letter-opening')
+      setTimeout(renderLetterBox, 320) // 盖口翻起的过渡走完再换信纸
+    }
+    letterBox.append(env)
+    return
+  }
+  // 信纸态：米色渐变底 + 楷体全文 + 收好（她的声音在拆开时读）。
+  const card = document.createElement('div')
+  card.className = 'letter-paper'
+  const paper = document.createElement('p')
+  paper.className = 'bubble-detail'
+  paper.style.margin = '0 0 8px'
+  paper.textContent = notice.text
+  const close = document.createElement('button')
+  close.className = 'letter-close'
+  close.textContent = '✉ 收好'
+  close.onclick = function (): void {
+    letterDismissed = true
+    currentLetter = null
+    syncLetterBox()
+  }
+  card.append(paper, close)
+  letterBox.append(card)
+}
+
+function deliverLetter(notice: { text: string; petId?: unknown; letterAt?: unknown }): void {
+  currentLetter = { text: notice.text, petId: typeof notice.petId === 'string' ? notice.petId : undefined, letterAt: typeof notice.letterAt === 'number' ? notice.letterAt : undefined }
+  letterDismissed = false
+  letterOpened = false
+  renderLetterBox()
+  syncLetterBox()
 }
 
 /** Localized payload text arrives as a locale→string map; pick the page's best match. */
@@ -1181,71 +1263,13 @@ globals.petDesktop?.onSay((notice) => {
   setMood(notice.mood)
   if (override !== null || notice.text === '') return
   if (notice.letter === true) {
-    // 留信（两态）：先密封信封（不剧透内容），用户「拆信」才展开信纸——
-    // 已读回执与她的声音都在拆开时发生（密封态剧透会毁仪式）。
-    ensureLetterStyles()
-    stopSayAudio()
-    bubble.replaceChildren()
-    const paper = document.createElement('p')
-    paper.className = 'bubble-detail'
-    paper.style.margin = '0 0 8px'
-    paper.textContent = notice.text
-    const close = document.createElement('button')
-    close.className = 'letter-close'
-    close.textContent = '✉ 收好'
-    close.onclick = function () {
-      bubble.hidden = true
-      globals.petDesktop?.setBubbleVisible(false)
-    }
-    const showPaper = function (): void {
-      // 信纸卡片（.letter-paper：米色渐变底 + 楷体）承载正文与收好按钮——
-      // 密封态时 bubble 容器已脱壳（透明/auto 宽），拆开后由信纸自己给出
-      // 纸面与宽度（300px 定宽，避免 auto 宽度自引用塌缩）。
-      const card = document.createElement('div')
-      card.className = 'letter-paper'
-      card.append(paper, close)
-      bubble.replaceChildren(card)
-      globals.petDesktop?.setBubbleVisible(true)
-      const bytes = notice.audio
-      if (bytes !== undefined && bytes.length > 0) playSayAudio(notice.text, bytes)
-    }
-    const env = document.createElement('div')
-    env.className = 'letter-env'
-    const flap = document.createElement('div')
-    flap.className = 'letter-flap'
-    const seal = document.createElement('div')
-    seal.className = 'letter-seal'
-    const hint = document.createElement('p')
-    hint.className = 'letter-hint'
-    hint.textContent = '她留下了一封信'
-    env.append(flap, seal, hint)
-    let opened = false
-    env.onclick = function (): void {
-      if (opened) return
-      opened = true
-      // 拆开 = 已读回执（fire-and-forget：失败不影响拆信仪式）
-      if (typeof notice.petId === 'string' && typeof notice.letterAt === 'number') {
-        fetch('/api/pet-settings/letter-read', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ petId: notice.petId, at: notice.letterAt }),
-        }).catch(function () { /* 回执失败不影响拆信 */ })
-      }
-      env.classList.add('letter-opening')
-      setTimeout(showPaper, 320) // 盖口翻起的过渡走完再换信纸
-    }
-    // 脱壳：气泡容器的基础样式（白底/边框/阴影/400px 定宽）全部退场，让
-    // 信封/信纸自己成为桌面上的物件。普通气泡路径有对应的样式复位。
-    bubble.replaceChildren(env)
-    bubble.style.background = 'transparent'
-    bubble.style.border = 'none'
-    bubble.style.boxShadow = 'none'
-    bubble.style.padding = '0'
-    bubble.style.width = 'auto'
-    bubble.hidden = false
-    globals.petDesktop?.setBubbleVisible(true)
+    // 留信走独立浮层（letterBox）：信是"物件"，不与说话共用气泡——她随后
+    // 说的每句话都会 replaceChildren 清掉旧内容（实测：密封信封被说话气泡
+    // 顶掉，信直接丢失）。气泡显示时信让位，气泡一空信回来；收好才走。
+    deliverLetter(notice)
     return
   }
+  letterBox.style.display = 'none' // 新说话到达：信立即让位（不等同步轮询）
   bubble.style.background = ''
   bubble.style.border = ''
   bubble.style.boxShadow = ''
