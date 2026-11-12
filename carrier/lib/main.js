@@ -1150,9 +1150,16 @@ async function main() {
                 // bubble + voice as ONE message once the mp3 lands (held ≤ holdMs —
                 // text and voice appear together instead of the voice trailing).
                 const text = typeof body.text === 'string' ? body.text.slice(0, 200) : '';
-                // B10 表达连续性：mood 随气泡穿到渲染层（剧场按情绪标签加权挑片段）。
-                const extras = typeof body.mood === 'string' ? { mood: body.mood } : undefined;
-                sayTts.deliver(text, extras);
+                // B10+/内在生活外化：mood 与 letter 随气泡穿到渲染层（mood→剧场加权，
+                // letter→粘性信纸气泡不自动消失）。
+                const extras = { petId: PET_ID };
+                if (typeof body.mood === 'string')
+                    extras.mood = body.mood;
+                if (body.letter === true) {
+                    extras.letter = true;
+                    extras.letterAt = Date.now();
+                }
+                sayTts.deliver(text, Object.keys(extras).length > 0 ? extras : undefined);
                 send(200, { ok: true });
                 return;
             }
