@@ -64,7 +64,7 @@ export interface SayTts {
   /** Forward one /say text to the page. Fire-and-forget: returns
    * immediately, never throws, and a newer call always wins — the older
    * delivery is abandoned (the newest say owns the bubble and the voice). */
-  deliver(text: string): void
+  deliver(text: string, extras?: Record<string, unknown>): void
 }
 
 /** The BreezeBlue TTS endpoint (convert, synchronous mp3). */

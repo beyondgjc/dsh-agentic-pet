@@ -28,7 +28,7 @@ interface PetGlobals {
     onInteraction(listener: (request: unknown) => void): void
     onInteractionCancel(listener: (notice: { id: string }) => void): void
     answerInteraction(id: string, answer: unknown): void
-    onSay(listener: (notice: { text: string; audio?: Uint8Array<ArrayBuffer> }) => void): void
+    onSay(listener: (notice: { text: string; audio?: Uint8Array<ArrayBuffer>; mood?: unknown; letter?: unknown; petId?: unknown; letterAt?: unknown }) => void): void
     reportStatus(snapshot: Record<string, unknown>): void
     reportTouch(touch: { part: string; rects?: string }): void
     reportActionDone(done: { action: string; durationMs?: number; requestId?: string }): void
@@ -103,6 +103,31 @@ let fadeMs = 0
 let glFailed = false
 const stage = requireElement<HTMLCanvasElement>('#stage')
 const bubble = requireElement<HTMLDivElement>('#bubble')
+
+// ── 留信的两态渲染：密封信封（未拆）→ 拆信过渡 → 信纸（全文+收好）────────
+// 拆信动作本身=已读回执；她的声音也在拆开时才读（密封态剧透会毁仪式）。
+// 纯 CSS 信封（无素材依赖）：信封主体+盖口三角+封蜡圆点+轻微浮动。
+const LETTER_CSS = [
+  '@keyframes letter-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}',
+  '.letter-env{width:210px;box-sizing:border-box;padding:10px 16px 12px;background:linear-gradient(#f4e7c8,#eeddb4);border:1px solid rgba(58,47,30,.35);border-radius:10px;cursor:pointer;text-align:center;color:#3a2f1e;font:inherit;transition:transform .2s ease;animation:letter-float 2.6s ease-in-out infinite}',
+  '.letter-env:hover{transform:scale(1.03)}',
+  '.letter-flap{width:0;height:0;border-left:76px solid transparent;border-right:76px solid transparent;border-top:46px solid #e2cba0;margin:0 auto 4px;transition:transform .3s ease;transform-origin:top center}',
+  '.letter-opening .letter-flap{transform:rotateX(180deg)}',
+  '.letter-opening{animation:none;cursor:default}',
+  '.letter-seal{width:18px;height:18px;background:#b04a3a;border-radius:50%;margin:-30px auto 14px;box-shadow:0 1px 3px rgba(0,0,0,.3);position:relative}',
+  '.letter-hint{font-size:12px;color:rgba(58,47,30,.85);margin:0}',
+  '.letter-paper{width:100%;box-sizing:border-box;padding:12px 14px;background:linear-gradient(#f4e7c8,#eeddb4);border:1px solid rgba(58,47,30,.35);border-radius:10px;color:#3a2f1e;font-family:KaiTi,STKaiti,Georgia,serif;line-height:1.7}',
+  '.letter-paper .bubble-detail{margin:0 0 8px;white-space:pre-wrap}',
+  '.letter-close{border:1px solid rgba(58,47,30,.4);border-radius:6px;background:rgba(58,47,30,.08);color:#3a2f1e;font:inherit;font-size:12px;padding:2px 10px;cursor:pointer}',
+].join('\n')
+let letterStylesInjected = false
+function ensureLetterStyles(): void {
+  if (letterStylesInjected) return
+  letterStylesInjected = true
+  const style = document.createElement('style')
+  style.textContent = LETTER_CSS
+  document.head.appendChild(style)
+}
 
 // ── B01 朝向（镜像语义见 body 契约 §3.1 + 需求 REQ-B01）────────────────────
 // 基准朝向 = 素材原始朝向 right；facing=left → 舞台画布 scaleX(-1)（气泡是
@@ -510,6 +535,49 @@ let theaterTimer: ReturnType<typeof setTimeout> | undefined
 let theaterLastFile: string | undefined
 let idleRecent: string[] = []
 let idleNextAt = 0
+
+// ── B10 表达连续性：情绪状态 ────────────────────────────────────────────────
+// 判断是模型的：pet_say/pet_do 携带的 mood（她说话时最清楚自己的情绪）落
+// 在这里；系统只存状态、做 10 分钟衰减、并把它翻译成剧场的标签加权。语
+// 表 = actions.tags.json 的中文词表；无匹配标签的池回落无加权（不锁死）。
+let moodName = 'neutral'
+let moodUntil = 0
+const MOOD_TTL_MS = 10 * 60_000
+const MOOD_TAGS: Record<string, readonly string[]> = {
+  happy: ['开心', '搞笑', '庆祝', '活泼'],
+  excited: ['活泼', '开心', '才艺', '庆祝'],
+  calm: ['放松', '自处', '日常'],
+  focused: ['专注', '思考', '工作'],
+  sleepy: ['疲惫', '自处'],
+  sad: ['悲伤', '委屈'],
+  angry: ['生气'],
+  shy: ['害羞', '撒娇'],
+  curious: ['好奇', '张望'],
+}
+function setMood(raw: unknown): void {
+  if (typeof raw !== 'string') return
+  const name = raw.toLowerCase()
+  if (name === '' || name === 'neutral') {
+    moodName = 'neutral'
+    moodUntil = 0
+    return
+  }
+  if (!(name in MOOD_TAGS)) return
+  moodName = name
+  moodUntil = Date.now() + MOOD_TTL_MS
+  reportStatus()
+}
+function effectiveMood(): string {
+  return Date.now() < moodUntil ? moodName : 'neutral'
+}
+/** 情绪标签与片段 tags 有交集 → ×4 加权（max-not-product 与 B06 同构）；
+ * neutral/无匹配 = ×1，剧场保持原有随机面。 */
+function moodWeightOf(entry: CatalogClip): number {
+  const tags = MOOD_TAGS[effectiveMood()]
+  if (tags === undefined) return 1
+  const matched = (entry.tags ?? []).some(tag => tags.includes(tag))
+  return matched ? 4 : 1
+}
 // bodyRuntime.lastClip 的来源：最近一次换上舞台的 one-shot 片段（小动作/
 // 触摸反应//action/celebrate）。基础循环的换回（handback → play(baseState)）
 // 不改写它——否则 lastClip 会退回"当前 src 快照"，小动作的几秒窗口外取
@@ -599,11 +667,12 @@ function scheduleTheater(): void {
       scheduleTheater()
       return
     }
-    // B06：时段偏置加权（max-not-product；权重表随 /state 载荷下发）。
+    // B06：时段偏置加权（max-not-product；权重表随 /state 载荷下发）×
+    // B10 情绪标签加权（matched ×4）——两个乘数独立作用。
     let pick: CatalogClip | undefined
     if (bodyIdle !== undefined) {
       const hour = new Date().getHours()
-      const weights = pool.map(entry => biasWeightOf(entry, idleBias, hour))
+      const weights = pool.map(entry => biasWeightOf(entry, idleBias, hour) * moodWeightOf(entry))
       const total = weights.reduce((sum, w) => sum + w, 0)
       let roll = Math.random() * total
       pick = pool[pool.length - 1]
@@ -615,7 +684,18 @@ function scheduleTheater(): void {
         }
       }
     } else {
-      pick = pool[Math.floor(Math.random() * pool.length)]
+      // legacy 池也吃情绪加权（无偏置表）。
+      const weights = pool.map(entry => moodWeightOf(entry))
+      const total = weights.reduce((sum, w) => sum + w, 0)
+      let roll = Math.random() * total
+      pick = pool[pool.length - 1]
+      for (let i = 0; i < pool.length; i += 1) {
+        roll -= weights[i] ?? 0
+        if (roll < 0) {
+          pick = pool[i]
+          break
+        }
+      }
     }
     if (pick !== undefined) {
       theaterLastFile = pick.file
@@ -1098,7 +1178,74 @@ globals.petDesktop?.onSay((notice) => {
   // Fire-and-forget speech: self-dismisses, never blocks, and an interaction
   // bubble in flight outranks it (single-bubble design). A new say also
   // stops the previous utterance — the voice follows the newest bubble.
+  setMood(notice.mood)
   if (override !== null || notice.text === '') return
+  if (notice.letter === true) {
+    // 留信（两态）：先密封信封（不剧透内容），用户「拆信」才展开信纸——
+    // 已读回执与她的声音都在拆开时发生（密封态剧透会毁仪式）。
+    ensureLetterStyles()
+    stopSayAudio()
+    bubble.replaceChildren()
+    const paper = document.createElement('p')
+    paper.className = 'bubble-detail'
+    paper.style.margin = '0 0 8px'
+    paper.textContent = notice.text
+    const close = document.createElement('button')
+    close.className = 'letter-close'
+    close.textContent = '✉ 收好'
+    close.onclick = function () {
+      bubble.hidden = true
+      globals.petDesktop?.setBubbleVisible(false)
+    }
+    const showPaper = function (): void {
+      bubble.replaceChildren(paper, close)
+      globals.petDesktop?.setBubbleVisible(true)
+      const bytes = notice.audio
+      if (bytes !== undefined && bytes.length > 0) playSayAudio(notice.text, bytes)
+    }
+    const env = document.createElement('div')
+    env.className = 'letter-env'
+    const flap = document.createElement('div')
+    flap.className = 'letter-flap'
+    const seal = document.createElement('div')
+    seal.className = 'letter-seal'
+    const hint = document.createElement('p')
+    hint.className = 'letter-hint'
+    hint.textContent = '她留下了一封信'
+    env.append(flap, seal, hint)
+    let opened = false
+    env.onclick = function (): void {
+      if (opened) return
+      opened = true
+      // 拆开 = 已读回执（fire-and-forget：失败不影响拆信仪式）
+      if (typeof notice.petId === 'string' && typeof notice.letterAt === 'number') {
+        fetch('/api/pet-settings/letter-read', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ petId: notice.petId, at: notice.letterAt }),
+        }).catch(function () { /* 回执失败不影响拆信 */ })
+      }
+      env.classList.add('letter-opening')
+      setTimeout(showPaper, 320) // 盖口翻起的过渡走完再换信纸
+    }
+    // 脱壳：气泡容器的基础样式（白底/边框/阴影/400px 定宽）全部退场，让
+    // 信封/信纸自己成为桌面上的物件。普通气泡路径有对应的样式复位。
+    bubble.replaceChildren(env)
+    bubble.style.background = 'transparent'
+    bubble.style.border = 'none'
+    bubble.style.boxShadow = 'none'
+    bubble.style.padding = '0'
+    bubble.style.width = 'auto'
+    bubble.hidden = false
+    globals.petDesktop?.setBubbleVisible(true)
+    return
+  }
+  bubble.style.background = ''
+  bubble.style.border = ''
+  bubble.style.boxShadow = ''
+  bubble.style.padding = ''
+  bubble.style.width = ''
+  bubble.style.color = ''
   stopSayAudio()
   bubble.replaceChildren()
   const text = document.createElement('p')
@@ -1121,6 +1268,9 @@ const reportStatus = (): void => {
   const clip = decodeURIComponent(video.src.split('/').pop() ?? '')
   const bodyRuntime = {
     facing,
+    // B10：当前表达情绪（恒定输出；pet_state 经 normalizeStatus 透传给模型
+    // ——她能看到自己此刻的身体情绪，10 分钟无续期回落 neutral）。
+    mood: effectiveMood(),
     ...(idleNextAt > 0 ? { idleNextAt } : {}),
     ...(lastPlayedClip !== '' ? { lastClip: lastPlayedClip } : {}),
   }
@@ -1174,7 +1324,8 @@ globals.petDesktop?.onState((message) => {
   else if (state === 'error') flashError()
 })
 globals.petDesktop?.onAction((message) => {
-  const payload = message as { action?: unknown; requestId?: unknown }
+  const payload = message as { action?: unknown; requestId?: unknown; mood?: unknown }
+  setMood(payload.mood)
   const action = payload.action
   const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined
   if (action === 'celebrate') playOneShot('celebrate', requestId)
