@@ -746,8 +746,9 @@ function renderLetterBox(): void {
   letterBox.replaceChildren()
   if (currentLetter === null) return
   const notice = currentLetter
+  const unreadLabel = letterUnread > 1 ? ' · ' + String(letterUnread) + ' 封未读' : ''
   if (!letterOpened) {
-    // 密封态：信封主体 + 盖口 + 封蜡 + 「她留下了一封信」，点击拆信。
+    // 密封态：信封主体 + 盖口 + 封蜡 + 「她留下了一封信 · N 封未读」，点击拆信。
     const env = document.createElement('div')
     env.className = 'letter-env'
     const flap = document.createElement('div')
@@ -756,7 +757,7 @@ function renderLetterBox(): void {
     seal.className = 'letter-seal'
     const hint = document.createElement('p')
     hint.className = 'letter-hint'
-    hint.textContent = '她留下了一封信'
+    hint.textContent = '她留下了一封信' + unreadLabel
     env.append(flap, seal, hint)
     env.onclick = function (): void {
       if (letterOpened) return
@@ -786,19 +787,54 @@ function renderLetterBox(): void {
   close.className = 'letter-close'
   close.textContent = '✉ 收好'
   close.onclick = function (): void {
+    const petId = notice.petId
     letterDismissed = true
     currentLetter = null
-    syncLetterBox()
+    // 信箱堆叠：还有未读 → 下一封顶上（重新密封）；拆完了 → 信箱空
+    if (typeof petId === 'string') {
+      fetchLetterQueue(petId, () => {
+        const next = letterQueue.find((l) => l.readAt === undefined)
+        if (next !== undefined) {
+          currentLetter = { text: next.text, petId, letterAt: next.at }
+          letterOpened = false
+          renderLetterBox()
+        }
+        syncLetterBox()
+      })
+    } else {
+      syncLetterBox()
+    }
   }
   card.append(paper, close)
   letterBox.append(card)
+}
+
+// 信箱队列（pet-letters.json 的未读子集，新信在前）：badge 显示积压数，
+// 收好一封后下一封未读自动顶上（信箱清空才回到无信状态）。
+let letterQueue: Array<{ at: number; text: string; readAt?: number }> = []
+let letterUnread = 0
+function fetchLetterQueue(petId: string, cb: (unread: number) => void): void {
+  fetch(`/api/pet-settings/letters?petId=${encodeURIComponent(petId)}`, { credentials: 'same-origin' })
+    .then((r) => r.json())
+    .then((d) => {
+      const letters = Array.isArray(d?.letters) ? d.letters as Array<{ at: number; text: string; readAt?: number }> : []
+      letterQueue = letters
+      letterUnread = letters.filter((l) => l.readAt === undefined).length
+      cb(letterUnread)
+    })
+    .catch(() => cb(0))
 }
 
 function deliverLetter(notice: { text: string; petId?: unknown; letterAt?: unknown }): void {
   currentLetter = { text: notice.text, petId: typeof notice.petId === 'string' ? notice.petId : undefined, letterAt: typeof notice.letterAt === 'number' ? notice.letterAt : undefined }
   letterDismissed = false
   letterOpened = false
-  renderLetterBox()
+  const petId = currentLetter.petId
+  if (petId !== undefined) {
+    fetchLetterQueue(petId, () => { renderLetterBox(); syncLetterBox() })
+  } else {
+    renderLetterBox()
+  }
   syncLetterBox()
 }
 
