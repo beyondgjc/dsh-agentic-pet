@@ -1795,6 +1795,44 @@ export function installSettingsPage(
 
   }
 
+  // POST /api/pet-settings/letter-read — 收好按钮的已读回执：{petId, at}。
+  // 信件档案（pet-letters.json）里匹配时间戳的 letter 打上 readAt；幂等，
+  // 未匹配也回 ok（客户端的收好不该因为档案细节失败）。
+
+  route('POST', '/api/pet-settings/letter-read', async (req, res) => {
+
+    const body = await readJsonBody(req)
+
+    const petId = typeof body?.petId === 'string' ? body.petId : ''
+
+    const at = typeof body?.at === 'number' && Number.isFinite(body.at) ? body.at : NaN
+
+    if (petId === '' || !/^[A-Za-z0-9_-]+$/.test(petId) || Number.isNaN(at)) {
+
+      writeJson(res, 422, { error: 'invalid petId or at' })
+
+      return
+
+    }
+
+    const archive = await petdata.readPetStateJson(home, petId, 'pet-letters.json')
+
+    const letters = Array.isArray(archive.letters) ? archive.letters as Array<Record<string, unknown>> : []
+
+    let changed = false
+
+    for (const letter of letters) {
+
+      if (letter.at === at && letter.readAt === undefined) { letter.readAt = Date.now(); changed = true }
+
+    }
+
+    if (changed) await petdata.writePetStateJson(home, petId, 'pet-letters.json', { letters })
+
+    writeJson(res, 200, { ok: true, changed })
+
+  })
+
   route('POST', '/api/pet-settings/reset-affection', async (_req, res) => {
 
     await petdata.writeAffectionRaw(home, 'electron', EMPTY_LEDGER)
