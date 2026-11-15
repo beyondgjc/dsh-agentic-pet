@@ -177,6 +177,78 @@ window.__ModuleLoader__.load({
         active ? h('style', null, '@keyframes petRuntimeSlide { 0% { left: -35% } 100% { left: 100% } }') : null)
     }
 
+    // 审计看板（2026-11-15）：按宠 × 工具的调用次数，全部 / 最近30天两种口径。
+    // 数据源 GET /api/pet-settings/tool-stats（按天记账，宿主求和）。
+    function ToolAuditCard(props) {
+      var ids = props.ids
+      var nameOf = props.nameOf
+      var rangeState = useState('all')
+      var range = rangeState[0]
+      var setRange = rangeState[1]
+      var statsState = useState({})
+      var stats = statsState[0]
+      var setStats = statsState[1]
+      var loadingState = useState(false)
+      var loading = loadingState[0]
+      var setLoading = loadingState[1]
+      var reloadState = useState(0)
+      var reload = reloadState[0]
+      var setReload = reloadState[1]
+      useEffect(function () {
+        var alive = true
+        setLoading(true)
+        Promise.all(ids.map(function (petId) {
+          return fetch('/api/pet-settings/tool-stats?petId=' + encodeURIComponent(petId) + '&range=' + range, { credentials: 'same-origin' })
+            .then(function (r) { return r.json() })
+            .then(function (d) { var p = {}; p[petId] = d; return p })
+            .catch(function () { var p = {}; p[petId] = null; return p })
+        })).then(function (parts) {
+          if (!alive) return
+          var next = {}
+          parts.forEach(function (p) { Object.assign(next, p) })
+          setStats(next)
+          setLoading(false)
+        })
+        return function () { alive = false }
+      }, [range, reload, ids.join(',')])
+      var segBtn = function (value, label) {
+        return h('button', {
+          onClick: function () { setRange(value) },
+          style: {
+            cursor: 'pointer', font: 'inherit', fontSize: 12, padding: '3px 14px', borderRadius: 12,
+            border: '1px solid ' + (range === value ? 'rgba(47,111,237,.7)' : 'rgba(127,127,127,.4)'),
+            color: range === value ? '#7ab8ff' : 'inherit',
+            background: range === value ? 'rgba(47,111,237,.12)' : 'transparent',
+          },
+        }, label)
+      }
+      return h(Section, { title: '工具审计' },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 8px' } },
+          segBtn('all', '全部'),
+          segBtn('30d', '最近 30 天'),
+          loading ? h('span', { style: muted }, '加载中…') : null,
+          h('span', { style: muted, marginLeft: 'auto', cursor: 'pointer', onClick: function () { setReload(reload + 1) } }, '刷新')),
+        ids.map(function (petId) {
+          var d = stats[petId]
+          if (!d) return null
+          var entries = Object.keys(d.perTool || {}).map(function (k) { return [k, d.perTool[k]] })
+          entries.sort(function (a, b) { return b[1] - a[1] })
+          var started = d.startedAt ? new Date(d.startedAt).toISOString().slice(0, 10) : null
+          return h('div', { key: petId, style: { margin: '8px 0 12px' } },
+            h('div', { style: { fontWeight: 700, fontSize: 13, marginBottom: 4 } },
+              nameOf(petId), h('span', { style: muted }, ' · 合计 ' + String(d.total) + ' 次' + (started ? ' · 统计自 ' + started : ''))),
+            entries.length === 0
+              ? h('div', { style: Object.assign({ margin: '4px 0' }, muted) }, '还没有记录')
+              : h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } },
+                  h('tbody', null, entries.map(function (e) {
+                    return h('tr', { key: e[0] },
+                      h('td', { style: { padding: '3px 8px 3px 0', borderBottom: '0.5px solid rgba(127,127,127,.25)' } }, e[0]),
+                      h('td', { style: { padding: '3px 0', borderBottom: '0.5px solid rgba(127,127,127,.25)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, String(e[1])))
+                  }))))
+        }),
+        h(Hint, null, '每次 pet_* 工具调用计一次（含失败）；按宠分别记账，从部署之日起统计，不含历史。'))
+    }
+
     function PetSettingsPage() {
       var state = useState(null)
       var data = state[0]
@@ -1326,6 +1398,14 @@ window.__ModuleLoader__.load({
             ]
           })(),
           h(Hint, null, '接入 BreezeBlue（breezeblue.ai）文字转语音：说话气泡显示时用所选声音朗读。key 只保存在本机 pet-settings.json；改动即时生效，无需重启宠物。没有全局默认声音——给哪只配了声音哪只才朗读，没配的只显示气泡；点某只的「选择」打开搜索列表，试听后「选用」只为那一只生效；「不朗读/清除」清掉这只的配置。气泡等语音的超时上限可在 pet-settings.json 的 tts.holdMs 调整（0–8000 毫秒，默认 5000；语音先就绪就立刻展示，超时则只展示气泡）。')),
+
+        // ── 工具审计 ──
+        h(ToolAuditCard, { ids: (function () {
+          var list = []
+          pets.forEach(function (p) { if (list.indexOf(p.id) < 0) list.push(p.id) })
+          if (list.indexOf('electron') < 0) list.unshift('electron')
+          return list
+        })(), nameOf: function (petId) { return petName(petId) } }),
 
         // ── 调试 ──
         h(Section, { title: '调试' },

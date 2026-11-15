@@ -13,6 +13,7 @@ import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promise
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { bumpToolStat } from './tool-stats.ts'
 import {
   formatAvailableActions,
   formatAvailableTags,
@@ -2824,6 +2825,18 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
     // 普通工作会话对待：普通会话根本没有这些工具，这里对齐其行为（拒答、不分发），
     // 而不是让它落到 focus/默认宠身上表演。报错说明去路（宠物表面输入卡），模型
     // 能向用户转述。无会话身份的调用（exec.agent 缺失）无法分类，保持放行。
+    // 审计看板（2026-11-15）：每次工具调用计一次（含失败）。归因优先级 =
+    // args.pet 点名目标 > voiceOwners（内心戏+绑定会话均已被补挂）> 未归因
+    // （不计——审计只统计能定位到宠的调用）。fire-and-forget 不给回合加延迟。
+    const countToolCall = (name: string, args: unknown, exec: unknown): void => {
+      const named = typeof (args as { pet?: unknown } | undefined)?.pet === 'string' ? (args as { pet: string }).pet : ''
+      let petId = named
+      if (petId === '') {
+        const sessionId = (exec as { agent?: { id?: unknown } } | undefined)?.agent?.id
+        petId = typeof sessionId === 'string' ? voiceOwners.get(sessionId) ?? '' : ''
+      }
+      if (petId !== '') void bumpToolStat(home, petId, name)
+    }
     const requireOwnedSession = (exec: { agent?: { id?: unknown } } | undefined): void => {
       const sessionId = exec?.agent?.id
       if (typeof sessionId === 'string' && !voiceOwners.has(sessionId)) {
@@ -2864,6 +2877,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_say', args, exec)
         requireOwnedSession(exec)
         const text = String(args.text).slice(0, 200)
         // B10：mood 先于一切副作用校验——错词表快速失败并报菜单。
@@ -2981,6 +2995,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(_args, exec) {
+      countToolCall('pet_inbox', undefined, exec)
         requireOwnedSession(exec)
         const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
         const petId = sessionId !== undefined ? voiceOwners.get(sessionId) : undefined
@@ -3018,6 +3033,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_board', args, exec)
         requireOwnedSession(exec)
         const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
         const petId = sessionId !== undefined ? voiceOwners.get(sessionId) : undefined
@@ -3088,6 +3104,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_do', args, exec)
         requireOwnedSession(exec)
         // B10：mood 先于一切副作用校验——错词表快速失败并报菜单。
         const mood = normalizeMoodInput(args.mood)
@@ -3229,6 +3246,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_express', args, exec)
         requireOwnedSession(exec)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
@@ -3289,6 +3307,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_digest', args, exec)
         try {
           const entry = await resolveTarget(args.pet, exec?.agent?.id)
           const cursor = digestCursors.get(entry.id) ?? 0
@@ -3349,6 +3368,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_journal', args, exec)
         const op = String(args.op)
         const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
         const owner = sessionId !== undefined ? voiceOwners.get(sessionId) : undefined
@@ -3528,6 +3548,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_recall', args, exec)
         const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : undefined
         const owner = sessionId !== undefined ? voiceOwners.get(sessionId) : undefined
         const requested = typeof args.pet === 'string' && args.pet.trim() !== '' ? args.pet.trim() : undefined
@@ -3600,6 +3621,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args) {
+      countToolCall('pet_interactions', args, undefined)
         const limit = typeof args.limit === 'number' && Number.isFinite(args.limit)
           ? Math.min(50, Math.max(1, Math.round(args.limit)))
           : 10
@@ -3633,6 +3655,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_affection', args, exec)
         try {
           // 拒绝式校验第一层：op 白名单——宁可报错，不要猜。
           const op = typeof args.op === 'string' ? args.op.trim() : ''
@@ -3780,6 +3803,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_schedule_wake', args, exec)
         requireOwnedSession(exec)
         try {
           // 拒绝式校验第一层：op 白名单——宁可报错，不要猜。
@@ -3883,6 +3907,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_set_rhythm', args, exec)
         requireOwnedSession(exec)
         try {
           const entry = await resolveTarget(undefined, exec?.agent?.id)
@@ -3961,6 +3986,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_leave_letter', args, exec)
         requireOwnedSession(exec)
         try {
           const entry = await resolveTarget(undefined, exec?.agent?.id)
@@ -4006,6 +4032,7 @@ export function registerPetTools(ctx: Context, home: string, pet: PetService): v
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       async execute(args, exec) {
+      countToolCall('pet_state', args, exec)
         // Every running pet's NORMALIZED mirror plus every pet's ledger — the
         // model sees the whole cast, not just the default pet, and never the
         // raw field-matrix differences. A pet whose /status fails between the
