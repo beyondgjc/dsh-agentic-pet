@@ -96,4 +96,3 @@ export declare function readGlobalArrayJson(home: string, name: string): Promise
  * so the root stays clean without losing the original. Best-effort
  * throughout; `extract` returns undefined for petIds with no slice. */
 export declare function migrateGlobalSplits(home: string, name: string, extract: (global: Record<string, unknown>, petId: string) => Record<string, unknown> | undefined): Promise<void>;
-//# sourceMappingURL=petdata.d.ts.map

@@ -64,6 +64,10 @@ export interface InnerVoiceConfig {
      * 记忆重组成一个 ≤150 字的梦写进本子（tags 带 '梦'），不出声、不弹气泡。
      * 每自然晚最多 1 次（pet-inner-state.json 记账）。 */
     dreaming: boolean;
+    /** 启动问好（按宠开关，默认开）：每次 dsh 启动后首次见到该宠在线时，她
+     * 主动打一句招呼。键缺席或 true = 照常问好；显式 false = 安静启动（其余
+     * 唤醒路径完全不受影响）。 */
+    greetings: Record<string, boolean>;
     /** 自主唤醒（pet_schedule_wake 计划）到点遇用户主会话忙时的策略：
      * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
      * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
@@ -345,4 +349,3 @@ export declare function buildTouchPrompt(facts: TouchPromptFacts): string;
  * clamps to the contract's 2000-character ceiling. A plan inside the ±60s
  * merge window folds in: the tag becomes the union and the intent rides. */
 export declare function buildChatPrompt(text: string, mergedPlan?: MergedWakePlan, presence?: PresenceFacts): string;
-//# sourceMappingURL=inner-voice.d.ts.map

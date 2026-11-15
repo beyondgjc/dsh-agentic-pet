@@ -82,4 +82,3 @@ export interface PersonaRowConfig {
  * and stays invisible to sessions on other presets.
  */
 export declare function apply(ctx: Context, config: PersonaRowConfig): void;
-//# sourceMappingURL=persona.d.ts.map

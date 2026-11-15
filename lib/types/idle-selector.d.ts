@@ -62,4 +62,3 @@ export declare function pickIdle(options: IdlePickOptions): IdlePick | null;
 export declare function facingForOffset(offsetPx: number, current: Facing, hysteresisPx?: number): Facing;
 /** Deterministic RNG for tests and offline distribution audits. */
 export declare function mulberry32(seed: number): Rng;
-//# sourceMappingURL=idle-selector.d.ts.map

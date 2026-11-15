@@ -49,4 +49,3 @@ export type SummonAdmission = {
  * desired set; `candidate` is the id about to be summoned (counted toward
  * the cap even when not yet in either set). */
 export declare function admitSummon(plan: InstancePlan, liveExtraIds: Iterable<string>, candidate?: string): SummonAdmission;
-//# sourceMappingURL=instances.d.ts.map

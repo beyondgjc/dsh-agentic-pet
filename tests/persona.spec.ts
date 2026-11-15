@@ -138,6 +138,15 @@ describe('per-preset persona slots (multi-pet)', () => {
     const off = mergeSettings({}, { innerVoice: { selfTuning: false } })
     expect(off.innerVoice?.selfTuning).toBe(false)
   })
+
+  it('mergeSettings: innerVoice.greetings — per-pet booleans, junk drops, replace semantics', () => {
+    const saved = mergeSettings({}, { innerVoice: { greetings: { electron: false, other: true, bad: 'off' } } })
+    expect(saved.innerVoice?.greetings).toEqual({ electron: false, other: true })
+    const replaced = mergeSettings(saved, { innerVoice: { greetings: { electron: true } } })
+    expect(replaced.innerVoice?.greetings).toEqual({ electron: true })
+    const untouched = mergeSettings(saved, { innerVoice: { wakeIntervalMinutes: 7 } })
+    expect(untouched.innerVoice?.greetings).toEqual({ electron: false, other: true })
+  })
 })
 
 describe('DEFAULT_PERSONA', () => {

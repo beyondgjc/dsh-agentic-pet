@@ -61,4 +61,3 @@ export declare function defaultPet(pets: PetEntry[]): PetEntry | undefined;
  * deployment would fall back to the web card alone for the rest of the
  * session. */
 export declare function notifyPets(pets: PetEntry[]): PetEntry[];
-//# sourceMappingURL=registry.d.ts.map

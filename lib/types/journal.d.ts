@@ -143,4 +143,3 @@ export declare const isEcho: (text: string, existing: string[]) => boolean;
 /** One-time import of the user's hand-written notebook. The source is never
  * modified; the target is created only when absent. Returns entries imported. */
 export declare function importHandwrittenJournal(home: string, petId: string, sourcePath: string): Promise<number>;
-//# sourceMappingURL=journal.d.ts.map

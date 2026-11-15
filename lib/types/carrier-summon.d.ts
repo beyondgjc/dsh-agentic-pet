@@ -43,4 +43,3 @@ export interface SummonOutcome {
  * async liveness probe, which this module deliberately does not perform.
  */
 export declare function planSummon(input: SummonPlanInput): SummonPlan;
-//# sourceMappingURL=carrier-summon.d.ts.map

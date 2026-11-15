@@ -141,6 +141,10 @@ interface InnerVoiceSettings {
 
   boundSessions?: Record<string, string>
 
+  /** 启动问好（按宠开关，petId → boolean）：键缺席或 true = 照常问好；
+   * false = 安静启动。缺键继承默认（开）。 */
+  greetings?: Record<string, boolean>
+
   /** Per-pet preset overrides (petId → preset id, multi-pet): absent keys
    * follow the global `preset`. */
   presets?: Record<string, string>
@@ -328,6 +332,8 @@ const DEFAULT_SETTINGS: PetSettings = {
     petMessageLimits: { minutes5: 5, minutes10: 8, minutes30: 10, minutes60: 15 },
 
     boundSessions: {},
+
+    greetings: {},
 
   },
 
@@ -652,6 +658,25 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
       }
 
       innerVoice.presets = record
+
+    }
+
+    // 启动问好（按宠开关）：petId → boolean，非布尔值丢弃；patch 替换整表
+    // （与 presets/boundSessions 同形，客户端发全量），缺键继承默认（开）。
+
+    const perPetGreetings = v.greetings
+
+    if (typeof perPetGreetings === 'object' && perPetGreetings !== null) {
+
+      const record: Record<string, boolean> = {}
+
+      for (const [petId, on] of Object.entries(perPetGreetings as Record<string, unknown>)) {
+
+        if (petId !== '' && typeof on === 'boolean') record[petId] = on
+
+      }
+
+      innerVoice.greetings = record
 
     }
 

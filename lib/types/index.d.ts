@@ -61,4 +61,3 @@ export declare function servePetStatic(request: Request, distRoot: string, distI
  * @param ctx - plugin context carrying the webServer and connection services.
  */
 export declare function apply(ctx: Context): void;
-//# sourceMappingURL=index.d.ts.map

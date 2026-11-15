@@ -207,4 +207,3 @@ interface WakeParts {
 export declare function budgetWake(parts: WakeParts, maxChars: number): WakeParts;
 export declare function buildJournalInjection(home: string, petId: string, config: JournalConfig): Promise<JournalWakeInjection>;
 export {};
-//# sourceMappingURL=journal-recall.d.ts.map

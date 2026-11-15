@@ -1,6 +1,6 @@
 # Agentic 桌面宠物
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`、`pet_cancel_wake`、`pet_set_rhythm`、`pet_leave_letter` 等 16 个）。说话内容可通过 BreezeBlue TTS 朗读（声音按宠配置，未配置的宠只显示气泡），合成失败或超时静默降级为只显示。多只宠物可并存：目录注册表发现全部在线宠物，状态、交互、账本按宠路由。她还有一层「内在生活」：静默的夜晚会做梦（记忆重组写进本子）、相处里程碑会自发提起（羁绊纪念日）、觉得值得留下的话会写成信放在你桌面上（留信）。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 生态的桌面宠物插件：宠物以透明置顶窗常驻桌面，跟随 agent 会话状态（idle / thinking / working / error），与 web 界面竞速应答审批与提问（先答者赢），维护每宠独立的触摸好感账本，并向模型暴露表达工具（`pet_say`、`pet_do`、`pet_digest`、`pet_interactions`、`pet_state`、`pet_schedule_wake`（定/撤/看自己的计划）、`pet_set_rhythm`、`pet_leave_letter` 等 14 个）。说话内容可通过 BreezeBlue TTS 朗读（声音按宠配置，未配置的宠只显示气泡），合成失败或超时静默降级为只显示。多只宠物可并存：目录注册表发现全部在线宠物，状态、交互、账本按宠路由。她还有一层「内在生活」：静默的夜晚会做梦（记忆重组写进本子）、相处里程碑会自发提起（羁绊纪念日）、觉得值得留下的话会写成信放在你桌面上（留信）。
 
 ## 安装
 

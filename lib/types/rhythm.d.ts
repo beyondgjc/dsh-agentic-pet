@@ -30,4 +30,3 @@ export declare const DEFAULT_IDLE_BIAS: IdleBiasConfig;
 /** Read `rhythm.idleBias` from pet-settings.json. Absent/invalid = 默认表；
  * 显式 `null` = 关闭（渲染层均匀随机）。 */
 export declare function readIdleBias(home: string): Promise<IdleBiasConfig | undefined>;
-//# sourceMappingURL=rhythm.d.ts.map

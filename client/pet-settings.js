@@ -1060,6 +1060,24 @@ window.__ModuleLoader__.load({
                   })))
             })
           })(),
+          // ── 启动问好（按宠开关）：每只宠各管各的早安 ──
+          (function () {
+            var ids = []
+            pets.forEach(function (p) { if (ids.indexOf(p.id) < 0) ids.push(p.id) })
+            if (ids.indexOf('electron') < 0) ids.unshift('electron')
+            var perPet = iv.greetings || {}
+            return ids.map(function (petId) {
+              var on = perPet[petId] !== false
+              return h('div', { key: 'greet-' + petId, style: row },
+                '启动问好 · ' + petName(petId),
+                h(Toggle, { value: on, onChange: function () {
+                  var next = Object.assign({}, perPet)
+                  next[petId] = !on
+                  update({ innerVoice: { greetings: next } })
+                }, 'aria-label': '启动问好 · ' + petName(petId) }),
+                h(Hint, null, '打开 DeepSeek 时她主动打招呼；关掉 = 安静启动，其余唤醒照常。'))
+            })
+          })(),
           // ── 指定会话（高级）：按宠物一行——每只宠物各绑各的脑子 ──
           (function () {
             var ids = []

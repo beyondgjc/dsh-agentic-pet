@@ -70,6 +70,10 @@ export interface InnerVoiceConfig {
    * 记忆重组成一个 ≤150 字的梦写进本子（tags 带 '梦'），不出声、不弹气泡。
    * 每自然晚最多 1 次（pet-inner-state.json 记账）。 */
   dreaming: boolean
+  /** 启动问好（按宠开关，默认开）：每次 dsh 启动后首次见到该宠在线时，她
+   * 主动打一句招呼。键缺席或 true = 照常问好；显式 false = 安静启动（其余
+   * 唤醒路径完全不受影响）。 */
+  greetings: Record<string, boolean>
   /** 自主唤醒（pet_schedule_wake 计划）到点遇用户主会话忙时的策略：
    * 'fire' = 到点必醒（计划是模型自己的决定，不带礼貌门）；'defer' =
    * 忙时顺延——计划放回待执行集，下一个扫描拍重试，永不丢弃。 */
@@ -133,6 +137,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       petToPetDelivery?: unknown
       petMessageLimits?: unknown
       boundSessions?: unknown
+      greetings?: unknown
     }
     // Cooldown in seconds (0 allowed = gate off). The legacy minute key folds
     // in only while the seconds key is absent, so a saved seconds value is
@@ -148,6 +153,14 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
     if (typeof v.boundSessions === 'object' && v.boundSessions !== null) {
       for (const [petId, sessionId] of Object.entries(v.boundSessions as Record<string, unknown>)) {
         if (petId !== '' && typeof sessionId === 'string' && sessionId !== '') boundSessions[petId] = sessionId
+      }
+    }
+    // Per-pet boot-greeting toggles: only booleans survive; absent keys (and
+    // dropped junk) inherit the default (greet).
+    const greetings: Record<string, boolean> = {}
+    if (typeof v.greetings === 'object' && v.greetings !== null) {
+      for (const [petId, on] of Object.entries(v.greetings as Record<string, unknown>)) {
+        if (petId !== '' && typeof on === 'boolean') greetings[petId] = on
       }
     }
     // Per-pet preset overrides: petId → preset id, only ids the host actually
@@ -179,6 +192,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       petToPetDelivery: v.petToPetDelivery === 'immediate' ? 'immediate' : 'queue',
       petMessageLimits: parsePetMessageLimits(v.petMessageLimits),
       boundSessions,
+      greetings,
     }
   } catch {
     return {
@@ -190,6 +204,7 @@ export async function readInnerVoiceConfig(home: string): Promise<InnerVoiceConf
       touchReplyCooldownSeconds: 30,
       selfTuning: false,
       dreaming: true,
+      greetings: {},
       selfWakeBusyPolicy: 'fire',
       petToPetDelivery: 'queue',
       petMessageLimits: { ...DEFAULT_PET_MESSAGE_LIMITS },
@@ -728,7 +743,7 @@ export function buildWakePrompt(facts: WakePromptFacts): string {
   if (pending.length > 0) {
     lines.push(
       `你还有 ${String(pending.length)} 个待执行计划：${pending.map(plan => `${wakePlanClock(plan.at)}「${plan.intent}」`).join('；')}。`
-      + '继续等待、改时间或取消由你决定（pet_schedule_wake 同名覆盖即改期，pet_cancel_wake 撤销）。',
+      + '继续等待、改时间或取消由你决定（pet_schedule_wake：op:"set" 同名覆盖即改期，op:"cancel" 撤销——撤要带 id 或 all:true）。',
     )
   }
   const unread = facts.unread ?? []

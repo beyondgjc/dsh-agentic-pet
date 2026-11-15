@@ -112,4 +112,3 @@ export declare function sessionOccupiedBy(sessionId: string, selfPetId: string, 
 /** The machine token for an occupied-session refusal (one spelling for the
  * reconcile error, the test answer, and the client's prefix parse). */
 export declare function sessionOccupiedTag(occupiedBy: string): string;
-//# sourceMappingURL=binding.d.ts.map

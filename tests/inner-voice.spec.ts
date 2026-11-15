@@ -73,6 +73,7 @@ describe('readInnerVoiceConfig', () => {
       presets: {},
       selfTuning: false,
       dreaming: true,
+      greetings: {},
     })
     await writeFile(join(home, 'pet-settings.json'), '{not json', 'utf8')
     expect((await readInnerVoiceConfig(home)).enabled).toBe(true)
@@ -111,7 +112,18 @@ describe('readInnerVoiceConfig', () => {
       presets: { electron: 'whale598-standard' },
       selfTuning: true,
       dreaming: true,
+      greetings: {},
     })
+  })
+
+  it('parses per-pet greeting toggles (booleans survive, junk drops, default on)', async () => {
+    const home = await tempHome()
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({
+      innerVoice: { greetings: { electron: false, ghost: 'off', '': true, other: true } },
+    }), 'utf8')
+    expect((await readInnerVoiceConfig(home)).greetings).toEqual({ electron: false, other: true })
+    await writeFile(join(home, 'pet-settings.json'), JSON.stringify({ innerVoice: {} }), 'utf8')
+    expect((await readInnerVoiceConfig(home)).greetings).toEqual({})
   })
 
   it('clamps out-of-range numbers and folds mistyped ones', async () => {

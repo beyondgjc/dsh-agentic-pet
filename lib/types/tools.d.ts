@@ -27,4 +27,3 @@ export default class PetTools {
     static inject: string[];
     constructor(ctx: Context);
 }
-//# sourceMappingURL=tools.d.ts.map

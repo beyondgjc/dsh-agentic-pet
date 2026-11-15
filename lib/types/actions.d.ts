@@ -69,4 +69,3 @@ export type TagResolution = {
 export declare function resolveTagRequest(tag: string, capabilities: PetCapabilities | null): TagResolution;
 /** Tag menu for errors: an empty vocabulary names the fallback explicitly. */
 export declare function formatAvailableTags(tags: readonly string[], cap?: number): string;
-//# sourceMappingURL=actions.d.ts.map

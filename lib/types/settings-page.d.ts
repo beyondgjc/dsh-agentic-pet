@@ -76,6 +76,9 @@ interface InnerVoiceSettings {
         minutes60?: number;
     };
     boundSessions?: Record<string, string>;
+    /** 启动问好（按宠开关，petId → boolean）：键缺席或 true = 照常问好；
+     * false = 安静启动。缺键继承默认（开）。 */
+    greetings?: Record<string, boolean>;
     /** Per-pet preset overrides (petId → preset id, multi-pet): absent keys
      * follow the global `preset`. */
     presets?: Record<string, string>;
@@ -186,4 +189,3 @@ export interface InstanceControl {
 }
 export declare function installSettingsPage(ctx: Context, home: string, pet: PetService, control?: PetDriverControl, summon?: () => SummonOutcome, instances?: InstanceControl): void;
 export {};
-//# sourceMappingURL=settings-page.d.ts.map

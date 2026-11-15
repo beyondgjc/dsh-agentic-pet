@@ -54,4 +54,3 @@ export declare function unseenBoardItems(home: string, petId: string): Promise<{
     count: number;
     froms: string[];
 }>;
-//# sourceMappingURL=board.d.ts.map
