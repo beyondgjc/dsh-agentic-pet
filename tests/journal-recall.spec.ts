@@ -571,11 +571,12 @@ describe('REQ-M07 void', () => {
 })
 
 describe('REQ-M08 injection budget', () => {
-  it('budget off = 0.4.9 behavior exactly', async () => {
+  it('legacy mode (explicit budget 0) = 0.4.9 behavior exactly', async () => {
     const home = await makeHome()
     for (let i = 0; i < 5; i += 1) await appendJournal(home, 'electron', entry(1000 + i, `条目${i}`), DEFAULT_JOURNAL_CONFIG)
     await appendEpoch(home, 'electron', { text: '一个阶段。', sessionId: null })
-    const wake = await buildJournalInjection(home, 'electron', DEFAULT_JOURNAL_CONFIG)
+    const legacy = { ...DEFAULT_JOURNAL_CONFIG, injectMaxChars: 0, injectPinned: false }
+    const wake = await buildJournalInjection(home, 'electron', legacy)
     expect(wake.entries).toHaveLength(3)
     expect(wake.epochLines).toEqual([])
     expect(wake.epochFallback).toBeUndefined()
@@ -590,6 +591,29 @@ describe('REQ-M08 injection budget', () => {
     expect(wake.entries).toHaveLength(3)
     expect(wake.entries.every(item => item.source !== 'external-edit' && item.source !== 'system')).toBe(true)
     expect(wake.entries.map(item => item.text)).toEqual(['记忆0', '记忆1', '记忆2'])
+  })
+
+  it('default config = enhanced on: pinned + epoch lines ride the snapshot', async () => {
+    const home = await makeHome()
+    const pinned = await appendJournal(home, 'electron', entry(900, '钉住的约定'), DEFAULT_JOURNAL_CONFIG)
+    await pinEntry(home, 'electron', pinned.id)
+    for (let i = 0; i < 3; i += 1) await appendJournal(home, 'electron', entry(1000 + i, `记忆${i}`), DEFAULT_JOURNAL_CONFIG)
+    await appendEpoch(home, 'electron', { text: '一段旧日子。', sessionId: null })
+    const wake = await buildJournalInjection(home, 'electron', DEFAULT_JOURNAL_CONFIG)
+    expect(wake.entries.some(item => item.text.includes('钉住的约定'))).toBe(true)
+    expect(wake.entries.some(item => item.text === '记忆2')).toBe(true)
+    expect(wake.epochLines).toHaveLength(1)
+  })
+
+  it('per-pet enhanced=false strips pinned/epoch even with budget on', async () => {
+    const home = await makeHome()
+    await appendJournal(home, 'electron', entry(900, '钉住的约定'), DEFAULT_JOURNAL_CONFIG)
+    for (let i = 0; i < 3; i += 1) await appendJournal(home, 'electron', entry(1000 + i, `记忆${i}`), DEFAULT_JOURNAL_CONFIG)
+    await appendEpoch(home, 'electron', { text: '一段旧日子。', sessionId: null })
+    const wake = await buildJournalInjection(home, 'electron', DEFAULT_JOURNAL_CONFIG, false)
+    expect(wake.entries.map(item => item.text)).toEqual(['记忆0', '记忆1', '记忆2'])
+    expect(wake.epochLines).toEqual([])
+    expect(wake.epochFallback).toBeUndefined()
   })
 
   it('budget on: pinned > recent > epoch lines, total within budget', async () => {

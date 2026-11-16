@@ -24,6 +24,10 @@ export interface JournalConfig {
     /** REQ-M05: inject the newest epoch in full when the current file has no
      * recent entries. */
     injectEpochFallback: boolean;
+    /** 每宠开关（2026-11-17）：冷启快照是否带长期骨架（钉住轮播 + epoch 索引行
+     * + 兜底）。缺席/true = 开；显式 false = 该宠退回 0.4.9 只带最近几条。
+     * 其余五个旋钮保持全局——这是唯一按宠区分的拨杆。 */
+    wakeEnhanced: Record<string, boolean>;
 }
 export interface JournalEntry {
     at: number;

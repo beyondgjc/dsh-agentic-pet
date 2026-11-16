@@ -8,6 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type VoiceBindingSnapshot, type VoiceBindingView } from './binding.ts';
+import { type PetMessage, type WakePlan } from './inner-voice.ts';
 import { type PetService } from './service.ts';
 declare module '@deepseek-ai/cordis' {
     interface Events {
@@ -75,6 +76,18 @@ export declare function normalizeMoodInput(raw: unknown): string | undefined;
  * tool, so timestamps show the USER's wall clock, not UTC (toISOString's Z
  * form read 8h off and cost a confusion round). Sortable, zero-padded. */
 export declare const logStamp: () => string;
+/** Eval harness seam (2026-11-17): the tool-call eval drives registerPetTools
+ * outside the host and needs to classify sessions as pet-owned and pre-seed
+ * the in-memory inbox/plan state the tools read — without booting
+ * installPetDriver. The maps stay module-level singletons with the driver's
+ * own mutators; this hands the eval the SAME objects, read/write. Never used
+ * by production code paths. */
+export declare function petEvalSeam(): {
+    voiceOwners: Map<string, string>;
+    voicePetMessages: Map<string, PetMessage[]>;
+    voiceWakePlans: Map<string, WakePlan[]>;
+    crossPetLog: Map<string, number[]>;
+};
 /** Export for the settings page: the live snapshot, no file round-trip. */
 export declare function voiceBindingSnapshot(): VoiceBindingSnapshot;
 export interface PetDriverControl {

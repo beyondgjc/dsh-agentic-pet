@@ -1064,12 +1064,15 @@ export function budgetWake(parts: WakeParts, maxChars: number): WakeParts {
   }
 }
 
+/** @param enhanced 每宠开关（journal.wakeEnhanced，缺席 = true）：false 时
+ * 该宠的冷启快照退回 0.4.9——只带最近几条，不轮播钉住、不带 epoch 目录。 */
 export async function buildJournalInjection(
   home: string,
   petId: string,
   config: JournalConfig,
+  enhanced = true,
 ): Promise<JournalWakeInjection> {
-  const budgetOn = config.injectMaxChars > 0
+  const budgetOn = enhanced && config.injectMaxChars > 0
   // Bookkeeping traces (external-edit / system notes) are not memories and
   // must not spend the recent window: read deeper, then filter.
   const deeper = await readJournal(home, petId, 20)

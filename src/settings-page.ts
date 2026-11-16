@@ -247,6 +247,10 @@ interface JournalSettings {
 
   allowUnboundAppend?: boolean
 
+  /** 每宠开关（2026-11-17）：冷启快照带长期骨架（钉住轮播 + epoch 目录）。
+   * 整体替换、只留布尔值；缺席的宠 = 开。 */
+  wakeEnhanced?: Record<string, boolean>
+
 }
 
 
@@ -350,6 +354,8 @@ const DEFAULT_SETTINGS: PetSettings = {
     maxFileBytes: 256 * 1024,
 
     allowUnboundAppend: false,
+
+    wakeEnhanced: {},
 
   },
 
@@ -751,6 +757,21 @@ export function mergeSettings(current: PetSettings, patch: Record<string, unknow
     if (bytes !== undefined) journal.maxFileBytes = bytes
 
     if (typeof j.allowUnboundAppend === 'boolean') journal.allowUnboundAppend = j.allowUnboundAppend
+
+    // 每宠开关整体替换（同 innerVoice.greetings）：只留布尔值，垃圾键丢弃。
+    if (typeof j.wakeEnhanced === 'object' && j.wakeEnhanced !== null) {
+
+      const map: Record<string, boolean> = {}
+
+      for (const [petId, flag] of Object.entries(j.wakeEnhanced as Record<string, unknown>)) {
+
+        if (typeof flag === 'boolean' && petId !== '') map[petId] = flag
+
+      }
+
+      journal.wakeEnhanced = map
+
+    }
 
   }
 

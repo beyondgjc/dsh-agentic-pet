@@ -205,5 +205,7 @@ interface WakeParts {
 /** Pure trimming (REQ-M08): pinned > recent > epoch lines (oldest dropped
  * first) > fallback. Text chars count toward the budget; labels ride free. */
 export declare function budgetWake(parts: WakeParts, maxChars: number): WakeParts;
-export declare function buildJournalInjection(home: string, petId: string, config: JournalConfig): Promise<JournalWakeInjection>;
+/** @param enhanced 每宠开关（journal.wakeEnhanced，缺席 = true）：false 时
+ * 该宠的冷启快照退回 0.4.9——只带最近几条，不轮播钉住、不带 epoch 目录。 */
+export declare function buildJournalInjection(home: string, petId: string, config: JournalConfig, enhanced?: boolean): Promise<JournalWakeInjection>;
 export {};

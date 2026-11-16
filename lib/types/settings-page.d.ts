@@ -134,6 +134,9 @@ interface JournalSettings {
     maxEntryChars?: number;
     maxFileBytes?: number;
     allowUnboundAppend?: boolean;
+    /** 每宠开关（2026-11-17）：冷启快照带长期骨架（钉住轮播 + epoch 目录）。
+     * 整体替换、只留布尔值；缺席的宠 = 开。 */
+    wakeEnhanced?: Record<string, boolean>;
 }
 interface PresenceSettings {
     enabled?: boolean;

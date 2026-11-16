@@ -1265,6 +1265,24 @@ window.__ModuleLoader__.load({
             value: journal.allowUnboundAppend === true,
             onChange: function () { update({ journal: { allowUnboundAppend: journal.allowUnboundAppend !== true } }) },
           })),
+          // ── 快照带长期记忆（按宠开关）：冷启那次的唤醒里带上钉住条目 + epoch 目录 ──
+          journalOn ? (function () {
+            var ids = []
+            pets.forEach(function (p) { if (ids.indexOf(p.id) < 0) ids.push(p.id) })
+            if (ids.indexOf('electron') < 0) ids.unshift('electron')
+            var perPet = journal.wakeEnhanced || {}
+            return ids.map(function (petId) {
+              var on = perPet[petId] !== false
+              return h('div', { key: 'jwe-' + petId, style: row },
+                '快照带长期记忆 · ' + petName(petId),
+                h(Toggle, { value: on, onChange: function () {
+                  var next = Object.assign({}, perPet)
+                  next[petId] = !on
+                  update({ journal: { wakeEnhanced: next } })
+                }, 'aria-label': '快照带长期记忆 · ' + petName(petId) }),
+                h(Hint, null, '冷启唤醒里带上她钉住的条目和阶段摘要目录；关掉只退回最近几条（钉住的条目仍不会被归档）。'))
+            })
+          })() : null,
           h(Hint, null, '本子在 ~/.dsh/whale598/<petId>/journal.md：可读、可追加、不静默删改；手写本子已导入。默认只有宠物自己的会话可以追加。'),
           // ── 清空长期记忆：按宠一行（全套移入 ~/.dsh/backup-journal/ 备份） ──
           (function () {

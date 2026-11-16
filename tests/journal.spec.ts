@@ -235,6 +235,24 @@ describe('import and config', () => {
     expect(config.maxFileBytes).toBe(4096)
     expect(config.allowUnboundAppend).toBe(true)
   })
+
+  it('2026-11-17 defaults: enhanced wake on; wakeEnhanced map keeps booleans only', async () => {
+    // 无设置文件 → 翻转后的默认：pin 进唤醒注入的承诺出厂即真（P1）。
+    const empty = await makeHome()
+    const defaults = await readJournalConfig(empty)
+    expect(defaults.injectMaxChars).toBe(1200)
+    expect(defaults.injectPinned).toBe(true)
+    expect(defaults.wakeEnhanced).toEqual({})
+    const home = await makeHome()
+    await mkdir(join(home, 'whale598'), { recursive: true })
+    await writeFile(join(home, 'whale598', 'pet-settings.json'), JSON.stringify({
+      journal: {
+        wakeEnhanced: { electron: false, 'electron-2': true, junk: 'no', alsoJunk: 3 },
+      },
+    }), 'utf8')
+    const config = await readJournalConfig(home)
+    expect(config.wakeEnhanced).toEqual({ electron: false, 'electron-2': true })
+  })
 })
 
 describe('wake prompt injection', () => {

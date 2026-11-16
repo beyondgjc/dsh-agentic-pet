@@ -126,7 +126,7 @@ printf 'import type { Context } from "@deepseek-ai/cordis"\ndeclare module "@dee
 
 ```bash
 node_modules/.bin/tsc -p tsconfig.build-temp.json      # 全绿才继续（含真 dsh-tools 类型检查）
-rm -f lib/index.js lib/tools.js lib/service-*.js       # ★ tsdown clean:false，旧 hash chunk 会残留
+rm -f lib/index.js lib/tools.js lib/service-*.js lib/driver-*.js       # ★ tsdown clean:false，旧 hash chunk 会残留
 node_modules/.bin/tsdown                               # 产物：lib/index.js + tools.js + service-<新hash>.js
 ```
 

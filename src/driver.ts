@@ -465,6 +465,20 @@ let selfWakeSender: ((petId: string, plan: WakePlan) => void) | undefined
 // Same bridge, for cross-pet immediate delivery (pet_say audience): prompt
 // the TARGET pet's own session right away. Returns whether it was admitted.
 let crossPetDeliverer: ((petId: string, prompt: string) => Promise<boolean>) | undefined
+/** Eval harness seam (2026-11-17): the tool-call eval drives registerPetTools
+ * outside the host and needs to classify sessions as pet-owned and pre-seed
+ * the in-memory inbox/plan state the tools read — without booting
+ * installPetDriver. The maps stay module-level singletons with the driver's
+ * own mutators; this hands the eval the SAME objects, read/write. Never used
+ * by production code paths. */
+export function petEvalSeam(): {
+  voiceOwners: Map<string, string>
+  voicePetMessages: Map<string, PetMessage[]>
+  voiceWakePlans: Map<string, WakePlan[]>
+  crossPetLog: Map<string, number[]>
+} {
+  return { voiceOwners, voicePetMessages, voiceWakePlans, crossPetLog }
+}
 /** Write-through the in-memory plan map to disk (empty lists dropped — the
  * absence of a pet key IS an empty schedule). */
 const persistWakePlans = (home: string): void => {
@@ -2299,12 +2313,14 @@ ${text}`
       driverLog(home, `BOARD unseen pet=${petId} count=${String(boardUnseen.count)} froms=${boardUnseen.froms.join(',')}`)
     }
     const journalConfig = await readJournalConfig(home)
+    // 每宠开关：缺席 = 开；显式 false = 这只宠的快照退回只带最近几条。
+    const enhancedWake = journalConfig.wakeEnhanced?.[petId] !== false
     const journalWake = journalConfig.enabled
-      ? await buildJournalInjection(home, petId, journalConfig)
+      ? await buildJournalInjection(home, petId, journalConfig, enhancedWake)
       : undefined
     const journal = journalWake?.entries ?? []
     driverLog(home, `VOICE wake journal pet=${petId} entries=${String(journal.length)} enabled=${String(journalConfig.enabled)}`
-      + ` epochLines=${String(journalWake?.epochLines.length ?? 0)} epochDue=${String(journalWake?.epochDue?.due === true)}`)
+      + ` enhanced=${String(enhancedWake)} epochLines=${String(journalWake?.epochLines.length ?? 0)} epochDue=${String(journalWake?.epochDue?.due === true)}`)
     const presence = await takePresenceSummary(
       home,
       petId,

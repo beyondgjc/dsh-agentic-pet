@@ -127,6 +127,20 @@ describe('per-preset persona slots (multi-pet)', () => {
     expect(next.personas).toEqual({ 'whale598-custom-1': '卡' })
   })
 
+  it('mergeSettings: journal.wakeEnhanced — whole-map replace, booleans only, absent patch keeps stored map', () => {
+    const saved = mergeSettings({}, { journal: { wakeEnhanced: { electron: false, 'electron-2': true } } })
+    expect(saved.journal?.wakeEnhanced).toEqual({ electron: false, 'electron-2': true })
+    // 整体替换：单宠 patch 覆盖整张 map（同 innerVoice.greetings 语义）。
+    const replaced = mergeSettings(saved, { journal: { wakeEnhanced: { electron: true } } })
+    expect(replaced.journal?.wakeEnhanced).toEqual({ electron: true })
+    // 非布尔键丢弃，布尔键保留。
+    const junk = mergeSettings(saved, { journal: { wakeEnhanced: { electron: 'off', ok: false } } })
+    expect(junk.journal?.wakeEnhanced).toEqual({ ok: false })
+    // patch 没带 journal.wakeEnhanced → 现值原样保留。
+    const untouched = mergeSettings(saved, { journal: { injectRecent: 5 } })
+    expect(untouched.journal?.wakeEnhanced).toEqual({ electron: false, 'electron-2': true })
+  })
+
   it('mergeSettings: innerVoice.selfTuning — strict boolean, absent patch keeps stored value', () => {
     const saved = mergeSettings({}, { innerVoice: { selfTuning: true } })
     expect(saved.innerVoice?.selfTuning).toBe(true)
