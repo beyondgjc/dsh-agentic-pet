@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentic-pet",
-  "description": "The pet-surface bundle: serves the desktop pet renderer over the web composition, turning dsh into a surface the desktop pet attaches to as an authenticated client",
+  "description": "A model-driven desktop pet for dsh: follows agent sessions, races the Web UI to answer approvals and questions, and runs an autonomous inner voice with a per-pet continuity journal (hash-chained, archived, self-summarized, keyword recall), letters, a shared board, pet-to-pet messages, and interactions / tool-call audits.",
   "version": "0.4.19",
   "publishConfig": {
     "access": "public"

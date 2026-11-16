@@ -1,5 +1,5 @@
 ---
-description: "The dsh desktop pet: an agentic pet plugin that serves the pet renderer over the web composition, drives it from in-process dsh events, and answers approvals and questions from the desktop."
+description: "A model-driven desktop pet for dsh: follows agent sessions, races the Web UI to answer approvals and questions, and runs an autonomous inner voice with a per-pet continuity journal (hash-chained, archived, self-summarized, keyword recall), letters, a shared board, pet-to-pet messages, and interactions / tool-call audits."
 kind: "package-bundle"
 ---
 
