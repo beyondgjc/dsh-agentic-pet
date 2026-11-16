@@ -187,6 +187,8 @@ node_modules/.bin/vitest run            # ★ 用 .bin 直调；pnpm exec 会在
 
 ## 5. 工作流 C：正式发布（npm）
 
+> 完整教程（含 0.4.19 实录坑表）：见 [DEV-RELEASE.md](./DEV-RELEASE.md)。规范入口 `node scripts/release.mjs <version>`，发布后收尾四件套（镜像/锁文件/标记/核验）也在那篇。
+
 ```bash
 node scripts/release.mjs <version> [--dry-run]
 ```
