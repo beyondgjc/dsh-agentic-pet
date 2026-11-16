@@ -3,7 +3,8 @@
 > 给后续接手的人（和 agent）：这个插件有两套仓库、两条构建链、一处本地安装点，
 > 2026-11-07 的记忆召回系统开发在上面踩过一圈坑。本文记录现状与纪律，改动前先读。
 > 全景技术文档（协议栈/端点契约/各模块深读）= Obsidian `DSH-PET 技术实现.md`（§6.9 = 记忆系统）；
-> 记忆系统需求与修订台账 = `C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`。
+> 记忆系统需求与修订台账 = `C:\Users\beyondguo\whale598\docs\pet-memory-recall-requirements-v0.2.md`；
+> 决策/提案记录（为什么这么定、放弃了什么）= [notes/](notes/README.md)（Agent Notes，2026-11-17 起建）。
 
 ## 1. 三仓结构（最重要）
 
@@ -103,6 +104,7 @@ python -I -c "import json; d=json.load(open('meta.json',encoding='utf-8')); prin
 ## 6. 提交约定
 
 - Conventional commits，中文 subject 常见：`feat(pet): …`、`fix(pet): …`、`chore(release): X.Y.Z`（这个只能由 release.mjs 产生）。
+- 实质性决策（新能力、行为决策、根因收口、流程纪律）在**同一提交**里写或更新 `notes/` 下的 Agent Note——骨架/生命周期/机械转正规则见 [notes/README.md](notes/README.md)；commit message 保持一行，长理由搬进 note（message 尾部指路）。
 - pre-commit 是 lefthook：oxlint（`scripts/run-oxlint.ts --config .oxlintrc.staged.json`，带 `--fix`）+ whitespace 检查 + vendor manifest guard。**lint --fix 会让第一次 commit 失败**——`git add -A` 再 commit 一次即可；whitespace 失败优先怀疑行尾。
 - 单仓提交前跑一遍 `vitest run`；动了 src 就重建 lib。
 
